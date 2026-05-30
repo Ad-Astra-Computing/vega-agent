@@ -1,0 +1,42 @@
+name: "Vega cache"
+description: "Build a Nix flake and attest its outputs to the Vega binary cache."
+author: "Ad Astra Computing"
+
+inputs:
+  installable:
+    description: "Nix installable to build (default: the flake's default outputs)."
+    required: false
+    default: ".#"
+  control-plane:
+    description: "Base URL of the vega control plane (e.g. https://api.vega.io)."
+    required: true
+  audience:
+    description: "OIDC audience to request (defaults to control-plane)."
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install Nix
+      uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+    - name: Set up Node
+      uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      with:
+        node-version: "24"
+    - name: Install agent deps
+      shell: bash
+      working-directory: ${{ github.action_path }}/..
+      run: npm ci
+    - name: Build and publish to vega cache
+      shell: bash
+      working-directory: ${{ github.action_path }}/..
+      # ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN are injected because the calling
+      # workflow must grant `permissions: id-token: write`.
+      # Pass inputs via the environment, never inlined into the script: a value
+      # like `.#x"; curl ... #` interpolated into `run:` would be shell injection.
+      env:
+        VEGA_URL: ${{ inputs.control-plane }}
+        VEGA_AUDIENCE: ${{ inputs.audience }}
+        VEGA_INSTALLABLE: ${{ inputs.installable }}
+      run: node_modules/.bin/tsx agent/main.ts "$VEGA_INSTALLABLE"

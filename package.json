@@ -1,0 +1,23 @@
+{
+  "name": "vega-agent",
+  "version": "0.1.0",
+  "description": "Build, attest, and independently reproduce Nix derivations for the Vega binary cache.",
+  "license": "BSD-3-Clause",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@noble/hashes": "^2.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.4",
+    "tsx": "^4.22.3",
+    "typescript": "^5.7.2",
+    "vitest": "^3.2.4"
+  }
+}

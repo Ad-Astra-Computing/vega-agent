@@ -1,0 +1,13 @@
+version: 2
+updates:
+  # Keep the one runtime dependency current.
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+  # Bump the SHA-pinned actions (in the workflows and the composite action) so
+  # pinning stays secure without going stale.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
