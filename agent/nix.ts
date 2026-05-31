@@ -95,7 +95,8 @@ export async function makeNar(
   const file = join(outDir, `${storePathHash(path)}.nar.zst`);
   await dumpCompressed(path, file);
   const { size } = await stat(file);
-  const fileHash = await toNarinfoHash(await nixHashFile(file));
+  // nixHashFile returns the bare nixbase32 digest; narinfo wants `sha256:<...>`.
+  const fileHash = `sha256:${await nixHashFile(file)}`;
   // Content-address the NAR by its compressed hash so divergent builds of the
   // same store path never collide on one R2 key (and identical builds dedupe).
   const b32 = fileHash.slice("sha256:".length);
@@ -124,15 +125,16 @@ function dumpCompressed(path: string, file: string): Promise<void> {
   });
 }
 
-/** Hash a file with sha256; returns whatever form nix emits (normalized later). */
+/** Hash a file with sha256, returning the bare nixbase32 digest. */
 async function nixHashFile(file: string): Promise<string> {
+  // `nix hash file` takes `--type`/`--base32` (NOT the `--hash-algo`/`--to` of
+  // `nix hash convert`); `--base32` emits the bare nixbase32 digest.
   const { stdout } = await exec("nix", [
     "hash",
     "file",
-    "--hash-algo",
+    "--type",
     "sha256",
-    "--to",
-    "nix32",
+    "--base32",
     "--",
     file,
   ]);
