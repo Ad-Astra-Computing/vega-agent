@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { fetchActionsOidcToken } from "../src/agent/oidc.js";
 import { ControlPlaneClient } from "../src/agent/client.js";
 import { buildAttestBody } from "../src/agent/narinfo.js";
+import { partitionByUpstream } from "../src/agent/upstream.js";
 import { nixBuild, pathInfoClosure, pathInfoOutputs, makeNar } from "./nix.js";
 
 function requireEnv(name: string): string {
@@ -56,9 +57,24 @@ async function main(): Promise<void> {
   console.log(`Building ${installable} ...`);
   await nixBuild(installable);
 
-  const paths = await pathInfoClosure(installable);
+  const closure = await pathInfoClosure(installable);
   const topPaths = new Set((await pathInfoOutputs(installable)).map((o) => o.path));
-  console.log(`Closure has ${paths.length} path(s).`);
+  console.log(`Closure has ${closure.length} path(s).`);
+
+  // Cache mode: skip paths the upstream cache already serves, so we upload only
+  // genuinely novel paths (your own builds), not the stock nixpkgs closure.
+  // Off by default, so attestation/reproducibility runs still cover the closure.
+  let paths = closure;
+  if (process.env.VEGA_SKIP_UPSTREAM === "true") {
+    const upstreamUrl = process.env.VEGA_UPSTREAM || "https://cache.nixos.org";
+    const { novel, upstream } = await partitionByUpstream(
+      closure.map((p) => p.path),
+      upstreamUrl,
+    );
+    const novelSet = new Set(novel);
+    paths = closure.filter((p) => novelSet.has(p.path));
+    console.log(`Skipping ${upstream.length} path(s) already in ${upstreamUrl}; pushing ${paths.length} novel.`);
+  }
 
   const work = await mkdtemp(join(tmpdir(), "vega-agent-"));
   let promoted = 0;
