@@ -11,6 +11,40 @@ enforces that is separate; it is documented at https://docs.vega-cache.dev. This
 repository is public on purpose: the code that builds and attests should be
 auditable by anyone who relies on the result.
 
+## The `vega` CLI
+
+`vega` is the command line for the cache: enroll a machine, push your local
+builds to your own namespace, and manage who your machines trust. Run it with
+Nix, no clone needed:
+
+```
+nix run github:Ad-Astra-Computing/vega-agent#vega -- login
+nix profile install github:Ad-Astra-Computing/vega-agent#vega   # or install it
+```
+
+Or add it as a flake input and reference `vega.packages.${system}.default`:
+
+```nix
+inputs.vega.url = "github:Ad-Astra-Computing/vega-agent";
+```
+
+Quickstart:
+
+```
+vega login                  # enroll this machine (GitHub device flow)
+vega push .#my-package      # build locally, upload novel paths to your namespace
+vega view                   # print the nix.conf substituter + keys for your view
+vega trust add github:alice # trust another builder (scoped, revocable)
+vega status                 # auth + connectivity
+vega doctor                 # diagnose nix / zstd / auth
+```
+
+Full command set: `login`, `logout`, `whoami`, `status`, `doctor`, `push`,
+`trust` (`add`/`remove`/`list`), `view`; run `vega <command> --help` for details.
+The GitHub token from `login` is used once and never stored; only a short-lived
+Vega credential is kept (`~/.config/vega/credential`, mode 0600), and the control
+plane is required to be https.
+
 ## Layout
 
 - `agent/` holds the Node CLIs and a composite GitHub Action.
@@ -64,13 +98,15 @@ ephemeral, per-job-isolated runners, never a long-lived host.
 ## Run with Nix
 
 ```
-nix run github:Ad-Astra-Computing/vega-agent#attest      # build and attest
-nix run github:Ad-Astra-Computing/vega-agent#reproduce   # reproduce and attest
+nix run github:Ad-Astra-Computing/vega-agent            # the vega CLI (default)
+nix run github:Ad-Astra-Computing/vega-agent#vega -- login
+nix run github:Ad-Astra-Computing/vega-agent#attest      # build and attest (CI)
+nix run github:Ad-Astra-Computing/vega-agent#reproduce   # reproduce and attest (CI)
 nix develop                                              # a shell with node and zstd
 ```
 
-Both apps read their inputs from the environment, the same variables the GitHub
-Action and the reproduce workflow set.
+The `attest` and `reproduce` apps read their inputs from the environment, the
+same variables the GitHub Action and the reproduce workflow set.
 
 ## Development
 
