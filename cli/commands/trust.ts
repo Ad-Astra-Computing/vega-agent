@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import { createInterface } from "node:readline/promises";
 import pc from "picocolors";
-import { requireCredential, authHeaders, type StoredCredential } from "../context.js";
+import { requireCredential, authHeaders, safeError, type StoredCredential } from "../context.js";
 import { star, info, success, fail, jsonEvent, isTTY } from "../ui.js";
 
 type Scope = { kind: "all" } | { kind: "package"; name: string };
@@ -44,7 +44,7 @@ async function postTrust(cred: StoredCredential, path: string, builder: string, 
     headers: authHeaders(cred),
     body: JSON.stringify({ builder, scope }),
   });
-  if (!res.ok) fail(`${path} failed: ${res.status} ${await res.text()}`);
+  if (!res.ok) fail(`${path} failed (${await safeError(res)})`);
 }
 
 export function registerTrust(program: Command): void {
@@ -92,7 +92,7 @@ export function registerTrust(program: Command): void {
     .action(async (opts: { json?: boolean }) => {
       const cred = await requireCredential();
       const res = await fetch(`${cred.url}/api/trust`, { headers: authHeaders(cred) });
-      if (!res.ok) fail(`list failed: ${res.status} ${await res.text()}`);
+      if (!res.ok) fail(`list failed (${await safeError(res)})`);
       const { edges } = (await res.json()) as {
         edges: { builder: string; scope: Scope; revokedAt?: number }[];
       };

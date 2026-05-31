@@ -83,7 +83,9 @@ export class ControlPlaneClient {
       headers: { ...this.authHeaders, "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-    if (!res.ok) throw new Error(`push failed: ${res.status} ${await res.text()}`);
+    // Status only: never echo the response body of an authenticated request
+    // (a hostile/buggy server could reflect the credential header into it).
+    if (!res.ok) throw new Error(`push failed: ${res.status}`);
     return (await res.json()) as PushResult;
   }
 }

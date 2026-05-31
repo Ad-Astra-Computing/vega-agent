@@ -5,12 +5,52 @@
 // need no decode or round-trip) and the control-plane URL it was issued against
 // (so a staging credential can't silently target prod).
 
-import { readFile, mkdir, writeFile, rm } from "node:fs/promises";
+import { readFile, mkdir, writeFile, rm, chmod } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fail } from "./ui.js";
 
 export const DEFAULT_CONTROL_PLANE = "https://vega-cache.dev";
+
+/**
+ * Validate and normalize a control-plane URL. Credentials and the GitHub token
+ * are sent here, so it MUST be https (the only exception is an explicit local
+ * dev host). Reconstructing from origin+path also drops any query/userinfo.
+ */
+/** Normalize+validate, or null if invalid/non-https (non-local). Never fails. */
+export function parseControlPlane(url: string): string | null {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  const isLocal = u.hostname === "localhost" || u.hostname === "127.0.0.1";
+  if (u.protocol !== "https:" && !isLocal) return null;
+  return `${u.protocol}//${u.host}${u.pathname}`.replace(/\/$/, "");
+}
+
+export function assertSafeControlPlane(url: string): string {
+  const normalized = parseControlPlane(url);
+  if (normalized === null) {
+    fail(`control plane must be a valid https URL (got '${url}'); refusing to send credentials over plaintext.`);
+  }
+  return normalized;
+}
+
+/** A bounded, safe error string from a response: status plus a JSON `error`
+ * field if present, NEVER the raw body (which a hostile/buggy server could
+ * populate with echoed auth headers). */
+export async function safeError(res: Response): Promise<string> {
+  let detail = "";
+  try {
+    const body = (await res.json()) as { error?: unknown };
+    if (typeof body.error === "string") detail = `: ${body.error.slice(0, 200)}`;
+  } catch {
+    /* non-JSON body: status alone */
+  }
+  return `${res.status}${detail}`;
+}
 
 export interface StoredCredential {
   credential: string;
@@ -31,12 +71,16 @@ export function credentialPath(): string {
 
 /** Where `vega login` should enroll: explicit flag, else env, else prod. */
 export function controlPlaneFor(flag?: string): string {
-  return (flag || process.env.VEGA_URL || DEFAULT_CONTROL_PLANE).replace(/\/$/, "");
+  return assertSafeControlPlane(flag || process.env.VEGA_URL || DEFAULT_CONTROL_PLANE);
 }
 
 export async function saveCredential(cred: StoredCredential): Promise<void> {
   await mkdir(configDir(), { recursive: true });
-  await writeFile(credentialPath(), `${JSON.stringify(cred, null, 2)}\n`, { mode: 0o600 });
+  const path = credentialPath();
+  await writeFile(path, `${JSON.stringify(cred, null, 2)}\n`, { mode: 0o600 });
+  // writeFile's mode only applies on create; enforce 0600 on overwrite too, so a
+  // pre-existing world-readable credential file is tightened on re-login.
+  await chmod(path, 0o600);
 }
 
 export async function clearCredential(): Promise<boolean> {
@@ -69,6 +113,9 @@ export async function requireCredential(): Promise<StoredCredential> {
   if (typeof cred.credential !== "string" || typeof cred.url !== "string") {
     fail(`malformed credential at ${credentialPath()}.`, ["vega login"]);
   }
+  // The stored host must still be a valid https control plane (guards a stale or
+  // tampered credential pointing at a plaintext/garbage URL).
+  cred.url = assertSafeControlPlane(cred.url);
   if (cred.expiresAt && cred.expiresAt < Date.now()) {
     fail(`credential expired ${new Date(cred.expiresAt).toISOString().slice(0, 10)}.`, ["vega login"]);
   }
@@ -84,7 +131,7 @@ export function authHeaders(cred: StoredCredential): Record<string, string> {
 export async function loadCredentialMaybe(): Promise<StoredCredential | null> {
   try {
     const cred = JSON.parse(await readFile(credentialPath(), "utf8")) as StoredCredential;
-    if (typeof cred.credential === "string" && typeof cred.url === "string") return cred;
+    if (typeof cred.credential === "string" && parseControlPlane(cred.url) !== null) return cred;
   } catch {
     /* absent or malformed */
   }

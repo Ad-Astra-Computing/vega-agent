@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import pc from "picocolors";
-import { requireCredential, authHeaders } from "../context.js";
+import { requireCredential, authHeaders, safeError } from "../context.js";
 import { star, info, fail, jsonEvent } from "../ui.js";
 
 interface ViewToken {
@@ -13,6 +13,23 @@ interface ViewToken {
 const NIXOS_CACHE = "https://cache.nixos.org";
 const NIXOS_KEY = "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=";
 
+// A Nix trusted-public-key: `<name>:<base64>`, no whitespace or control chars.
+const NIX_KEY = /^[A-Za-z0-9._-]+:[A-Za-z0-9+/]+=*$/;
+// The substituter path the server returns is always `/u/<token>`.
+const VIEW_PATH = /^\/u\/[A-Za-z0-9_-]+$/;
+
+/** Reject a control-plane response that could inject extra nix.conf lines. */
+function validateView(v: ViewToken): void {
+  if (typeof v.substituter !== "string" || !VIEW_PATH.test(v.substituter)) {
+    fail("control plane returned an unexpected substituter path; refusing to print config.");
+  }
+  for (const k of [v.publicKey, v.sharedKey]) {
+    if (typeof k !== "string" || !NIX_KEY.test(k)) {
+      fail("control plane returned a malformed public key; refusing to print config.");
+    }
+  }
+}
+
 export function registerView(program: Command): void {
   program
     .command("view")
@@ -24,8 +41,9 @@ export function registerView(program: Command): void {
         method: "POST",
         headers: authHeaders(cred),
       });
-      if (!res.ok) fail(`could not get your view: ${res.status} ${await res.text()}`);
+      if (!res.ok) fail(`could not get your view (${await safeError(res)})`);
       const v = (await res.json()) as ViewToken;
+      validateView(v);
       const base = `${cred.url}${v.substituter}`;
       const substituters = `${base} ${NIXOS_CACHE}`;
       const keys = `${v.publicKey} ${v.sharedKey} ${NIXOS_KEY}`;

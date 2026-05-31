@@ -5,7 +5,7 @@ import {
   pollAccessToken,
   VEGA_GITHUB_CLIENT_ID,
 } from "../../src/agent/device-flow.js";
-import { controlPlaneFor, saveCredential, credentialPath } from "../context.js";
+import { controlPlaneFor, saveCredential, credentialPath, safeError } from "../context.js";
 import { success, info, keyValues, fail } from "../ui.js";
 
 function sleep(ms: number): Promise<void> {
@@ -46,7 +46,7 @@ export function registerLogin(program: Command): void {
         method: "POST",
         headers: { authorization: `Bearer ${ghToken}` },
       });
-      if (!res.ok) fail(`enrollment failed: ${res.status} ${await res.text()}`);
+      if (!res.ok) fail(`enrollment failed (${await safeError(res)})`);
       const body = (await res.json()) as {
         credential: string;
         login: string;
