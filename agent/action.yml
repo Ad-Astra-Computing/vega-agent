@@ -1,6 +1,6 @@
-name: "Vega cache"
-description: "Build a Nix flake and attest its outputs to the Vega binary cache."
-author: "Ad Astra Computing"
+name: "vega edge cache"
+description: "Build a flake and publish its outputs to the vega edge binary cache."
+author: "vega"
 
 inputs:
   installable:
@@ -14,6 +14,10 @@ inputs:
     description: "OIDC audience to request (defaults to control-plane)."
     required: false
     default: ""
+  skip-upstream:
+    description: "Cache mode: skip closure paths the upstream cache already has, uploading only novel paths."
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -39,4 +43,5 @@ runs:
         VEGA_URL: ${{ inputs.control-plane }}
         VEGA_AUDIENCE: ${{ inputs.audience }}
         VEGA_INSTALLABLE: ${{ inputs.installable }}
+        VEGA_SKIP_UPSTREAM: ${{ inputs.skip-upstream }}
       run: node_modules/.bin/tsx agent/main.ts "$VEGA_INSTALLABLE"
