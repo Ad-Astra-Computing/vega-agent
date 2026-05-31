@@ -31,7 +31,7 @@
             installPhase = ''
               runHook preInstall
               mkdir -p "$out/lib/vega-agent" "$out/bin"
-              cp -r agent src package.json node_modules "$out/lib/vega-agent/"
+              cp -r agent cli src package.json node_modules "$out/lib/vega-agent/"
               for pair in attest:main reproduce:reproduce; do
                 bin="vega-''${pair%%:*}"
                 src="agent/''${pair##*:}.ts"
@@ -40,6 +40,12 @@
                   --chdir "$out/lib/vega-agent" \
                   --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.zstd ]}
               done
+              # The user-facing `vega` CLI. zstd is on PATH so `vega push` can
+              # compress NARs out of the box; the user's own `nix` is inherited.
+              makeWrapper ${pkgs.nodejs}/bin/node "$out/bin/vega" \
+                --add-flags "--import tsx $out/lib/vega-agent/cli/main.ts" \
+                --chdir "$out/lib/vega-agent" \
+                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.zstd ]}
               runHook postInstall
             '';
           });
@@ -63,6 +69,10 @@
           reproduce = {
             type = "app";
             program = "${p}/bin/vega-reproduce";
+          };
+          vega = {
+            type = "app";
+            program = "${p}/bin/vega";
           };
           default = {
             type = "app";

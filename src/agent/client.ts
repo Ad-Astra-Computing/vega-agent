@@ -70,4 +70,27 @@ export class ControlPlaneClient {
     if (!res.ok) throw new Error(`attest failed: ${res.status}`);
     return (await res.json()) as AttestResult;
   }
+
+  /**
+   * Owner local push (`vega push`): publish an uploaded NAR into the owner's
+   * own namespace. The bearer here is an owner credential, not an OIDC token.
+   * Unlike `attest`, this produces no shared-tier evidence; the server derives
+   * the namespace from the verified credential, never from the client.
+   */
+  async push(body: AttestBody): Promise<PushResult> {
+    const res = await this.fetchImpl(`${this.baseUrl}/api/cache/push`, {
+      method: "POST",
+      headers: { ...this.authHeaders, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`push failed: ${res.status} ${await res.text()}`);
+    return (await res.json()) as PushResult;
+  }
+}
+
+/** The push endpoint's response: the owner namespace the NAR landed in. */
+export interface PushResult {
+  published: boolean;
+  tenant: string;
+  substituter: string;
 }
