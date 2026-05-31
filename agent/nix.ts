@@ -35,11 +35,36 @@ async function toNarinfoHash(hash: string): Promise<string> {
   return out.startsWith("sha256:") ? out : `sha256:${out}`;
 }
 
-/** Build an installable, returning nothing (throws on failure). */
-export async function nixBuild(installable: string): Promise<void> {
-  // `--` terminates option parsing: the installable is attacker-controlled, so
-  // a value like `--store ...` must not be read by nix as a flag.
-  await exec("nix", ["build", "--no-link", "--", installable], { maxBuffer: MAX_BUFFER });
+/** Default build timeout (ms); a hung build fails the job instead of idling. */
+const BUILD_TIMEOUT_MS = Number(process.env.VEGA_BUILD_TIMEOUT_MS) || 60 * 60 * 1000;
+
+/**
+ * Build an installable, STREAMING nix's build logs to stderr so CI shows live
+ * progress (a buffered exec would make a long build look hung). Throws on a
+ * non-zero exit or if the build exceeds the timeout.
+ */
+export function nixBuild(installable: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    // `--` terminates option parsing (installable is attacker-controlled, so a
+    // value like `--store ...` must not be read as a flag). `-L` prints build
+    // logs so progress is visible; inherit stderr so they reach the CI console.
+    const child = spawn("nix", ["build", "--no-link", "-L", "--", installable], {
+      stdio: ["ignore", "ignore", "inherit"],
+    });
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      reject(new Error(`nix build timed out after ${Math.round(BUILD_TIMEOUT_MS / 60000)}m`));
+    }, BUILD_TIMEOUT_MS);
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(`nix build exited with code ${code}`));
+    });
+  });
 }
 
 /** `nix path-info --json --recursive` over the closure of an installable. */
@@ -113,7 +138,10 @@ export async function makeNar(
 function dumpCompressed(path: string, file: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const dump = spawn("nix", ["store", "dump-path", "--", path]);
-    const zstd = spawn("zstd", ["-19", "-c"]);
+    // Level 8, not 19: R2 egress is free and storage is cheap, so trading a little
+    // ratio for much faster compression is the right call. Single-threaded so the
+    // per-path pipeline can run several paths in parallel without core contention.
+    const zstd = spawn("zstd", ["-8", "-c"]);
     const out = createWriteStream(file);
     dump.stdout.pipe(zstd.stdin);
     zstd.stdout.pipe(out);

@@ -18,6 +18,7 @@ import { fetchActionsOidcToken } from "../src/agent/oidc.js";
 import { ControlPlaneClient } from "../src/agent/client.js";
 import { buildAttestBody } from "../src/agent/narinfo.js";
 import { partitionByUpstream } from "../src/agent/upstream.js";
+import { mapConcurrent } from "../src/agent/concurrency.js";
 import { parseVegaConfig, type VegaConfig } from "../src/agent/config.js";
 import { resolveBuilds } from "../src/agent/builds.js";
 import { nixBuild, pathInfoClosure, pathInfoOutputs, makeNar } from "./nix.js";
@@ -72,22 +73,25 @@ async function cacheBuild(
     console.log(`Skipping ${upstream.length} path(s) in ${opts.upstreamUrl}; pushing ${paths.length} novel.`);
   }
 
-  let promoted = 0;
-  for (const info of paths) {
+  // Compress + upload + attest each path with bounded concurrency, so a large
+  // closure's paths overlap instead of running strictly one at a time. Modest
+  // by default since each task reads its NAR into memory before the PUT.
+  const concurrency = Number(process.env.VEGA_UPLOAD_CONCURRENCY) || 4;
+  const shared = await mapConcurrent(paths, concurrency, async (info) => {
     const nar = await makeNar(info.path, opts.work);
     const uploadUrl = await client.uploadUrl(nar.url);
     await client.putNar(uploadUrl, await readFile(nar.file));
     const outputAttr = topPaths.has(info.path) ? attr : "";
     const result = await client.attest(buildAttestBody(info, nar, outputAttr));
-    if (result.publishedShared) promoted++;
     const tag = result.publishedShared
       ? "[shared]   "
       : result.publishedTenant
         ? "[tenant]   "
         : "[pending]  ";
     console.log(`${tag} ${info.path} (${result.decision.shared.reason})`);
-  }
-  return { promoted, total: paths.length };
+    return result.publishedShared;
+  });
+  return { promoted: shared.filter(Boolean).length, total: paths.length };
 }
 
 async function main(): Promise<void> {
