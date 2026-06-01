@@ -56,6 +56,8 @@ setup_nix() {
       echo "experimental-features = nix-command flakes"
       echo "sandbox = ${VEGA_NIX_SANDBOX:-false}"
       echo "max-jobs = auto"
+      # Single-user nix in the container: no nixbld build users / group.
+      echo "build-users-group ="
       echo "substituters = https://cache.nixos.org ${VEGA_EXTRA_SUBSTITUTERS:-}"
       echo "trusted-public-keys = ${NIXOS_CACHE_KEY} ${VEGA_EXTRA_TRUSTED_PUBLIC_KEYS:-}"
     } > /etc/nix/nix.conf
