@@ -84,8 +84,11 @@ run_runner() {
   # The token value (if any) is now captured in $token. Drop the env var and any
   # file it came from immediately, before any branch, so neither the PAT fallback
   # nor run.sh can ever see a leftover registration credential, even when the file
-  # was set but empty.
-  [ -n "${GITHUB_RUNNER_TOKEN_FILE:-}" ] && rm -f "$GITHUB_RUNNER_TOKEN_FILE"
+  # was set but empty. The rm is best-effort: a read-only secret mount cannot be
+  # unlinked from inside the container, and that must not abort the runner (the
+  # env var is still cleared, and a read-only mount's lifecycle is the
+  # orchestrator's, not ours).
+  if [ -n "${GITHUB_RUNNER_TOKEN_FILE:-}" ]; then rm -f "$GITHUB_RUNNER_TOKEN_FILE" 2>/dev/null || true; fi
   unset GITHUB_RUNNER_TOKEN GITHUB_RUNNER_TOKEN_FILE
   if [ -z "$token" ]; then
     # FALLBACK (trusted local runner only): mint inside the container from a PAT.
@@ -94,8 +97,8 @@ run_runner() {
     local pat; pat="$(read_secret GITHUB_PAT)"
     # Remove the file-backed PAT as soon as it is read, before any exit path, so
     # a file-mounted credential never outlives this step into the job (the runner
-    # runs as root). Mirrors the GITHUB_RUNNER_TOKEN_FILE handling above.
-    [ -n "${GITHUB_PAT_FILE:-}" ] && rm -f "$GITHUB_PAT_FILE"
+    # runs as root). Best-effort, same as the runner-token file above.
+    if [ -n "${GITHUB_PAT_FILE:-}" ]; then rm -f "$GITHUB_PAT_FILE" 2>/dev/null || true; fi
     [ -n "$pat" ] || {
       echo "vega-builder: pass GITHUB_RUNNER_TOKEN (preferred: mint it in your supervisor with gh or a GitHub App) or, for a trusted local runner only, GITHUB_PAT" >&2
       exit 1
