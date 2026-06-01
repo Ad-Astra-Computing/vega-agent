@@ -4,6 +4,8 @@ All notable changes to the Vega agent and the `vega` CLI are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
 ## [0.2.0] - 2026-06-01
 
 ### Added
@@ -35,4 +37,5 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
   bodies, and stdin frames. Reviewed against the OWASP Top 10 for LLM
   Applications and the MCP security guidance.
 
+[Unreleased]: https://github.com/Ad-Astra-Computing/vega-agent/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/Ad-Astra-Computing/vega-agent/releases/tag/v0.2.0

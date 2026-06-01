@@ -12,6 +12,7 @@
 
 import { verifyTool, riskTool, isError, type ToolContext } from "./tools.js";
 import { untrusted } from "./sanitize.js";
+import { VERSION } from "../version.js";
 
 const PROTOCOL_VERSION = "2025-06-18";
 const MAX_FRAME = 8 * 1024 * 1024; // reject a stdin line larger than this
@@ -78,7 +79,7 @@ export async function handleRpc(ctx: ToolContext, req: Rpc): Promise<object | nu
         return ok({
           protocolVersion: PROTOCOL_VERSION,
           capabilities: { tools: {} },
-          serverInfo: { name: "vega", version: "0.1.0" },
+          serverInfo: { name: "vega", version: VERSION },
         });
       case "ping":
         return ok({});
