@@ -11,18 +11,22 @@ This is Phase 1 (runner mode).
 ## Pull from GHCR
 
 The image is published per release and signed with cosign (keyless, via the
-release workflow's OIDC identity):
+release workflow's OIDC identity). Pull it, resolve it to an immutable digest,
+verify that digest, and run the digest, so what you run is exactly what you
+verified (a tag like `:latest` can move between verify and run):
 
 ```
 docker pull ghcr.io/ad-astra-computing/vega-builder:latest
-cosign verify ghcr.io/ad-astra-computing/vega-builder:latest \
+DIGEST=$(docker inspect --format '{{index .RepoDigests 0}}' \
+  ghcr.io/ad-astra-computing/vega-builder:latest)
+cosign verify "$DIGEST" \
   --certificate-identity-regexp '^https://github\.com/Ad-Astra-Computing/vega-agent/\.github/workflows/publish-builder-image\.yml@refs/tags/[^/]+$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
 The identity regex pins the signer to this repo's publish workflow on a release
 tag, so a signature minted by any other workflow, repo, or a branch build will
-not verify.
+not verify. Keep `$DIGEST` for the run step below (same shell).
 
 ## Build from source
 
@@ -58,8 +62,7 @@ cid=$(docker create --restart=unless-stopped --name vega-runner \
   -e GITHUB_REPOSITORY=nixos-configs \
   -e GITHUB_RUNNER_TOKEN_FILE=/home/runner/.runner-token \
   -e GITHUB_RUNNER_LABELS=self-hosted,vega-perdurabo \
-  -v vega-nix:/nix \
-  ghcr.io/ad-astra-computing/vega-builder:latest)
+  "$DIGEST")
 docker cp "$TOKEN_FILE" "$cid:/home/runner/.runner-token"
 rm -f "$TOKEN_FILE"   # host copy gone; the entrypoint deletes the in-container
 docker start "$cid"   # copy after reading it, before run.sh accepts jobs
@@ -86,13 +89,25 @@ Notes:
   own host, and it does not assume systemd or Nix). Set `VEGA_RUNNER_EPHEMERAL=true`
   for one-job-then-exit (the model for the untrusted donate fleet, where a
   supervisor recreates the container per job).
-- Set a stable, unique `GITHUB_RUNNER_NAME` (it defaults to `vega-<repo>`).
-  `--replace` lets a restart reclaim the same-named registration, so you do not
-  accumulate stale offline runners. Stopping the container leaves it registered
-  offline until the next start reclaims it (or remove it with `gh api --method
-  DELETE repos/<o>/<r>/actions/runners/<id>`).
-- `-v vega-nix:/nix` persists the Nix store across restarts, so the toolchain and
-  prior builds are not re-fetched. Reclaim space later with `nix store gc`.
+- **Restart vs recreate.** A plain restart (`--restart=unless-stopped`, a reboot,
+  `docker restart`) reuses the saved registration in the container's writable
+  layer and needs **no** new token, so it never crash-loops on the consumed
+  one-shot token. Only *recreating* the container (e.g. updating the image) starts
+  a fresh layer and re-registers, which needs a fresh token. Set a stable, unique
+  `GITHUB_RUNNER_NAME` (defaults to `vega-<repo>`); on a recreate `--replace`
+  reclaims the same-named registration so you do not accumulate stale offline
+  runners. Remove a runner explicitly with `gh api --method DELETE
+  repos/<o>/<r>/actions/runners/<id>`.
+- The Nix store persists across restarts in the container's own layer, so a
+  long-lived runner does not re-fetch. Do **not** mount a named volume over
+  `/nix` (`-v vega-nix:/nix`): the image bakes its toolchain into `/nix/store`,
+  and a volume masks it with the volume's own (possibly older) contents. Docker
+  seeds a named volume from the image only when the volume is empty, so a new
+  image's store paths are never added to an existing volume, leaving the runner's
+  baked entrypoint and tools as dangling symlinks. If you want a store that
+  survives container *recreation*, you must `docker volume rm` it whenever you
+  update the image; the safer default is no `/nix` volume, with `reuse-cache`
+  substituting prior builds from your tenant.
 - Nix's build sandbox is OFF by default because Docker blocks it without
   privilege. For a TRUSTED own-repo runner, run `--privileged` with
   `-e VEGA_NIX_SANDBOX=true` to get the real sandbox. This is required for any

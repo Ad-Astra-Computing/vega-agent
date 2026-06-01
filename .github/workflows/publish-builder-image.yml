@@ -56,6 +56,11 @@ jobs:
           loaded=$(docker load < result | sed -n 's/^Loaded image: //p' | head -1)
           test -n "$loaded" # fail loudly if the load output format changed
           version="${loaded##*:}"
+          # The built image version must match the release tag, so a release can
+          # never publish/sign a stale version or move :latest to the wrong image
+          # (e.g. tagging v0.3.0 while flake.nix still says 0.2.0).
+          test "${{ github.ref_name }}" = "v${version}" \
+            || { echo "release tag ${{ github.ref_name }} != image v${version}; bump flake.nix" >&2; exit 1; }
           docker tag "$loaded" "${image}:${version}"
           docker tag "$loaded" "${image}:latest"
           echo "image=${image}" >> "$GITHUB_OUTPUT"
