@@ -17,6 +17,12 @@ export interface AttestBody {
    * OIDC-proven flake ref and commit to record reproducible provenance.
    */
   attr?: string;
+  /**
+   * The builder opted out of publishing their continent (privacy.continent=false
+   * in vega.yaml). When set, the control plane records the attestation's
+   * continent as unknown rather than deriving it from the request.
+   */
+  noContinent?: boolean;
 }
 
 /** The attest endpoint's response: the full promotion decision plus what was published. */

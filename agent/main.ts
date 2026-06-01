@@ -52,6 +52,8 @@ interface CacheOpts {
   /** Extra substituters (Vega's own tenant cache) so cold builds reuse prior pushes. */
   substituters?: string[];
   trustedKeys?: string[];
+  /** Builder opted out of publishing continent (privacy.continent=false). */
+  noContinent?: boolean;
 }
 
 /** Build one installable and upload+attest its (optionally novel-only) closure. */
@@ -88,7 +90,9 @@ async function cacheBuild(
     const uploadUrl = await client.uploadUrl(nar.url);
     await client.putNar(uploadUrl, await readFile(nar.file));
     const outputAttr = topPaths.has(info.path) ? attr : "";
-    const result = await client.attest(buildAttestBody(info, nar, outputAttr));
+    const result = await client.attest(
+      buildAttestBody(info, nar, outputAttr, { noContinent: opts.noContinent }),
+    );
     const tag = result.publishedShared
       ? "[shared]   "
       : result.publishedTenant
@@ -138,6 +142,9 @@ async function main(): Promise<void> {
     skipUpstream: process.env.VEGA_SKIP_UPSTREAM === "true",
     upstreamUrl: process.env.VEGA_UPSTREAM || "https://cache.nixos.org",
     work: await mkdtemp(join(tmpdir(), "vega-agent-")),
+    // Honor the vega.yaml opt-out: when continent publishing is off, tell the
+    // control plane not to derive/record this build's continent.
+    noContinent: config?.privacy.continent === false,
   };
 
   // Register Vega's own tenant cache as a substituter so a cold runner pulls

@@ -41,6 +41,7 @@ export function buildAttestBody(
   info: RawPathInfo,
   nar: NarArtifact,
   attr?: string,
+  opts: { noContinent?: boolean } = {},
 ): AttestBody {
   const body: AttestBody = {
     storePath: info.path,
@@ -54,5 +55,6 @@ export function buildAttestBody(
   };
   if (info.deriver) body.deriver = baseName(info.deriver);
   if (attr !== undefined && attr !== "") body.attr = attr;
+  if (opts.noContinent) body.noContinent = true;
   return body;
 }

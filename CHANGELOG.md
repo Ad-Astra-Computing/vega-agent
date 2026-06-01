@@ -20,6 +20,12 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
   dependencies from a trusted upstream cache (e.g. a project's Cachix) instead of
   building them from source.
 
+### Fixed
+
+- `privacy.continent: false` is now honored. The flag was parsed but never sent,
+  so the control plane always derived and stored a build's continent. The agent
+  now transmits the opt-out and the server records the continent as unknown.
+
 ## [0.2.0] - 2026-06-01
 
 ### Added
