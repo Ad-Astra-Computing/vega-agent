@@ -66,9 +66,12 @@ Notes:
 - `-v vega-nix:/nix` persists the Nix store across restarts, so the toolchain and
   prior builds are not re-fetched. Reclaim space later with `nix store gc`.
 - Nix's build sandbox is OFF by default because Docker blocks it without
-  privilege. If a build needs host-like sandbox isolation, run with `--privileged`
-  and `-e VEGA_NIX_SANDBOX=true`. Start without it; add it only if a build fails
-  in sandbox setup.
+  privilege. For a TRUSTED own-repo runner, run `--privileged` with
+  `-e VEGA_NIX_SANDBOX=true` to get the real sandbox. This is required for any
+  package that sets a setuid bit while unpacking (e.g. `google-chrome`'s
+  `chrome-sandbox`), which fails with "Operation not permitted" under
+  `sandbox=false`. Never use `--privileged` for the untrusted donate fleet; that
+  tier needs microVM isolation instead.
 - To pull heavy dependencies from a trusted upstream cache instead of building
   them, pass `-e VEGA_EXTRA_SUBSTITUTERS=...` and
   `-e VEGA_EXTRA_TRUSTED_PUBLIC_KEYS=...`.
