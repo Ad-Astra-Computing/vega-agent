@@ -3,6 +3,9 @@ import { fetchActionsOidcToken } from "../src/agent/oidc.js";
 import { ControlPlaneClient } from "../src/agent/client.js";
 import { buildAttestBody } from "../src/agent/narinfo.js";
 import { lockedInstallable } from "../src/agent/reproduce.js";
+import { partitionByUpstream } from "../src/agent/upstream.js";
+import { resolveBuilds } from "../src/agent/builds.js";
+import { parseVegaConfig } from "../src/agent/config.js";
 
 /** Minimal fake of fetch that records calls and returns scripted responses. */
 function fakeFetch(handler: (req: Request) => Response | Promise<Response>) {
@@ -93,6 +96,26 @@ describe("ControlPlaneClient", () => {
     });
     expect(result.decision.shared.promoted).toBe(true);
     expect(result.publishedShared).toBe(true);
+  });
+
+  it("posts an owner push to /api/cache/push and returns the namespace", async () => {
+    const { fn, calls } = fakeFetch(
+      () => new Response(JSON.stringify({ published: true, tenant: "owner:583231", substituter: "/tenant/owner:583231" })),
+    );
+    const client = new ControlPlaneClient(base, "owner-cred", fn);
+    const result = await client.push({
+      storePath: "/nix/store/p4pclmv1gyja5kzc26npqpia1qqxrf0l-ruby-2.7.3",
+      url: "nar/abc.nar.zst",
+      compression: "zstd",
+      fileHash: "sha256:aaa",
+      fileSize: 1,
+      narHash: "sha256:bbb",
+      narSize: 2,
+      references: [],
+    });
+    expect(calls[0]!.url).toBe(`${base}/api/cache/push`);
+    expect(calls[0]!.headers.get("authorization")).toBe("Bearer owner-cred");
+    expect(result.substituter).toBe("/tenant/owner:583231");
   });
 
   it("throws on a non-2xx response", async () => {
@@ -195,5 +218,83 @@ describe("lockedInstallable", () => {
     expect(() =>
       lockedInstallable({ flakeRef: "--store/ssh://evil", attr: "x", rev: "ddd" }),
     ).toThrow(/looks like a flag/);
+  });
+});
+
+describe("partitionByUpstream (skip-upstream caching)", () => {
+  const NOVEL = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-my-config";
+  const STOCK = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-glibc-2.40";
+
+  it("keeps only paths the upstream cache does not already have", async () => {
+    const fetchImpl = ((url: string) =>
+      Promise.resolve(new Response(null, { status: url.includes("bbbbbbbb") ? 200 : 404 }))) as unknown as typeof fetch;
+    const { novel, upstream } = await partitionByUpstream([NOVEL, STOCK], "https://cache.nixos.org", fetchImpl);
+    expect(novel).toEqual([NOVEL]);
+    expect(upstream).toEqual([STOCK]);
+  });
+
+  it("treats an upstream network error as novel (upload rather than drop)", async () => {
+    const fetchImpl = (() => Promise.reject(new Error("offline"))) as unknown as typeof fetch;
+    const { novel } = await partitionByUpstream([NOVEL], "https://cache.nixos.org", fetchImpl);
+    expect(novel).toEqual([NOVEL]);
+  });
+
+  it("preserves order and partitions every path under bounded concurrency", async () => {
+    // 200 paths, alternating upstream/novel, with jittered async resolution so a
+    // naive shared-index loop would reorder or drop entries if it were wrong.
+    const paths = Array.from(
+      { length: 200 },
+      (_, i) => `/nix/store/${String(i).padStart(32, "0")}-pkg-${i}`,
+    );
+    const upstreamSet = new Set(paths.filter((_, i) => i % 2 === 0));
+    const fetchImpl = ((url: string) =>
+      new Promise((resolve) =>
+        // resolve out of order: later requests sometimes finish first
+        setTimeout(
+          () => {
+            const hash = url.split("/").pop()!.replace(".narinfo", "");
+            const path = paths.find((p) => p.includes(hash.slice(0, 32)));
+            resolve(new Response(null, { status: path && upstreamSet.has(path) ? 200 : 404 }));
+          },
+          Math.floor((url.length * 7) % 5),
+        ),
+      )) as unknown as typeof fetch;
+    const { novel, upstream } = await partitionByUpstream(paths, "https://cache.nixos.org", fetchImpl, 8);
+    // Every path classified exactly once, order preserved within each bucket.
+    expect(novel.length + upstream.length).toBe(paths.length);
+    expect(upstream).toEqual(paths.filter((p) => upstreamSet.has(p)));
+    expect(novel).toEqual(paths.filter((p) => !upstreamSet.has(p)));
+  });
+
+  it("checks upstream even when concurrency is given as zero (clamps to >= 1)", async () => {
+    let calls = 0;
+    const fetchImpl = (() => {
+      calls++;
+      return Promise.resolve(new Response(null, { status: 200 }));
+    }) as unknown as typeof fetch;
+    const { upstream } = await partitionByUpstream([NOVEL, STOCK], "https://cache.nixos.org", fetchImpl, 0);
+    expect(calls).toBe(2); // not skipped: zero workers would have checked nothing
+    expect(upstream).toEqual([NOVEL, STOCK]);
+  });
+});
+
+describe("resolveBuilds (vega.yaml drives what is built)", () => {
+  it("falls back to the CLI installable when there is no vega.yaml", () => {
+    expect(resolveBuilds(null, "github:NixOS/nixpkgs#hello", "/repo")).toEqual([
+      { installable: "github:NixOS/nixpkgs#hello", attr: "hello" },
+    ]);
+  });
+
+  it("resolves one installable per declared build against the flake dir", () => {
+    const cfg = parseVegaConfig({
+      builds: ["packages.x86_64-linux.mytool", { attr: "nixosConfigurations.h.config.system.build.toplevel" }],
+    });
+    expect(resolveBuilds(cfg, ".#", "/home/runner/work/repo/repo/")).toEqual([
+      { installable: "/home/runner/work/repo/repo#packages.x86_64-linux.mytool", attr: "packages.x86_64-linux.mytool" },
+      {
+        installable: "/home/runner/work/repo/repo#nixosConfigurations.h.config.system.build.toplevel",
+        attr: "nixosConfigurations.h.config.system.build.toplevel",
+      },
+    ]);
   });
 });

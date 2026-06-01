@@ -12,3 +12,17 @@ export function storePathHash(path: StorePath): string {
   if (m === null) throw new Error(`not a /nix/store path: ${path}`);
   return m[1]!;
 }
+
+const STORE_PATH_NAME = /^\/nix\/store\/[0-9abcdfghijklmnpqrsvwxyz]{32}-([^/\n]+)$/;
+
+/**
+ * Extract the name component of a store path: everything after the
+ * `<hash>-` prefix (e.g. `hello-2.12.1`). Build-trust scopes match against this
+ * name, so a consumer can trust a builder for `hello` without trusting them for
+ * everything they publish.
+ */
+export function storePathName(path: StorePath): string {
+  const m = STORE_PATH_NAME.exec(path);
+  if (m === null) throw new Error(`not a /nix/store path: ${path}`);
+  return m[1]!;
+}

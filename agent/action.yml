@@ -18,6 +18,10 @@ inputs:
     description: "Cache mode: skip closure paths the upstream cache already has, uploading only novel paths."
     required: false
     default: "false"
+  reuse-cache:
+    description: "Substitute this repo's own prior pushes from Vega before building (faster cold builds). MUST stay off for reproducer/attestation jobs whose builds feed shared-tier evidence, so the build stays independent of Vega."
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -44,4 +48,5 @@ runs:
         VEGA_AUDIENCE: ${{ inputs.audience }}
         VEGA_INSTALLABLE: ${{ inputs.installable }}
         VEGA_SKIP_UPSTREAM: ${{ inputs.skip-upstream }}
+        VEGA_REUSE_CACHE: ${{ inputs.reuse-cache }}
       run: node_modules/.bin/tsx agent/main.ts "$VEGA_INSTALLABLE"

@@ -39,6 +39,43 @@ export function brandHeader(): string {
   return `${pc.cyan(STAR)} ${pc.bold("Vega")}`;
 }
 
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** True when we can safely paint animations: an interactive TTY, color allowed. */
+export const canAnimate = isTTY && !process.env.NO_COLOR && !process.env.CI;
+
+// A short twinkle: the star fades in dim, brightens to white, settles to cyan,
+// alternating the filled/outline glyph so it reads as a sparkle, not a spinner.
+const TWINKLE: string[] = [
+  pc.dim(pc.gray("✧")),
+  pc.blue("✦"),
+  pc.cyan("✧"),
+  pc.bold(pc.white("✦")),
+  pc.cyan("✦"),
+  pc.dim(pc.cyan("✧")),
+  pc.cyan("✦"),
+];
+
+/** Animated brand splash for bare `vega`. Falls back to a static header when
+ * output is piped, NO_COLOR is set, or we're in CI. */
+export async function brandIntro(): Promise<void> {
+  const line = (glyph: string): string => `${glyph} ${pc.bold("Vega")}`;
+  if (!canAnimate) {
+    info(brandHeader());
+    return;
+  }
+  process.stdout.write("\x1b[?25l"); // hide cursor
+  try {
+    for (const glyph of TWINKLE) {
+      process.stdout.write(`\r${line(glyph)}`);
+      await sleep(70);
+    }
+    process.stdout.write(`\r${line(pc.cyan(STAR))}\n`);
+  } finally {
+    process.stdout.write("\x1b[?25h"); // restore cursor
+  }
+}
+
 export function success(msg: string): void {
   process.stdout.write(`${pc.green(STAR)} ${msg}\n`);
 }

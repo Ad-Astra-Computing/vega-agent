@@ -15,10 +15,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { fetchActionsOidcToken } from "../src/agent/oidc.js";
+import { OidcTokenProvider } from "../src/agent/token-provider.js";
 import { ControlPlaneClient } from "../src/agent/client.js";
 import { buildAttestBody } from "../src/agent/narinfo.js";
 import { partitionByUpstream } from "../src/agent/upstream.js";
 import { mapConcurrent } from "../src/agent/concurrency.js";
+import { tenantSubstituter } from "../src/agent/substituter.js";
 import { parseVegaConfig, type VegaConfig } from "../src/agent/config.js";
 import { resolveBuilds } from "../src/agent/builds.js";
 import { nixBuild, pathInfoClosure, pathInfoOutputs, makeNar } from "./nix.js";
@@ -46,6 +48,9 @@ interface CacheOpts {
   skipUpstream: boolean;
   upstreamUrl: string;
   work: string;
+  /** Extra substituters (Vega's own tenant cache) so cold builds reuse prior pushes. */
+  substituters?: string[];
+  trustedKeys?: string[];
 }
 
 /** Build one installable and upload+attest its (optionally novel-only) closure. */
@@ -56,7 +61,7 @@ async function cacheBuild(
   opts: CacheOpts,
 ): Promise<{ promoted: number; total: number }> {
   console.log(`Building ${installable} ...`);
-  await nixBuild(installable);
+  await nixBuild(installable, { substituters: opts.substituters, trustedKeys: opts.trustedKeys });
 
   const closure = await pathInfoClosure(installable);
   const topPaths = new Set((await pathInfoOutputs(installable)).map((o) => o.path));
@@ -108,24 +113,54 @@ async function main(): Promise<void> {
   const builds = resolveBuilds(config, fallback, flakeDir);
   if (config) console.log(`vega.yaml: building ${builds.length} declared output(s).`);
 
-  const token = await fetchActionsOidcToken(
-    {
-      requestUrl: process.env.ACTIONS_ID_TOKEN_REQUEST_URL,
-      requestToken: process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN,
-    },
-    audience,
-  );
-  // Drop the OIDC minting capability before shelling out to nix: the exchanged
-  // JWT lives only in `token`, so nothing a build spawns can re-mint a token.
+  // Capture the runner's OIDC request credential, then DROP it from the
+  // environment before shelling out to nix, so nothing a build spawns can mint a
+  // token. The credential lives only in this closure; the provider re-mints a
+  // fresh JWT on demand, so a long build never leaves an expired token at push.
+  const requestUrl = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+  const requestToken = process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
   delete process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
   delete process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
-  const client = new ControlPlaneClient(controlPlane, token);
+  const provider = new OidcTokenProvider(() =>
+    fetchActionsOidcToken({ requestUrl, requestToken }, audience),
+  );
+  // Mint once up front to fail fast if `id-token: write` is missing, rather than
+  // only after a long build. The provider re-mints when the token nears expiry.
+  await provider.get();
+  const client = new ControlPlaneClient(controlPlane, () => provider.get());
 
   const opts: CacheOpts = {
     skipUpstream: process.env.VEGA_SKIP_UPSTREAM === "true",
     upstreamUrl: process.env.VEGA_UPSTREAM || "https://cache.nixos.org",
     work: await mkdtemp(join(tmpdir(), "vega-agent-")),
   };
+
+  // Register Vega's own tenant cache as a substituter so a cold runner pulls
+  // paths this repo previously pushed (e.g. the uncached nvim-treesitter query
+  // derivations) from Vega instead of rebuilding them. Best-effort: if the key
+  // can't be fetched, build without it.
+  //
+  // OPT-IN only: a build that substitutes from Vega is no longer independent of
+  // Vega, so this must stay OFF for the reproducer lane and any job whose build
+  // feeds shared-tier attestation evidence. Otherwise a compromised Vega could
+  // feed a malicious substitute into a build that then vouches for it.
+  const repository = process.env.GITHUB_REPOSITORY;
+  if (repository && process.env.VEGA_REUSE_CACHE === "true") {
+    try {
+      const { url, keyUrl } = tenantSubstituter(controlPlane, repository);
+      const res = await fetch(keyUrl);
+      if (res.ok) {
+        const { publicKey } = (await res.json()) as { publicKey?: string };
+        if (typeof publicKey === "string" && publicKey !== "") {
+          opts.substituters = [url];
+          opts.trustedKeys = [publicKey];
+          console.log(`Reusing prior pushes from ${url}`);
+        }
+      }
+    } catch {
+      /* best-effort: proceed without the Vega substituter */
+    }
+  }
 
   let promoted = 0;
   let total = 0;

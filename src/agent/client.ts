@@ -26,27 +26,35 @@ export interface AttestResult {
   publishedShared: boolean;
 }
 
+/** Either a fixed bearer (owner credential) or a provider that mints a fresh
+ * one per request (OIDC, which must be re-minted so it never expires mid-job). */
+export type TokenSource = string | (() => Promise<string>);
+
 /**
  * Client for the vega control plane, used by the build agent. Bearer auth is
- * the GitHub OIDC token. `fetch` is injected so the protocol is testable
- * without a network.
+ * the GitHub OIDC token (or an owner credential). `fetch` is injected so the
+ * protocol is testable without a network.
  */
 export class ControlPlaneClient {
-  constructor(
-    private readonly baseUrl: string,
-    private readonly token: string,
-    private readonly fetchImpl: typeof fetch = fetch,
-  ) {}
+  private readonly baseUrl: string;
+  private readonly tokenFn: () => Promise<string>;
+  private readonly fetchImpl: typeof fetch;
 
-  private get authHeaders(): Record<string, string> {
-    return { authorization: `Bearer ${this.token}` };
+  constructor(baseUrl: string, token: TokenSource, fetchImpl: typeof fetch = fetch) {
+    this.baseUrl = baseUrl;
+    this.tokenFn = typeof token === "function" ? token : async () => token;
+    this.fetchImpl = fetchImpl;
+  }
+
+  private async authHeaders(): Promise<Record<string, string>> {
+    return { authorization: `Bearer ${await this.tokenFn()}` };
   }
 
   /** Ask for a presigned PUT URL for a `nar/...` key. */
   async uploadUrl(narUrl: string): Promise<string> {
     const res = await this.fetchImpl(`${this.baseUrl}/api/cache/upload-url`, {
       method: "POST",
-      headers: { ...this.authHeaders, "content-type": "application/json" },
+      headers: { ...(await this.authHeaders()), "content-type": "application/json" },
       body: JSON.stringify({ narUrl }),
     });
     if (!res.ok) throw new Error(`upload-url failed: ${res.status}`);
@@ -64,7 +72,7 @@ export class ControlPlaneClient {
   async attest(body: AttestBody): Promise<AttestResult> {
     const res = await this.fetchImpl(`${this.baseUrl}/api/cache/attest`, {
       method: "POST",
-      headers: { ...this.authHeaders, "content-type": "application/json" },
+      headers: { ...(await this.authHeaders()), "content-type": "application/json" },
       body: JSON.stringify(body),
     });
     if (!res.ok) throw new Error(`attest failed: ${res.status}`);
@@ -80,7 +88,7 @@ export class ControlPlaneClient {
   async push(body: AttestBody): Promise<PushResult> {
     const res = await this.fetchImpl(`${this.baseUrl}/api/cache/push`, {
       method: "POST",
-      headers: { ...this.authHeaders, "content-type": "application/json" },
+      headers: { ...(await this.authHeaders()), "content-type": "application/json" },
       body: JSON.stringify(body),
     });
     // Status only: never echo the response body of an authenticated request

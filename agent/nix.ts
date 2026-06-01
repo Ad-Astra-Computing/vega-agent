@@ -43,12 +43,23 @@ const BUILD_TIMEOUT_MS = Number(process.env.VEGA_BUILD_TIMEOUT_MS) || 60 * 60 * 
  * progress (a buffered exec would make a long build look hung). Throws on a
  * non-zero exit or if the build exceeds the timeout.
  */
-export function nixBuild(installable: string): Promise<void> {
+export function nixBuild(
+  installable: string,
+  opts: { substituters?: string[]; trustedKeys?: string[] } = {},
+): Promise<void> {
   return new Promise((resolve, reject) => {
     // `--` terminates option parsing (installable is attacker-controlled, so a
     // value like `--store ...` must not be read as a flag). `-L` prints build
     // logs so progress is visible; inherit stderr so they reach the CI console.
-    const child = spawn("nix", ["build", "--no-link", "-L", "--", installable], {
+    const args = ["build", "--no-link", "-L"];
+    // Register extra substituters/keys (e.g. Vega's own tenant cache) so a cold
+    // runner pulls previously-pushed paths instead of rebuilding them.
+    if (opts.substituters?.length) args.push("--extra-substituters", opts.substituters.join(" "));
+    if (opts.trustedKeys?.length) {
+      args.push("--extra-trusted-public-keys", opts.trustedKeys.join(" "));
+    }
+    args.push("--", installable);
+    const child = spawn("nix", args, {
       stdio: ["ignore", "ignore", "inherit"],
     });
     const timer = setTimeout(() => {

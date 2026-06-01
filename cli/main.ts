@@ -6,7 +6,7 @@
 // runs in CI is separate (../agent/main.ts); this is the human-facing tool.
 
 import { Command } from "commander";
-import { brandHeader } from "./ui.js";
+import { brandIntro } from "./ui.js";
 import { registerLogin } from "./commands/login.js";
 import { registerLogout } from "./commands/logout.js";
 import { registerWhoami } from "./commands/whoami.js";
@@ -15,14 +15,14 @@ import { registerTrust } from "./commands/trust.js";
 import { registerPush } from "./commands/push.js";
 import { registerStatus } from "./commands/status.js";
 import { registerDoctor } from "./commands/doctor.js";
+import { registerVerify } from "./commands/verify.js";
 
 const program = new Command();
 
 program
   .name("vega")
   .description(
-    `${brandHeader()}\n\n` +
-      "Verifiable Nix binary cache: reproducible builds, a public transparency\n" +
+    "Verifiable Nix binary cache: reproducible builds, a public transparency\n" +
       "log, and scoped social trust.",
   )
   .version("0.1.0", "-v, --version")
@@ -33,6 +33,7 @@ program
     "\nExamples:\n" +
       "  vega login\n" +
       "  vega push .#my-package\n" +
+      "  vega verify /nix/store/<hash>-hello-2.12.1\n" +
       "  vega view --format nix-conf\n" +
       "  vega trust add github:alice --scope hello\n",
   );
@@ -45,10 +46,13 @@ registerTrust(program);
 registerPush(program);
 registerStatus(program);
 registerDoctor(program);
+registerVerify(program);
 
 async function run(): Promise<void> {
-  // Bare `vega` shows help, not an error.
+  // Bare `vega` shows an animated brand splash, then help (not an error).
   if (process.argv.length <= 2) {
+    await brandIntro();
+    process.stdout.write("\n");
     program.outputHelp();
     return;
   }

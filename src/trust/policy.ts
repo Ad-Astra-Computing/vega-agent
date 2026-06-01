@@ -11,7 +11,7 @@
  * (null tenant) never count toward shared agreement.
  */
 
-export type Lane = "gh-actions" | "owner" | "pool";
+export type Lane = "gh-actions" | "owner" | "pool" | "vega-repro";
 
 /**
  * Where a build came from, enough for an independent reproducer to rebuild the
@@ -44,6 +44,8 @@ export interface AttestationRecord {
   attestedAt: number;
   /** Build provenance, when the attester supplied a reproducible attribute. */
   provenance?: BuildProvenance;
+  /** Continent the attestation came from (or "XX" unknown); continent-only. */
+  continent?: string;
 }
 
 export const PROMOTION = {
@@ -52,6 +54,25 @@ export const PROMOTION = {
   /** Summed reputation weight (across distinct tenants) required for shared. */
   weightThreshold: 4,
 } as const;
+
+/** Configuration for {@link decidePromotion}. */
+export interface PromotionConfig {
+  sharedMinTenants: number;
+  weightThreshold: number;
+  /**
+   * Settling window (ms): the leading candidate must have held the quorum for at
+   * least this long before it can promote (#4). Default 0 (no delay), so the
+   * gate is off until a deployment configures it.
+   */
+  promotionWindowMs?: number;
+  /** Current time (ms), for the settling-window check. Default Date.now(). */
+  now?: number;
+  /**
+   * Vega-controlled reproductions of the leading fingerprint required before
+   * promotion (#1). Default 0 (not required), off until configured.
+   */
+  minVegaReproductions?: number;
+}
 
 /**
  * Reputation weight for an account of a given age. Ramps from ~2 at one year to
@@ -63,7 +84,13 @@ export function accountWeight(accountAgeDays: number): number {
   return Math.max(1, Math.min(w, 5));
 }
 
-export type SharedReason = "agreement" | "insufficient" | "diverged";
+export type SharedReason =
+  | "agreement"
+  | "insufficient"
+  | "diverged"
+  | "settling"
+  | "awaiting-repro"
+  | "revoked";
 
 export interface SharedDecision {
   promoted: boolean;
@@ -73,6 +100,17 @@ export interface SharedDecision {
   distinctTenants: number;
   /** Summed reputation weight behind the leading fingerprint. */
   weight: number;
+  /** Tenants on the promoted fingerprint (for retroactive corroboration credit). */
+  agreeingTenants: string[];
+  /**
+   * When the leading candidate first met the distinct-owner quorum (ms), or null
+   * if the quorum is not met. Computed per (path, fingerprint) candidate by
+   * replaying the external attestations in time order: a later candidate cannot
+   * inherit an earlier one's settle time.
+   */
+  agreedSince: number | null;
+  /** Distinct Vega-controlled reproductions matching the leading fingerprint. */
+  vegaReproductions: number;
 }
 
 export interface PromotionDecision {
@@ -81,18 +119,69 @@ export interface PromotionDecision {
   shared: SharedDecision;
   /** True when more than one distinct fingerprint has been observed at all. */
   diverged: boolean;
+  /** Distinct continents the attestations came from (excludes unknown). */
+  continents: string[];
 }
 
 interface Group {
   fingerprint: string;
   distinctTenants: number;
   weight: number;
+  tenants: string[];
+}
+
+/**
+ * The independent owner behind a tenant. gh-actions tenants are `owner/repo`, so
+ * many repos under one org collapse to one owner; owner-lane tenants
+ * (`owner:<login>`) are already per-person. Shared promotion counts distinct
+ * owners, not repos, so an attacker cannot manufacture a quorum from several
+ * repos they control under a single account.
+ */
+function ownerOf(tenant: string): string {
+  const slash = tenant.indexOf("/");
+  return slash > 0 ? tenant.slice(0, slash) : tenant;
+}
+
+/**
+ * The moment the distinct-owner quorum was first met for a specific fingerprint:
+ * replay that fingerprint's external attestations in attestation-time order and
+ * return the timestamp of the one that first pushed both the owner count and the
+ * summed weight over the bar. Per-candidate, so a fingerprint that reaches quorum
+ * later starts its own settling clock and cannot inherit an earlier one's.
+ */
+function firstQuorumTime(
+  records: readonly AttestationRecord[],
+  fingerprint: string,
+  cfg: PromotionConfig,
+): number | null {
+  const forFp = records
+    .filter(
+      (r) =>
+        r.tenant !== null &&
+        r.lane !== "vega-repro" &&
+        r.lane !== "owner" &&
+        r.fingerprint === fingerprint,
+    )
+    .sort((a, b) => a.attestedAt - b.attestedAt);
+  const byOwner = new Map<string, number>();
+  for (const r of forFp) {
+    const o = ownerOf(r.tenant!);
+    byOwner.set(o, Math.max(byOwner.get(o) ?? 0, r.weight));
+    const weight = [...byOwner.values()].reduce((a, b) => a + b, 0);
+    if (byOwner.size >= cfg.sharedMinTenants && weight >= cfg.weightThreshold) {
+      return r.attestedAt;
+    }
+  }
+  return null;
 }
 
 export function decidePromotion(
   records: readonly AttestationRecord[],
-  cfg: { sharedMinTenants: number; weightThreshold: number } = PROMOTION,
+  cfg: PromotionConfig = PROMOTION,
 ): PromotionDecision {
+  const windowMs = cfg.promotionWindowMs ?? 0;
+  const now = cfg.now ?? Date.now();
+  const minRepro = cfg.minVegaReproductions ?? 0;
   // One record per attester (last wins).
   const byAttester = new Map<string, AttestationRecord>();
   for (const r of records) byAttester.set(r.attesterId, r);
@@ -113,19 +202,34 @@ export function decidePromotion(
   }));
 
   // Shared tier: per fingerprint, the max weight per distinct (non-null) tenant.
+  // Vega's own reproductions are NOT part of the external quorum (they are one
+  // owner, Vega); they are a separate, mandatory gate counted below. Owner-lane
+  // local pushes never reach this path (they are rejected at /attest), but we
+  // exclude the lane here too as defense-in-depth: owner credentials authenticate
+  // storage writes, never build truth, and must never count toward a quorum.
   const perFp = new Map<string, Map<string, number>>();
   for (const r of live) {
-    if (r.tenant === null) continue;
+    if (r.tenant === null || r.lane === "vega-repro" || r.lane === "owner") continue;
     const tenants = perFp.get(r.fingerprint) ?? new Map<string, number>();
     tenants.set(r.tenant, Math.max(tenants.get(r.tenant) ?? 0, r.weight));
     perFp.set(r.fingerprint, tenants);
   }
 
-  const groups: Group[] = [...perFp.entries()].map(([fingerprint, tenants]) => ({
-    fingerprint,
-    distinctTenants: tenants.size,
-    weight: [...tenants.values()].reduce((a, b) => a + b, 0),
-  }));
+  // Dedup the quorum by owner: collapse a tenant's repos to one owner and take
+  // that owner's max weight, so many repos under one account count once.
+  const groups: Group[] = [...perFp.entries()].map(([fingerprint, tenantWeights]) => {
+    const byOwner = new Map<string, number>();
+    for (const [tenant, w] of tenantWeights) {
+      const o = ownerOf(tenant);
+      byOwner.set(o, Math.max(byOwner.get(o) ?? 0, w));
+    }
+    return {
+      fingerprint,
+      distinctTenants: byOwner.size,
+      weight: [...byOwner.values()].reduce((a, b) => a + b, 0),
+      tenants: [...tenantWeights.keys()],
+    };
+  });
 
   const diverged = new Set(live.map((r) => r.fingerprint)).size > 1;
   const candidates = groups.filter(
@@ -142,18 +246,53 @@ export function decidePromotion(
 
   let shared: SharedDecision;
   if (candidates.length === 1) {
-    shared = {
-      promoted: true,
-      fingerprint: candidates[0]!.fingerprint,
-      reason: "agreement",
-      distinctTenants: candidates[0]!.distinctTenants,
-      weight: candidates[0]!.weight,
+    const winner = candidates[0]!;
+    const fp = winner.fingerprint;
+    const agreedSince = firstQuorumTime(live, fp, cfg);
+    // Distinct Vega reproductions of the winning fingerprint.
+    const vegaReproductions = live.filter(
+      (r) => r.lane === "vega-repro" && r.fingerprint === fp,
+    ).length;
+    // A Vega reproduction that yielded a DIFFERENT fingerprint contests the
+    // candidate: the master key must not sign over a Vega-detected divergence.
+    const vegaConflict = live.some((r) => r.lane === "vega-repro" && r.fingerprint !== fp);
+
+    const base = {
+      fingerprint: fp,
+      distinctTenants: winner.distinctTenants,
+      weight: winner.weight,
+      agreeingTenants: winner.tenants,
+      agreedSince,
+      vegaReproductions,
     };
+    if (vegaConflict) {
+      shared = { ...base, promoted: false, reason: "diverged" };
+    } else if (agreedSince === null || now - agreedSince < windowMs) {
+      shared = { ...base, promoted: false, reason: "settling" };
+    } else if (vegaReproductions < minRepro) {
+      shared = { ...base, promoted: false, reason: "awaiting-repro" };
+    } else {
+      shared = { ...base, promoted: true, reason: "agreement" };
+    }
   } else if (candidates.length > 1) {
-    shared = { promoted: false, fingerprint: null, reason: "diverged", ...leadStats };
+    shared = {
+      promoted: false, fingerprint: null, reason: "diverged",
+      ...leadStats, agreeingTenants: [], agreedSince: null, vegaReproductions: 0,
+    };
   } else {
-    shared = { promoted: false, fingerprint: null, reason: "insufficient", ...leadStats };
+    shared = {
+      promoted: false, fingerprint: null, reason: "insufficient",
+      ...leadStats, agreeingTenants: [], agreedSince: null, vegaReproductions: 0,
+    };
   }
 
-  return { tenantTier, shared, diverged };
+  const continents = [
+    ...new Set(
+      live
+        .map((r) => r.continent)
+        .filter((co): co is string => typeof co === "string" && co !== "XX"),
+    ),
+  ].sort();
+
+  return { tenantTier, shared, diverged, continents };
 }
