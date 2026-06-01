@@ -44,11 +44,18 @@ drops the PAT before the job. Prefer `GITHUB_RUNNER_TOKEN_FILE` (a `0400` tmpfs
 file, removed once read) over the env var for either token.
 
 Notes:
-- `-v vega-nix:/nix` persists the Nix store across the ephemeral, one-job-per-run
-  containers, so the toolchain and prior builds are not re-fetched every job.
-- `--ephemeral` means one job then exit. Run it under a supervisor that restarts
-  it (a `while true; do docker run ...; done` loop, or a systemd unit / nix-darwin
-  service) so a fresh runner is always waiting.
+- The runner is **persistent** by default: one long-lived runner handles many
+  jobs, so no supervisor or restart loop is needed (the simplest setup for your
+  own host, and it does not assume systemd or Nix). Set `VEGA_RUNNER_EPHEMERAL=true`
+  for one-job-then-exit (the model for the untrusted donate fleet, where a
+  supervisor recreates the container per job).
+- Set a stable, unique `GITHUB_RUNNER_NAME` (it defaults to `vega-<repo>`).
+  `--replace` lets a restart reclaim the same-named registration, so you do not
+  accumulate stale offline runners. Stopping the container leaves it registered
+  offline until the next start reclaims it (or remove it with `gh api --method
+  DELETE repos/<o>/<r>/actions/runners/<id>`).
+- `-v vega-nix:/nix` persists the Nix store across restarts, so the toolchain and
+  prior builds are not re-fetched. Reclaim space later with `nix store gc`.
 - Nix's build sandbox is OFF by default because Docker blocks it without
   privilege. If a build needs host-like sandbox isolation, run with `--privileged`
   and `-e VEGA_NIX_SANDBOX=true`. Start without it; add it only if a build fails
@@ -56,6 +63,8 @@ Notes:
 - To pull heavy dependencies from a trusted upstream cache instead of building
   them, pass `-e VEGA_EXTRA_SUBSTITUTERS=...` and
   `-e VEGA_EXTRA_TRUSTED_PUBLIC_KEYS=...`.
+- The bundled runner has auto-update disabled (`--disableupdate`); rebuild and
+  re-pull the image to update the runner version.
 
 ## Point the workflow at it
 

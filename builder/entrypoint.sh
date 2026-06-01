@@ -50,7 +50,8 @@ read_secret() {
 setup_nix() {
   mkdir -p /nix/var/nix/db /nix/var/nix/gcroots /nix/var/nix/profiles \
            /nix/var/nix/temproots /nix/var/nix/userpool /etc/nix
-  [ -e /nix/var/nix/db/db.sqlite ] || nix-store --init
+  # Write nix.conf BEFORE any nix command so single-user settings (no nixbld
+  # group) apply to `nix-store --init` too, not just later builds.
   if [ ! -e /etc/nix/nix.conf ]; then
     {
       echo "experimental-features = nix-command flakes"
@@ -62,6 +63,7 @@ setup_nix() {
       echo "trusted-public-keys = ${NIXOS_CACHE_KEY} ${VEGA_EXTRA_TRUSTED_PUBLIC_KEYS:-}"
     } > /etc/nix/nix.conf
   fi
+  [ -e /nix/var/nix/db/db.sqlite ] || nix-store --init
 }
 
 run_runner() {
@@ -104,17 +106,26 @@ run_runner() {
   export RUNNER_ALLOW_RUNASROOT=1
   mkdir -p "$RUNNER_ROOT"
 
+  # Persistent by default: one long-lived runner handles many jobs, so no
+  # supervisor/restart loop is needed (the simplest setup for your own trusted
+  # host, and it does not assume systemd/Nix). Set VEGA_RUNNER_EPHEMERAL=true for
+  # one-job-then-exit (the right model for the untrusted donate fleet, where a
+  # supervisor recreates the container per job). --replace lets a restart reclaim
+  # the same-named registration, so a STABLE name (not the random container
+  # hostname) avoids piling up stale offline runners. Default to a per-repo name;
+  # set GITHUB_RUNNER_NAME explicitly, and uniquely, if you run more than one.
+  local cfg_args=(--unattended --disableupdate --replace)
+  [ "${VEGA_RUNNER_EPHEMERAL:-false}" = "true" ] && cfg_args+=(--ephemeral)
+
   "$RUNNER_DIST/bin/config.sh" \
     --url "https://github.com/${GITHUB_OWNER}/${GITHUB_REPOSITORY}" \
     --token "$token" \
-    --ephemeral --unattended --disableupdate \
-    --name "${GITHUB_RUNNER_NAME:-vega-$(hostname)}" \
+    "${cfg_args[@]}" \
+    --name "${GITHUB_RUNNER_NAME:-vega-${GITHUB_REPOSITORY}}" \
     --labels "${GITHUB_RUNNER_LABELS:-self-hosted,vega}" \
     --work "${RUNNER_ROOT}/_work"
   unset token
 
-  # One job, then de-register (because of --ephemeral). The external supervisor
-  # restarts the container for the next job.
   exec "$RUNNER_DIST/bin/run.sh"
 }
 
