@@ -89,6 +89,10 @@ run_runner() {
     # Weaker, because a broad credential briefly enters the container; never use
     # it for anything but your own trusted runner.
     local pat; pat="$(read_secret GITHUB_PAT)"
+    # Remove the file-backed PAT as soon as it is read, before any exit path, so
+    # a file-mounted credential never outlives this step into the job (the runner
+    # runs as root). Mirrors the GITHUB_RUNNER_TOKEN_FILE handling above.
+    [ -n "${GITHUB_PAT_FILE:-}" ] && rm -f "$GITHUB_PAT_FILE"
     [ -n "$pat" ] || {
       echo "vega-builder: pass GITHUB_RUNNER_TOKEN (preferred: mint it in your supervisor with gh or a GitHub App) or, for a trusted local runner only, GITHUB_PAT" >&2
       exit 1
