@@ -1,40 +1,68 @@
 # Vega builder image
 
-A reproducible OCI image that runs as an ephemeral GitHub Actions self-hosted
-runner for your own repository, so heavy builds run on your hardware instead of a
-free, preemptible GitHub-hosted runner. Design: `garnix-ci/docs/builder-fleet.md`.
+A reproducible OCI image that runs as a GitHub Actions self-hosted runner
+(persistent by default) for your own repository, so heavy builds run on your
+hardware instead of a free, preemptible GitHub-hosted runner. Design:
+`garnix-ci/docs/builder-fleet.md`. User-facing guide:
+https://docs.vega-cache.dev/heavy-builds.
 
-This is Phase 1 (runner mode). It is unvalidated until tested on a real host;
-the steps below are that test. Do not publish the image until it passes.
+This is Phase 1 (runner mode).
 
-## Build
+## Pull from GHCR
 
-On a Linux host (the image is Linux-only; build it on `perdurabo` itself):
+The image is published per release and signed with cosign (keyless, via the
+release workflow's OIDC identity):
+
+```
+docker pull ghcr.io/ad-astra-computing/vega-builder:latest
+cosign verify ghcr.io/ad-astra-computing/vega-builder:latest \
+  --certificate-identity-regexp '^https://github\.com/Ad-Astra-Computing/vega-agent/\.github/workflows/publish-builder-image\.yml@refs/tags/[^/]+$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+The identity regex pins the signer to this repo's publish workflow on a release
+tag, so a signature minted by any other workflow, repo, or a branch build will
+not verify.
+
+## Build from source
+
+Alternatively, build it yourself on a Linux host (the image is Linux-only):
 
 ```
 nix build github:Ad-Astra-Computing/vega-agent#builder-image
 docker load < result
-docker images | grep vega-builder    # vega-builder:0.2.0
+docker images | grep vega-builder    # vega-builder:<version>
 ```
 
 ## Run (runner mode)
 
-The supervisor mints a short-lived registration token and passes only that in, so
-no long-lived credential ever enters the container. On your own machine, mint it
-with `gh` (reuses your existing login, nothing to create):
+The supervisor mints a short-lived registration token and hands it off so no
+long-lived credential ever enters the container and no job can read it. Do not
+pass it as an `-e` env var (visible via `docker inspect`) or as a lifetime bind
+mount (stays readable inside the container for its whole life). Instead copy the
+token into the container's own filesystem before starting it: the entrypoint
+reads it and deletes it before the runner accepts any job. On your own machine,
+mint it with `gh` (reuses your existing login, nothing to create):
 
 ```
-TOKEN=$(gh api --method POST \
-  repos/jasonodoom/nixos-configs/actions/runners/registration-token --jq .token)
-docker run --rm \
+TOKEN_FILE=$(mktemp)   # mktemp creates it mode 0600
+gh api --method POST \
+  repos/jasonodoom/nixos-configs/actions/runners/registration-token --jq .token \
+  > "$TOKEN_FILE"
+chmod 0400 "$TOKEN_FILE"
+
+cid=$(docker create --restart=unless-stopped --name vega-runner \
   --memory=12g --memory-swap=12g --cpus=4 \
   -e VEGA_MODE=runner \
   -e GITHUB_OWNER=jasonodoom \
   -e GITHUB_REPOSITORY=nixos-configs \
-  -e GITHUB_RUNNER_TOKEN="$TOKEN" \
+  -e GITHUB_RUNNER_TOKEN_FILE=/home/runner/.runner-token \
   -e GITHUB_RUNNER_LABELS=self-hosted,vega-perdurabo \
   -v vega-nix:/nix \
-  vega-builder:0.2.0
+  ghcr.io/ad-astra-computing/vega-builder:latest)
+docker cp "$TOKEN_FILE" "$cid:/home/runner/.runner-token"
+rm -f "$TOKEN_FILE"   # host copy gone; the entrypoint deletes the in-container
+docker start "$cid"   # copy after reading it, before run.sh accepts jobs
 ```
 
 REQUIRED on a machine you use: cap the container with `--memory` (and
