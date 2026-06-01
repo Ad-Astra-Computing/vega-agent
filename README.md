@@ -88,6 +88,19 @@ steps:
       control-plane: https://vega-cache.dev
 ```
 
+Useful action inputs:
+
+- `skip-upstream: "true"` — upload only paths the upstream cache does not already
+  serve (recommended for system closures).
+- `reuse-cache: "true"` — substitute this repo's own prior Vega pushes before
+  building, so heavy paths are not rebuilt every run. Keep it **off** for any job
+  whose attestation feeds the shared tier (that build must stay independent of Vega).
+- `build-timeout-minutes` — explicit per-build cap. Default `0` (disabled): the
+  job's `timeout-minutes` is the only limit, so a long-but-progressing build is
+  never killed.
+- `extra-substituters` / `extra-trusted-public-keys` — pull heavy dependencies
+  from a trusted upstream cache (e.g. a project's Cachix) instead of from source.
+
 ## Reproducing another build
 
 Run the reproduce workflow against a build's provenance: the flake reference, the

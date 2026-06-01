@@ -6,6 +6,20 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+### Changed
+
+- The agent no longer enforces its own build timeout by default. A build's only
+  time limit is the CI job's `timeout-minutes`, so a long-but-progressing build
+  is never SIGTERM-killed (which discarded all completed store paths and made
+  Vega look broken on heavy closures). Opt into an explicit per-build cap with
+  the new `build-timeout-minutes` action input (default `0`, disabled).
+
+### Added
+
+- `extra-substituters` / `extra-trusted-public-keys` action inputs: pull heavy
+  dependencies from a trusted upstream cache (e.g. a project's Cachix) instead of
+  building them from source.
+
 ## [0.2.0] - 2026-06-01
 
 ### Added

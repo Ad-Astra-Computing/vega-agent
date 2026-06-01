@@ -169,6 +169,15 @@ async function main(): Promise<void> {
     }
   }
 
+  // User-supplied extra substituters/keys (e.g. an upstream project's Cachix),
+  // merged with any reuse-cache substituter above, so heavy dependencies are
+  // pulled instead of built from source. Space/newline separated, like nix.conf.
+  const extraSubs = (process.env.VEGA_EXTRA_SUBSTITUTERS || "").split(/\s+/).filter(Boolean);
+  const extraKeys = (process.env.VEGA_EXTRA_TRUSTED_PUBLIC_KEYS || "").split(/\s+/).filter(Boolean);
+  if (extraSubs.length > 0) opts.substituters = [...(opts.substituters ?? []), ...extraSubs];
+  if (extraKeys.length > 0) opts.trustedKeys = [...(opts.trustedKeys ?? []), ...extraKeys];
+  if (extraSubs.length > 0) console.log(`Extra substituters: ${extraSubs.join(", ")}`);
+
   let promoted = 0;
   let total = 0;
   try {

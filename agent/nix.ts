@@ -49,8 +49,18 @@ export async function flakeShow(flakeDir: string): Promise<unknown> {
   return JSON.parse(stdout);
 }
 
-/** Default build timeout (ms); a hung build fails the job instead of idling. */
-const BUILD_TIMEOUT_MS = Number(process.env.VEGA_BUILD_TIMEOUT_MS) || 60 * 60 * 1000;
+/**
+ * Optional per-build timeout (ms). DISABLED by default (0): the CI job's own
+ * `timeout-minutes` is the source of truth for "too long", so the agent never
+ * SIGTERM-kills a build before the job would (which discarded all built paths
+ * and made Vega look broken on heavy closures). Opt in via the action input
+ * `build-timeout-minutes` (-> VEGA_BUILD_TIMEOUT_MINUTES) or the low-level
+ * `VEGA_BUILD_TIMEOUT_MS`; minutes wins if both are set.
+ */
+const BUILD_TIMEOUT_MS =
+  (Number(process.env.VEGA_BUILD_TIMEOUT_MINUTES) || 0) * 60_000 ||
+  Number(process.env.VEGA_BUILD_TIMEOUT_MS) ||
+  0;
 
 /**
  * Build an installable, STREAMING nix's build logs to stderr so CI shows live
@@ -76,16 +86,21 @@ export function nixBuild(
     const child = spawn("nix", args, {
       stdio: ["ignore", "ignore", "inherit"],
     });
-    const timer = setTimeout(() => {
-      child.kill("SIGTERM");
-      reject(new Error(`nix build timed out after ${Math.round(BUILD_TIMEOUT_MS / 60000)}m`));
-    }, BUILD_TIMEOUT_MS);
+    // Only arm a timer when a timeout is explicitly configured; otherwise the CI
+    // job timeout governs and a long-but-progressing build is never killed.
+    const timer =
+      BUILD_TIMEOUT_MS > 0
+        ? setTimeout(() => {
+            child.kill("SIGTERM");
+            reject(new Error(`nix build timed out after ${Math.round(BUILD_TIMEOUT_MS / 60000)}m`));
+          }, BUILD_TIMEOUT_MS)
+        : undefined;
     child.on("error", (e) => {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       reject(e);
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       if (code === 0) resolve();
       else reject(new Error(`nix build exited with code ${code}`));
     });

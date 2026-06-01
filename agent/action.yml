@@ -22,6 +22,18 @@ inputs:
     description: "Substitute this repo's own prior pushes from Vega before building (faster cold builds). MUST stay off for reproducer/attestation jobs whose builds feed shared-tier evidence, so the build stays independent of Vega."
     required: false
     default: "false"
+  build-timeout-minutes:
+    description: "Kill a single build after this many minutes. Default 0 (disabled): the job's own timeout-minutes governs, so a long-but-progressing build is never pre-empted. Set only as an escape hatch for self-hosted runners or runaway builds."
+    required: false
+    default: "0"
+  extra-substituters:
+    description: "Additional Nix substituters to pull from before building (space-separated), e.g. an upstream project's Cachix so heavy dependencies are not built from source. You must trust these caches."
+    required: false
+    default: ""
+  extra-trusted-public-keys:
+    description: "Trusted public keys for extra-substituters (space-separated), matching the order/contents of those caches."
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -49,4 +61,7 @@ runs:
         VEGA_INSTALLABLE: ${{ inputs.installable }}
         VEGA_SKIP_UPSTREAM: ${{ inputs.skip-upstream }}
         VEGA_REUSE_CACHE: ${{ inputs.reuse-cache }}
+        VEGA_BUILD_TIMEOUT_MINUTES: ${{ inputs.build-timeout-minutes }}
+        VEGA_EXTRA_SUBSTITUTERS: ${{ inputs.extra-substituters }}
+        VEGA_EXTRA_TRUSTED_PUBLIC_KEYS: ${{ inputs.extra-trusted-public-keys }}
       run: node_modules/.bin/tsx agent/main.ts "$VEGA_INSTALLABLE"
