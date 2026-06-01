@@ -81,10 +81,13 @@ run_runner() {
   # long-lived credential ever enters this container. Prefer GITHUB_RUNNER_TOKEN_FILE
   # (a tmpfs secret file) over the env var; the file is removed once read.
   local token; token="$(read_secret GITHUB_RUNNER_TOKEN)"
-  if [ -n "$token" ]; then
-    [ -n "${GITHUB_RUNNER_TOKEN_FILE:-}" ] && rm -f "$GITHUB_RUNNER_TOKEN_FILE"
-    unset GITHUB_RUNNER_TOKEN GITHUB_RUNNER_TOKEN_FILE
-  else
+  # The token value (if any) is now captured in $token. Drop the env var and any
+  # file it came from immediately, before any branch, so neither the PAT fallback
+  # nor run.sh can ever see a leftover registration credential, even when the file
+  # was set but empty.
+  [ -n "${GITHUB_RUNNER_TOKEN_FILE:-}" ] && rm -f "$GITHUB_RUNNER_TOKEN_FILE"
+  unset GITHUB_RUNNER_TOKEN GITHUB_RUNNER_TOKEN_FILE
+  if [ -z "$token" ]; then
     # FALLBACK (trusted local runner only): mint inside the container from a PAT.
     # Weaker, because a broad credential briefly enters the container; never use
     # it for anything but your own trusted runner.
