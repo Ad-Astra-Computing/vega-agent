@@ -67,11 +67,99 @@
               platforms = pkgs.lib.platforms.unix;
             };
           });
+          # The Vega builder image (Phase 1: runner mode). A reproducible OCI
+          # image built with Nix (so its digest is stable and cosign-signing is
+          # meaningful), containing nix, the GitHub Actions runner, and the vega
+          # agent. See docs/builder-fleet.md. Linux only (OCI images are Linux).
+          # Node 24 only (latest LTS): GitHub's runtime migration supports node24,
+          # so the runner does not need the EOL/insecure node20. Every action in
+          # the cached repo's workflow must be node24-capable (actions/checkout@v5+,
+          # etc.). Bound once so the image contents and RUNNER_DIST are the SAME
+          # derivation (otherwise the default node20 runner sneaks back in).
+          githubRunner = pkgs.github-runner.override { nodeRuntimes = [ "node24" ]; };
+          entrypoint = pkgs.writeShellApplication {
+            name = "vega-builder-entrypoint";
+            runtimeInputs = [
+              pkgs.bashInteractive
+              pkgs.coreutils
+              pkgs.curl
+              pkgs.jq
+              pkgs.gnugrep
+              pkgs.hostname
+            ];
+            text = builtins.readFile ./builder/entrypoint.sh;
+          };
+          builderRoot = pkgs.buildEnv {
+            name = "vega-builder-root";
+            paths = [
+              agent
+              pkgs.nix
+              githubRunner
+              pkgs.iana-etc
+              pkgs.cacert
+              pkgs.bashInteractive
+              pkgs.coreutils
+              pkgs.curl
+              pkgs.jq
+              pkgs.git
+              pkgs.gnutar
+              pkgs.gzip
+              pkgs.xz
+              pkgs.zstd
+              pkgs.gnugrep
+              pkgs.gnused
+              pkgs.findutils
+              pkgs.hostname
+              pkgs.openssh
+              entrypoint
+              pkgs.dockerTools.fakeNss
+            ];
+            pathsToLink = [ "/bin" "/etc" ];
+          };
+          builderImage = pkgs.dockerTools.buildLayeredImage {
+            name = "vega-builder";
+            # No `created` (defaults to epoch) so the digest stays reproducible.
+            tag = agent.version;
+            contents = [ builderRoot ];
+            # /tmp and the runner's writable home, created in the image.
+            extraCommands = ''
+              mkdir -p tmp home/runner
+              chmod 1777 tmp
+            '';
+            config = {
+              Entrypoint = [ "/bin/vega-builder-entrypoint" ];
+              Env = [
+                "PATH=/bin"
+                "HOME=/home/runner"
+                "USER=runner"
+                "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+                "NIX_SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+                "RUNNER_DIST=${githubRunner}"
+                "VEGA_BUILDER_VERSION=${agent.version}"
+              ];
+              Labels = {
+                "org.opencontainers.image.title" = "Vega builder";
+                "org.opencontainers.image.description" =
+                  "Reproducible Nix builder for the Vega binary cache: a self-hosted GitHub Actions runner (runner mode) and a reproduction worker (donate mode).";
+                "org.opencontainers.image.version" = agent.version;
+                "org.opencontainers.image.vendor" = "Ad Astra Computing";
+                "org.opencontainers.image.authors" = "Ad Astra Computing";
+                "org.opencontainers.image.licenses" = "BSD-3-Clause";
+                "org.opencontainers.image.source" = "https://github.com/Ad-Astra-Computing/vega-agent";
+                "org.opencontainers.image.url" = "https://vega-cache.dev";
+                "org.opencontainers.image.documentation" = "https://docs.vega-cache.dev";
+                "org.opencontainers.image.base.name" = "scratch";
+                "dev.vega.runner-version" = githubRunner.version;
+                "dev.vega.node-runtimes" = "node24";
+              };
+            };
+          };
         in
         {
           vega-agent = agent;
           default = agent;
         }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux { builder-image = builderImage; }
       );
 
       apps = forAll (
