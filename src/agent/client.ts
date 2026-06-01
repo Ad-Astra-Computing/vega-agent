@@ -41,47 +41,127 @@ export type TokenSource = string | (() => Promise<string>);
  * the GitHub OIDC token (or an owner credential). `fetch` is injected so the
  * protocol is testable without a network.
  */
+/** Options controlling transient-failure retries. Exposed for testing. */
+export interface RetryOptions {
+  /** Total attempts including the first (so 1 disables retry). */
+  attempts: number;
+  /** Base backoff in ms; doubles each attempt, capped at maxDelayMs. */
+  baseDelayMs: number;
+  maxDelayMs: number;
+  /** Injectable sleeper so tests do not actually wait. */
+  sleep: (ms: number) => Promise<void>;
+  /** Injectable jitter in [0,1); fixed in tests for determinism. */
+  jitter: () => number;
+}
+
+// 429 and 5xx are transient: the same request can succeed on a retry. 408 is a
+// request-timeout the server invites us to repeat. All agent writes are
+// idempotent (attest dedups per attester, R2 PUT is content-addressed, presign
+// is stateless), so replaying them is safe.
+const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+
+const DEFAULT_RETRY: RetryOptions = {
+  attempts: 5,
+  baseDelayMs: 500,
+  maxDelayMs: 30_000,
+  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+  jitter: Math.random,
+};
+
 export class ControlPlaneClient {
   private readonly baseUrl: string;
   private readonly tokenFn: () => Promise<string>;
   private readonly fetchImpl: typeof fetch;
+  private readonly retry: RetryOptions;
 
-  constructor(baseUrl: string, token: TokenSource, fetchImpl: typeof fetch = fetch) {
+  constructor(
+    baseUrl: string,
+    token: TokenSource,
+    fetchImpl: typeof fetch = fetch,
+    retry: Partial<RetryOptions> = {},
+  ) {
     this.baseUrl = baseUrl;
     this.tokenFn = typeof token === "function" ? token : async () => token;
     this.fetchImpl = fetchImpl;
+    this.retry = { ...DEFAULT_RETRY, ...retry };
   }
 
   private async authHeaders(): Promise<Record<string, string>> {
     return { authorization: `Bearer ${await this.tokenFn()}` };
   }
 
+  /** Backoff before the next attempt: honor Retry-After, else exponential with
+   * full jitter, capped. `attempt` is 1-based (the attempt that just failed). */
+  private async backoff(attempt: number, retryAfter: string | null): Promise<void> {
+    const ra = retryAfter !== null ? Number(retryAfter) : NaN;
+    let ms: number;
+    if (Number.isFinite(ra) && ra >= 0) {
+      ms = Math.min(this.retry.maxDelayMs, ra * 1000);
+    } else {
+      const ceil = Math.min(this.retry.maxDelayMs, this.retry.baseDelayMs * 2 ** (attempt - 1));
+      ms = ceil * this.retry.jitter();
+    }
+    await this.retry.sleep(ms);
+  }
+
+  /**
+   * Fetch with retry on transient failures (network errors and retryable HTTP
+   * statuses). A non-retryable status throws immediately with a labeled error;
+   * exhausting the retry budget rethrows the last failure. The body must be
+   * replayable (string or Buffer here), which all callers satisfy.
+   */
+  private async fetchWithRetry(url: string, init: RequestInit, label: string): Promise<Response> {
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= this.retry.attempts; attempt++) {
+      let res: Response | undefined;
+      try {
+        res = await this.fetchImpl(url, init);
+      } catch (e) {
+        lastErr = e; // network-level failure: retry if budget remains
+      }
+      if (res !== undefined) {
+        if (res.ok) return res;
+        if (!RETRYABLE_STATUS.has(res.status)) throw new Error(`${label} failed: ${res.status}`);
+        lastErr = new Error(`${label} failed: ${res.status}`);
+        if (attempt < this.retry.attempts) await this.backoff(attempt, res.headers.get("retry-after"));
+      } else if (attempt < this.retry.attempts) {
+        await this.backoff(attempt, null);
+      }
+    }
+    throw lastErr instanceof Error ? lastErr : new Error(`${label} failed`);
+  }
+
   /** Ask for a presigned PUT URL for a `nar/...` key. */
   async uploadUrl(narUrl: string): Promise<string> {
-    const res = await this.fetchImpl(`${this.baseUrl}/api/cache/upload-url`, {
-      method: "POST",
-      headers: { ...(await this.authHeaders()), "content-type": "application/json" },
-      body: JSON.stringify({ narUrl }),
-    });
-    if (!res.ok) throw new Error(`upload-url failed: ${res.status}`);
+    const res = await this.fetchWithRetry(
+      `${this.baseUrl}/api/cache/upload-url`,
+      {
+        method: "POST",
+        headers: { ...(await this.authHeaders()), "content-type": "application/json" },
+        body: JSON.stringify({ narUrl }),
+      },
+      "upload-url",
+    );
     const { url } = (await res.json()) as { url: string };
     return url;
   }
 
   /** Upload NAR bytes directly to R2 via the presigned URL. */
   async putNar(presignedUrl: string, body: BodyInit): Promise<void> {
-    const res = await this.fetchImpl(presignedUrl, { method: "PUT", body });
-    if (!res.ok) throw new Error(`nar upload failed: ${res.status}`);
+    await this.fetchWithRetry(presignedUrl, { method: "PUT", body }, "nar upload");
   }
 
   /** Submit an attestation; returns the promotion decision. */
   async attest(body: AttestBody): Promise<AttestResult> {
-    const res = await this.fetchImpl(`${this.baseUrl}/api/cache/attest`, {
-      method: "POST",
-      headers: { ...(await this.authHeaders()), "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error(`attest failed: ${res.status}`);
+    const res = await this.fetchWithRetry(
+      `${this.baseUrl}/api/cache/attest`,
+      {
+        method: "POST",
+        headers: { ...(await this.authHeaders()), "content-type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      "attest",
+    );
     return (await res.json()) as AttestResult;
   }
 
@@ -92,14 +172,17 @@ export class ControlPlaneClient {
    * the namespace from the verified credential, never from the client.
    */
   async push(body: AttestBody): Promise<PushResult> {
-    const res = await this.fetchImpl(`${this.baseUrl}/api/cache/push`, {
-      method: "POST",
-      headers: { ...(await this.authHeaders()), "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
     // Status only: never echo the response body of an authenticated request
     // (a hostile/buggy server could reflect the credential header into it).
-    if (!res.ok) throw new Error(`push failed: ${res.status}`);
+    const res = await this.fetchWithRetry(
+      `${this.baseUrl}/api/cache/push`,
+      {
+        method: "POST",
+        headers: { ...(await this.authHeaders()), "content-type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      "push",
+    );
     return (await res.json()) as PushResult;
   }
 }

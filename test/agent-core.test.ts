@@ -123,6 +123,51 @@ describe("ControlPlaneClient", () => {
     const client = new ControlPlaneClient(base, "jwt", fn);
     await expect(client.uploadUrl("nar/x.nar.zst")).rejects.toThrow(/401/);
   });
+
+  // No-wait retry config for deterministic tests.
+  const fastRetry = { attempts: 5, baseDelayMs: 1, maxDelayMs: 1, sleep: async () => {}, jitter: () => 0.5 };
+
+  it("retries a transient 503 and then succeeds", async () => {
+    let n = 0;
+    const { fn, calls } = fakeFetch(() => {
+      n += 1;
+      return n < 3
+        ? new Response("busy", { status: 503 })
+        : new Response(JSON.stringify({ url: "https://r2/put?sig=x" }));
+    });
+    const client = new ControlPlaneClient(base, "jwt", fn, fastRetry);
+    expect(await client.uploadUrl("nar/abc.nar.zst")).toBe("https://r2/put?sig=x");
+    expect(calls.length).toBe(3); // two 503s, then success
+  });
+
+  it("retries network errors too", async () => {
+    let n = 0;
+    const fn = (() => {
+      n += 1;
+      return n < 2 ? Promise.reject(new Error("ECONNRESET")) : Promise.resolve(new Response(null, { status: 200 }));
+    }) as unknown as typeof fetch;
+    const client = new ControlPlaneClient(base, "jwt", fn, fastRetry);
+    await expect(client.putNar("https://r2/put?sig=x", new Uint8Array([1]))).resolves.toBeUndefined();
+    expect(n).toBe(2);
+  });
+
+  it("gives up after exhausting retries on a persistent 503", async () => {
+    const { fn, calls } = fakeFetch(() => new Response("busy", { status: 503 }));
+    const client = new ControlPlaneClient(base, "jwt", fn, fastRetry);
+    await expect(client.uploadUrl("nar/x.nar.zst")).rejects.toThrow(/503/);
+    expect(calls.length).toBe(5); // attempts cap
+  });
+
+  it("does not retry a non-retryable 4xx", async () => {
+    const { fn, calls } = fakeFetch(() => new Response("denied", { status: 403 }));
+    const client = new ControlPlaneClient(base, "jwt", fn, fastRetry);
+    await expect(client.attest({
+      storePath: "/nix/store/p4pclmv1gyja5kzc26npqpia1qqxrf0l-ruby-2.7.3",
+      url: "nar/abc.nar.zst", compression: "zstd", fileHash: "sha256:aaa",
+      fileSize: 1, narHash: "sha256:bbb", narSize: 2, references: [],
+    })).rejects.toThrow(/403/);
+    expect(calls.length).toBe(1); // no retry on 403
+  });
 });
 
 describe("buildAttestBody", () => {
