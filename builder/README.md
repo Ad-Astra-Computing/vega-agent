@@ -27,6 +27,7 @@ with `gh` (reuses your existing login, nothing to create):
 TOKEN=$(gh api --method POST \
   repos/jasonodoom/nixos-configs/actions/runners/registration-token --jq .token)
 docker run --rm \
+  --memory=12g --memory-swap=12g --cpus=4 \
   -e VEGA_MODE=runner \
   -e GITHUB_OWNER=jasonodoom \
   -e GITHUB_REPOSITORY=nixos-configs \
@@ -35,6 +36,14 @@ docker run --rm \
   -v vega-nix:/nix \
   vega-builder:0.2.0
 ```
+
+REQUIRED on a machine you use: cap the container with `--memory` (and
+`--memory-swap` equal to it, so it cannot swap-thrash the host) and `--cpus`,
+leaving real headroom. A large `nix build` will otherwise exhaust host RAM and
+make the machine unresponsive. Tune to your hardware. The container additionally
+limits `nix` parallelism (`max-jobs`, default 2; raise with `VEGA_NIX_MAX_JOBS` /
+`VEGA_NIX_CORES` on a dedicated box), but the docker limits are the hard,
+OS-enforced cap and must not be omitted.
 
 For an unattended fleet, mint the token from a GitHub App installation token
 (repository-scoped, `Administration: write`, expires in an hour) instead of `gh`.

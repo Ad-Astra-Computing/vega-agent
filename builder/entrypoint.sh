@@ -56,7 +56,13 @@ setup_nix() {
     {
       echo "experimental-features = nix-command flakes"
       echo "sandbox = ${VEGA_NIX_SANDBOX:-false}"
-      echo "max-jobs = auto"
+      # Bound build parallelism so a build cannot peg a shared host. The HARD cap
+      # is the docker --memory/--cpus on `docker run` (see README) which the OS
+      # enforces; these are the softer nix-level limits. Default conservatively
+      # (2 parallel jobs) and raise VEGA_NIX_MAX_JOBS / VEGA_NIX_CORES on a
+      # dedicated machine.
+      echo "max-jobs = ${VEGA_NIX_MAX_JOBS:-2}"
+      echo "cores = ${VEGA_NIX_CORES:-0}"
       # Single-user nix in the container: no nixbld build users / group.
       echo "build-users-group ="
       echo "substituters = https://cache.nixos.org ${VEGA_EXTRA_SUBSTITUTERS:-}"
