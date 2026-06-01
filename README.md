@@ -22,11 +22,17 @@ nix run github:Ad-Astra-Computing/vega-agent#vega -- login
 nix profile install github:Ad-Astra-Computing/vega-agent#vega   # or install it
 ```
 
-Or add it as a flake input and reference `vega.packages.${system}.default`:
+Or add it to your flake, pinned to a release tag for repeatable builds:
 
 ```nix
-inputs.vega.url = "github:Ad-Astra-Computing/vega-agent";
+inputs.vega.url = "github:Ad-Astra-Computing/vega-agent/v0.2.0";
+# optional, to share this flake's nixpkgs:
+#   inputs.vega.inputs.nixpkgs.follows = "nixpkgs";
 ```
+
+Then put it on `PATH` via `vega.packages.${system}.default` (devShells,
+`environment.systemPackages`, `home.packages`, ...) or run it with
+`nix run vega#vega -- verify ...`.
 
 Quickstart:
 
