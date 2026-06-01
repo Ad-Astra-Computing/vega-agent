@@ -19,19 +19,29 @@ docker images | grep vega-builder    # vega-builder:0.2.0
 
 ## Run (runner mode)
 
-Create a fine-grained PAT for the repo with `Administration: write` (used only to
-mint a short-lived registration token; the entrypoint drops it before the job).
+The supervisor mints a short-lived registration token and passes only that in, so
+no long-lived credential ever enters the container. On your own machine, mint it
+with `gh` (reuses your existing login, nothing to create):
 
 ```
+TOKEN=$(gh api --method POST \
+  repos/jasonodoom/nixos-configs/actions/runners/registration-token --jq .token)
 docker run --rm \
   -e VEGA_MODE=runner \
   -e GITHUB_OWNER=jasonodoom \
   -e GITHUB_REPOSITORY=nixos-configs \
-  -e GITHUB_PAT="$PAT" \
+  -e GITHUB_RUNNER_TOKEN="$TOKEN" \
   -e GITHUB_RUNNER_LABELS=self-hosted,vega-perdurabo \
   -v vega-nix:/nix \
   vega-builder:0.2.0
 ```
+
+For an unattended fleet, mint the token from a GitHub App installation token
+(repository-scoped, `Administration: write`, expires in an hour) instead of `gh`.
+As a trusted-local-only fallback you may pass `GITHUB_PAT` (fine-grained,
+`Administration: write`) and let the container mint the token itself; it warns and
+drops the PAT before the job. Prefer `GITHUB_RUNNER_TOKEN_FILE` (a `0400` tmpfs
+file, removed once read) over the env var for either token.
 
 Notes:
 - `-v vega-nix:/nix` persists the Nix store across the ephemeral, one-job-per-run

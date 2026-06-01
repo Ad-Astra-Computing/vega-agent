@@ -67,20 +67,34 @@ setup_nix() {
 run_runner() {
   : "${GITHUB_OWNER:?set GITHUB_OWNER}"
   : "${GITHUB_REPOSITORY:?set GITHUB_REPOSITORY (name only, not owner/name)}"
-  local pat; pat="$(read_secret GITHUB_PAT)"
-  [ -n "$pat" ] || { echo "vega-builder: GITHUB_PAT (or GITHUB_PAT_FILE) is required to mint a runner token" >&2; exit 1; }
 
-  local api="https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPOSITORY}/actions/runners/registration-token"
-  local token
-  token="$(curl -fsSL -X POST \
-    -H "Authorization: Bearer ${pat}" \
-    -H "Accept: application/vnd.github+json" \
-    -H "X-GitHub-Api-Version: 2022-11-28" \
-    "$api" | jq -er '.token')" || {
-      echo "vega-builder: could not mint a registration token (check GITHUB_PAT scope: administration:write)" >&2; exit 1; }
-
-  # Drop the long-lived credential before the runner (and any build) starts.
-  unset GITHUB_PAT GITHUB_PAT_FILE pat
+  # PRIMARY path: a short-lived registration token minted by the SUPERVISOR
+  # (gh on your own machine, or a GitHub App for a fleet) and passed in, so no
+  # long-lived credential ever enters this container. Prefer GITHUB_RUNNER_TOKEN_FILE
+  # (a tmpfs secret file) over the env var; the file is removed once read.
+  local token; token="$(read_secret GITHUB_RUNNER_TOKEN)"
+  if [ -n "$token" ]; then
+    [ -n "${GITHUB_RUNNER_TOKEN_FILE:-}" ] && rm -f "$GITHUB_RUNNER_TOKEN_FILE"
+    unset GITHUB_RUNNER_TOKEN GITHUB_RUNNER_TOKEN_FILE
+  else
+    # FALLBACK (trusted local runner only): mint inside the container from a PAT.
+    # Weaker, because a broad credential briefly enters the container; never use
+    # it for anything but your own trusted runner.
+    local pat; pat="$(read_secret GITHUB_PAT)"
+    [ -n "$pat" ] || {
+      echo "vega-builder: pass GITHUB_RUNNER_TOKEN (preferred: mint it in your supervisor with gh or a GitHub App) or, for a trusted local runner only, GITHUB_PAT" >&2
+      exit 1
+    }
+    echo "vega-builder: minting a registration token from GITHUB_PAT inside the container (trusted-local fallback; prefer a supervisor-minted GITHUB_RUNNER_TOKEN)" >&2
+    local api="https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPOSITORY}/actions/runners/registration-token"
+    token="$(curl -fsSL -X POST \
+      -H "Authorization: Bearer ${pat}" \
+      -H "Accept: application/vnd.github+json" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      "$api" | jq -er '.token')" || {
+        echo "vega-builder: could not mint a registration token (check GITHUB_PAT scope: administration:write)" >&2; exit 1; }
+    unset GITHUB_PAT GITHUB_PAT_FILE pat
+  fi
 
   setup_nix
 
