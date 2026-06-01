@@ -7,6 +7,7 @@
 
 import { Command } from "commander";
 import { brandIntro } from "./ui.js";
+import { VERSION } from "./version.js";
 import { registerLogin } from "./commands/login.js";
 import { registerLogout } from "./commands/logout.js";
 import { registerWhoami } from "./commands/whoami.js";
@@ -16,6 +17,7 @@ import { registerPush } from "./commands/push.js";
 import { registerStatus } from "./commands/status.js";
 import { registerDoctor } from "./commands/doctor.js";
 import { registerVerify } from "./commands/verify.js";
+import { registerMcp } from "./commands/mcp.js";
 
 const program = new Command();
 
@@ -25,7 +27,7 @@ program
     "Verifiable Nix binary cache: reproducible builds, a public transparency\n" +
       "log, and scoped social trust.",
   )
-  .version("0.1.0", "-v, --version")
+  .version(VERSION, "-v, --version")
   .showHelpAfterError("(run `vega <command> --help` for details)")
   .configureHelp({ sortSubcommands: true })
   .addHelpText(
@@ -47,6 +49,7 @@ registerPush(program);
 registerStatus(program);
 registerDoctor(program);
 registerVerify(program);
+registerMcp(program);
 
 async function run(): Promise<void> {
   // Bare `vega` shows an animated brand splash, then help (not an error).

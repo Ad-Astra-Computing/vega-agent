@@ -297,4 +297,40 @@ describe("resolveBuilds (vega.yaml drives what is built)", () => {
       },
     ]);
   });
+
+  it("expands declared devShells to devShells.<system>.<name> for the runner system", () => {
+    const cfg = parseVegaConfig({ builds: ["hello"], devShells: ["default", "rust"] });
+    expect(resolveBuilds(cfg, ".#", "/repo", "x86_64-linux")).toEqual([
+      { installable: "/repo#hello", attr: "hello" },
+      { installable: "/repo#devShells.x86_64-linux.default", attr: "devShells.x86_64-linux.default" },
+      { installable: "/repo#devShells.x86_64-linux.rust", attr: "devShells.x86_64-linux.rust" },
+    ]);
+  });
+
+  it("requires currentSystem when devShells are declared", () => {
+    const cfg = parseVegaConfig({ builds: ["hello"], devShells: ["default"] });
+    expect(() => resolveBuilds(cfg, ".#", "/repo")).toThrow(/currentSystem/);
+  });
+
+  it("expands include matchers over flake outputs and applies exclude to the whole set", () => {
+    const cfg = parseVegaConfig({
+      builds: ["packages.x86_64-linux.keepme"],
+      include: ["packages.x86_64-linux.*"],
+      exclude: ["packages.x86_64-linux.broken"],
+    });
+    const outputs = [
+      "packages.x86_64-linux.hello",
+      "packages.x86_64-linux.broken",
+      "checks.x86_64-linux.test",
+    ];
+    expect(resolveBuilds(cfg, ".#", "/repo", undefined, outputs).map((b) => b.attr)).toEqual([
+      "packages.x86_64-linux.keepme",
+      "packages.x86_64-linux.hello",
+    ]);
+  });
+
+  it("requires flakeOutputs when include matchers are declared", () => {
+    const cfg = parseVegaConfig({ include: ["packages.*.*"] });
+    expect(() => resolveBuilds(cfg, ".#", "/repo")).toThrow(/flakeOutputs/);
+  });
 });

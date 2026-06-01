@@ -33,14 +33,23 @@ Quickstart:
 ```
 vega login                  # enroll this machine (GitHub device flow)
 vega push .#my-package      # build locally, upload novel paths to your namespace
+vega verify /nix/store/<h>  # independently verify a build: signature + transparency log + NAR bytes
+vega mcp                    # read-only MCP server for AI agents (vega_verify, vega_risk)
 vega view                   # print the nix.conf substituter + keys for your view
 vega trust add github:alice # trust another builder (scoped, revocable)
 vega status                 # auth + connectivity
-vega doctor                 # diagnose nix / zstd / auth
+vega doctor                 # diagnose nix / zstd / auth, and check for a newer release
 ```
 
+`vega verify` checks the cache's signature against a key you already trust, the
+signed tree head, the build's RFC 9162 inclusion proof, and re-derives the NAR
+hash — proof, not trust. `vega mcp` exposes that to coding agents over the Model
+Context Protocol so an agent can gate a dependency on `allow`/`warn`/`deny`
+before installing it.
+
 Full command set: `login`, `logout`, `whoami`, `status`, `doctor`, `push`,
-`trust` (`add`/`remove`/`list`), `view`; run `vega <command> --help` for details.
+`verify`, `mcp`, `trust` (`add`/`remove`/`list`), `view`; run `vega <command>
+--help` for details.
 The GitHub token from `login` is used once and never stored; only a short-lived
 Vega credential is kept (`~/.config/vega/credential`, mode 0600), and the control
 plane is required to be https.

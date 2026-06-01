@@ -11,7 +11,7 @@ import {
   type Fetcher,
   type Sth,
   type InclusionProof,
-} from "../cli/verify-core.js";
+} from "./verify-core.js";
 
 const utf8 = new TextEncoder();
 function hex(b: Uint8Array): string {

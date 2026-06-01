@@ -35,6 +35,20 @@ async function toNarinfoHash(hash: string): Promise<string> {
   return out.startsWith("sha256:") ? out : `sha256:${out}`;
 }
 
+/** The runner's Nix system double, e.g. `x86_64-linux`, used to expand declared
+ * devShell names to `devShells.<system>.<name>`. */
+export async function currentSystem(): Promise<string> {
+  const { stdout } = await exec("nix", ["eval", "--impure", "--raw", "--expr", "builtins.currentSystem"]);
+  return stdout.trim();
+}
+
+/** `nix flake show --json` for the flake at `flakeDir` (current system only), so
+ * vega.yaml `include`/`exclude` matchers can be expanded against real outputs. */
+export async function flakeShow(flakeDir: string): Promise<unknown> {
+  const { stdout } = await exec("nix", ["flake", "show", "--json", "--", flakeDir], { maxBuffer: MAX_BUFFER });
+  return JSON.parse(stdout);
+}
+
 /** Default build timeout (ms); a hung build fails the job instead of idling. */
 const BUILD_TIMEOUT_MS = Number(process.env.VEGA_BUILD_TIMEOUT_MS) || 60 * 60 * 1000;
 

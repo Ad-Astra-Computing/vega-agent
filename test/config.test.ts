@@ -25,6 +25,32 @@ describe("parseVegaConfig", () => {
     expect(cfg.privacy).toEqual({ continent: false, pseudonym: true });
   });
 
+  it("parses reuse-cache (kebab-case key, default off)", () => {
+    expect(parseVegaConfig({ builds: ["a"] }).reuseCache).toBe(false);
+    expect(parseVegaConfig({ builds: ["a"], "reuse-cache": true }).reuseCache).toBe(true);
+    expect(() => parseVegaConfig({ builds: ["a"], "reuse-cache": "yes" })).toThrow(VegaConfigError);
+  });
+
+  it("parses devShells (default empty, rejects non-string entries)", () => {
+    expect(parseVegaConfig({ builds: ["a"] }).devShells).toEqual([]);
+    expect(parseVegaConfig({ builds: ["a"], devShells: ["default", "rust"] }).devShells).toEqual(["default", "rust"]);
+    expect(() => parseVegaConfig({ builds: ["a"], devShells: ["default", ""] })).toThrow(VegaConfigError);
+    expect(() => parseVegaConfig({ builds: ["a"], devShells: "default" })).toThrow(VegaConfigError);
+  });
+
+  it("parses include/exclude matchers and allows include without builds", () => {
+    const cfg = parseVegaConfig({ include: ["packages.x86_64-linux.*"], exclude: ["*.*.broken"] });
+    expect(cfg.builds).toEqual([]);
+    expect(cfg.include).toEqual(["packages.x86_64-linux.*"]);
+    expect(cfg.exclude).toEqual(["*.*.broken"]);
+    expect(() => parseVegaConfig({ include: ["bad attr!"] })).toThrow(VegaConfigError);
+  });
+
+  it("rejects a config that declares nothing to build", () => {
+    expect(() => parseVegaConfig({})).toThrow(VegaConfigError);
+    expect(() => parseVegaConfig({ builds: [], devShells: [], include: [] })).toThrow(VegaConfigError);
+  });
+
   it("rejects configs with no builds", () => {
     expect(() => parseVegaConfig({})).toThrow(VegaConfigError);
     expect(() => parseVegaConfig({ builds: [] })).toThrow(VegaConfigError);

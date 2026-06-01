@@ -53,6 +53,21 @@ export interface PromotionLeaf {
 
 const utf8 = new TextEncoder();
 
+/** Hard cap on how many log entries to scan when no explicit bound is given, so
+ * a hostile cache cannot drive an unbounded GET loop via a huge `sth.size`. */
+export const MAX_SCAN_DEFAULT = 10000;
+
+/** Extract the 32-char store-path hash from a path, basename, hash, or
+ * `<hash>.narinfo`. Pure: returns null on anything that isn't a valid hash, so
+ * both the CLI (which turns null into a teaching error) and the MCP server
+ * (which returns a structured error) can share it. */
+export function parseStorePathHash(arg: string): string | null {
+  const noSuffix = arg.replace(/\.narinfo$/, "");
+  const base = noSuffix.includes("/") ? noSuffix.slice(noSuffix.lastIndexOf("/") + 1) : noSuffix;
+  const hash = base.split("-")[0] ?? "";
+  return /^[0-9a-z]{32}$/.test(hash) ? hash : null;
+}
+
 export function hexToBytes(hex: string): Uint8Array {
   if (hex.length % 2 !== 0 || /[^0-9a-fA-F]/.test(hex)) {
     throw new Error(`invalid hex: ${hex.slice(0, 16)}`);
@@ -202,8 +217,12 @@ export async function verifyBuild(opts: VerifyOptions): Promise<VerifyResult> {
   const sth = (await getJson(fetcher, "/log/sth")) as Sth;
   result.transparency.sthVerified = verifySth(publicKey, sth);
 
-  // 3. Locate the promotion leaf for this exact build by scanning the log.
-  const limit = Math.min(opts.maxScan ?? sth.size, sth.size);
+  // 3. Locate the promotion leaf for this exact build by scanning the log. The
+  // scan is bounded by an explicit cap or MAX_SCAN_DEFAULT, never by the cache's
+  // self-reported size alone (a hostile cache could claim a huge size).
+  const size = Number.isFinite(sth.size) && sth.size > 0 ? Math.floor(sth.size) : 0;
+  const cap = opts.maxScan !== undefined && opts.maxScan > 0 ? Math.floor(opts.maxScan) : MAX_SCAN_DEFAULT;
+  const limit = Math.min(cap, size);
   let index: number | null = null;
   let entryData: string | null = null;
   for (let i = 0; i < limit; i++) {

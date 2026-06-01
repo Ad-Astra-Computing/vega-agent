@@ -1,8 +1,4 @@
 import type { Command } from "commander";
-import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { promisify } from "node:util";
 import { createZstdDecompress } from "node:zlib";
 import { Readable } from "node:stream";
 import pc from "picocolors";
@@ -12,9 +8,9 @@ import { parsePublicKey } from "../../src/nix/signing.js";
 import { verifyNarHash } from "../../src/nix/verify.js";
 import { parseNarInfo } from "../../src/nix/narinfo.js";
 import type { NixPublicKey } from "../../src/nix/types.js";
+import { trustedKeys, pickTrustedKey } from "../keys.js";
 import { verifyBuild, fullyVerified, type Fetcher, type VerifyResult } from "../verify-core.js";
 
-const execFileP = promisify(execFile);
 const SHARED_KEY_NAME = "vega-cache-1";
 
 /** Extract the 32-char store-path hash from a path, basename, hash, or .narinfo. */
@@ -31,43 +27,6 @@ function extractHash(arg: string): string {
   return hash;
 }
 
-/** Collect trusted-public-keys Nix already trusts: `nix config show`, then the
- * config files. These are keys the user has chosen to trust, so verifying
- * against them is meaningful (unlike a key fetched from the cache itself). */
-async function trustedKeys(): Promise<Map<string, NixPublicKey>> {
-  const out = new Map<string, NixPublicKey>();
-  const add = (raw: string) => {
-    for (const tok of raw.split(/\s+/)) {
-      const t = tok.trim();
-      if (!t.includes(":")) continue;
-      try {
-        const pk = parsePublicKey(t);
-        out.set(pk.name, pk);
-      } catch {
-        /* skip malformed */
-      }
-    }
-  };
-  try {
-    const { stdout } = await execFileP("nix", ["config", "show", "trusted-public-keys"]);
-    add(stdout);
-  } catch {
-    /* nix absent or older: fall back to files */
-  }
-  for (const path of ["/etc/nix/nix.conf", `${homedir()}/.config/nix/nix.conf`]) {
-    try {
-      const text = await readFile(path, "utf8");
-      for (const line of text.split("\n")) {
-        const m = /^\s*(?:extra-)?trusted-public-keys\s*=\s*(.+)$/.exec(line);
-        if (m) add(m[1]!);
-      }
-    } catch {
-      /* file absent */
-    }
-  }
-  return out;
-}
-
 /** Resolve the key to verify against, in order: explicit flag, then a
  * trusted-public-keys entry whose name matches the narinfo's signature. */
 async function resolveKey(sigNames: string[], flag?: string): Promise<NixPublicKey> {
@@ -78,11 +37,8 @@ async function resolveKey(sigNames: string[], flag?: string): Promise<NixPublicK
       fail(`--public-key is not a valid '<name>:<base64>' key`);
     }
   }
-  const trusted = await trustedKeys();
-  for (const name of sigNames) {
-    const pk = trusted.get(name);
-    if (pk) return pk;
-  }
+  const pk = pickTrustedKey(await trustedKeys(), sigNames);
+  if (pk) return pk;
   fail(
     `no trusted public key found for this build (it is signed by: ${sigNames.join(", ") || "nothing"}).`,
     [

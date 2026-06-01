@@ -5,6 +5,6 @@ import { defineConfig } from "vitest/config";
 // real runner, not here.
 export default defineConfig({
   test: {
-    include: ["test/**/*.test.ts"],
+    include: ["test/**/*.test.ts", "cli/**/*.test.ts"],
   },
 });

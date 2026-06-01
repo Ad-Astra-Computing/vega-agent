@@ -4,6 +4,7 @@ import { promisify } from "node:util";
 import pc from "picocolors";
 import { loadCredentialMaybe, DEFAULT_CONTROL_PLANE } from "../context.js";
 import { star, info } from "../ui.js";
+import { VERSION, AGENT_REPO, compareVersions } from "../version.js";
 
 const exec = promisify(execFile);
 
@@ -72,6 +73,35 @@ export function registerDoctor(program: Command): void {
           ? { name: "control plane", level: "ok", detail: url }
           : { name: "control plane", level: "fail", detail: `unreachable: ${url}` },
       );
+
+      // Explicit, on-demand staleness check (never a startup phone-home): compare
+      // the running version to the latest published agent release. A network
+      // hiccup or no-releases-yet is informational, not a failure.
+      try {
+        const res = await fetch(`https://api.github.com/repos/${AGENT_REPO}/releases/latest`, {
+          headers: { accept: "application/vnd.github+json" },
+          signal: AbortSignal.timeout(4000),
+        });
+        if (res.status === 404) {
+          checks.push({ name: "version", level: "ok", detail: `${VERSION} (no published releases yet)` });
+        } else if (res.ok) {
+          const tag = ((await res.json()) as { tag_name?: unknown }).tag_name;
+          if (typeof tag === "string" && compareVersions(tag, VERSION) > 0) {
+            checks.push({
+              name: "version",
+              level: "warn",
+              detail: `${VERSION} (latest ${tag})`,
+              fix: `nix flake update vega-agent  (input), or  nix run --refresh github:${AGENT_REPO}#vega`,
+            });
+          } else {
+            checks.push({ name: "version", level: "ok", detail: `${VERSION} (current)` });
+          }
+        } else {
+          checks.push({ name: "version", level: "ok", detail: `${VERSION} (check unavailable)` });
+        }
+      } catch {
+        checks.push({ name: "version", level: "ok", detail: `${VERSION} (offline)` });
+      }
 
       info(star("Vega doctor"));
       const mark = { ok: pc.green("ok  "), warn: pc.yellow("warn"), fail: pc.red("fail") };

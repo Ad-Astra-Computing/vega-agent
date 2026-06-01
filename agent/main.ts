@@ -23,7 +23,8 @@ import { mapConcurrent } from "../src/agent/concurrency.js";
 import { tenantSubstituter } from "../src/agent/substituter.js";
 import { parseVegaConfig, type VegaConfig } from "../src/agent/config.js";
 import { resolveBuilds } from "../src/agent/builds.js";
-import { nixBuild, pathInfoClosure, pathInfoOutputs, makeNar } from "./nix.js";
+import { nixBuild, pathInfoClosure, pathInfoOutputs, makeNar, currentSystem, flakeShow } from "./nix.js";
+import { flattenFlakeShow } from "../src/agent/outputs.js";
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -110,7 +111,11 @@ async function main(): Promise<void> {
   // vega.yaml lives in the checked-out repo; GITHUB_WORKSPACE is its root.
   const flakeDir = process.env.GITHUB_WORKSPACE || process.cwd();
   const config = await readVegaConfig(flakeDir);
-  const builds = resolveBuilds(config, fallback, flakeDir);
+  // devShells need the runner's system; include/exclude need the flake's outputs.
+  const sys = config && config.devShells.length > 0 ? await currentSystem() : undefined;
+  const flakeOutputs =
+    config && config.include.length > 0 ? flattenFlakeShow(await flakeShow(flakeDir)) : undefined;
+  const builds = resolveBuilds(config, fallback, flakeDir, sys, flakeOutputs);
   if (config) console.log(`vega.yaml: building ${builds.length} declared output(s).`);
 
   // Capture the runner's OIDC request credential, then DROP it from the
@@ -144,8 +149,10 @@ async function main(): Promise<void> {
   // Vega, so this must stay OFF for the reproducer lane and any job whose build
   // feeds shared-tier attestation evidence. Otherwise a compromised Vega could
   // feed a malicious substitute into a build that then vouches for it.
+  // Enabled by the action input (VEGA_REUSE_CACHE) or `reuse-cache: true` in vega.yaml.
   const repository = process.env.GITHUB_REPOSITORY;
-  if (repository && process.env.VEGA_REUSE_CACHE === "true") {
+  const reuseCache = process.env.VEGA_REUSE_CACHE === "true" || (config?.reuseCache ?? false);
+  if (repository && reuseCache) {
     try {
       const { url, keyUrl } = tenantSubstituter(controlPlane, repository);
       const res = await fetch(keyUrl);
