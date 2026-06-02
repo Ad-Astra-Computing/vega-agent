@@ -9,6 +9,7 @@ const ctx: ToolContext = {
   cacheUrl: "https://vega-cache.dev",
   sharedKeyName: "vega-cache-1",
   resolveKey: async () => null,
+  verifyNar: async () => ({ ok: false, detail: "not fetched" }),
 };
 
 const req = (id: number | null | undefined, method: string, params?: unknown) =>

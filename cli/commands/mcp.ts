@@ -6,16 +6,20 @@ import { trustedKeys, pickTrustedKey } from "../keys.js";
 import { runStdio } from "../mcp/server.js";
 import type { ToolContext } from "../mcp/tools.js";
 import type { Fetcher } from "../verify-core.js";
+import { checkNarHash } from "../nar-check.js";
 
 const SHARED_KEY_NAME = "vega-cache-1";
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024; // narinfo/sth/entry/proof are tiny
 const MCP_MAX_SCAN = 2000; // default cap for automated MCP calls
+const REQUEST_TIMEOUT_MS = 15_000; // small bodies; fail fast on a stalled cache
+const NAR_TIMEOUT_MS = 120_000; // NARs can be large but must still terminate
 
 /** A fetcher that aborts any response exceeding `maxBytes`, so a hostile cache
- * cannot exhaust memory by returning a giant narinfo/proof/entry body. */
+ * cannot exhaust memory by returning a giant narinfo/proof/entry body, and times
+ * out a stalled response so a single call cannot hang the serial stdio server. */
 function boundedFetcher(base: string, maxBytes: number): Fetcher {
   return async (path) => {
-    const res = await fetch(`${base}${path}`);
+    const res = await fetch(`${base}${path}`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     let body: string | null = null;
     const read = async (): Promise<string> => {
       if (body !== null) return body;
@@ -85,6 +89,10 @@ export function registerMcp(program: Command): void {
         sharedKeyName: SHARED_KEY_NAME,
         maxScan,
         resolveKey: async (sigNames) => flagKey ?? pickTrustedKey(await trustedKeys(), sigNames),
+        // Streaming NAR fetch (decompress + hash), bounded by a timeout rather
+        // than a byte cap since a legitimate NAR can be large.
+        verifyNar: (info) =>
+          checkNarHash((p) => fetch(`${cacheUrl}${p}`, { signal: AbortSignal.timeout(NAR_TIMEOUT_MS) }), info),
       };
       await runStdio(ctx);
     });

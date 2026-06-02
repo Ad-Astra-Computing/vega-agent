@@ -23,7 +23,7 @@ import {
   type VerifyResult,
 } from "../verify-core.js";
 import { parseNarInfo } from "../../src/nix/narinfo.js";
-import type { NixPublicKey } from "../../src/nix/types.js";
+import type { NarInfo, NixPublicKey } from "../../src/nix/types.js";
 import { untrusted } from "./sanitize.js";
 
 export interface ToolContext {
@@ -35,6 +35,11 @@ export interface ToolContext {
   /** Resolve a trusted public key for the narinfo's signature key names, from
    * the user's nix.conf / an explicit key. Returns null if none is trusted. */
   resolveKey(sigNames: string[]): Promise<NixPublicKey | null>;
+  /** Re-derive the NAR bytes for a narinfo and confirm they hash to the signed
+   * narHash. A valid signature and log record only bind the narinfo; this is the
+   * independent content check, so without it a signed/logged narinfo over corrupt
+   * or substituted bytes would falsely verify. Bounded by a fetch timeout. */
+  verifyNar(info: Pick<NarInfo, "url" | "compression" | "narHash">): Promise<{ ok: boolean; detail: string }>;
   /** Bound the transparency-log scan (LLM10, unbounded consumption). */
   maxScan?: number;
 }
@@ -49,7 +54,7 @@ export function isError(v: unknown): v is ToolError {
 async function runVerify(
   ctx: ToolContext,
   target: string,
-): Promise<{ result: VerifyResult } | ToolError> {
+): Promise<{ result: VerifyResult; narOk: boolean; narDetail: string } | ToolError> {
   const hash = parseStorePathHash(target);
   if (hash === null) return { error: `'${untrusted(target, 80)}' is not a store path or hash` };
 
@@ -74,14 +79,17 @@ async function runVerify(
     sharedKeyName: ctx.sharedKeyName,
     maxScan: ctx.maxScan,
   });
-  return { result };
+  // Independent content check: re-derive the NAR bytes and confirm they hash to
+  // the signed narHash. A build is only fully verified when this also passes.
+  const nar = await ctx.verifyNar(info);
+  return { result, narOk: nar.ok, narDetail: nar.detail };
 }
 
 /** Shape a VerifyResult into a fully-sanitized tool payload: EVERY string that
  * enters the agent's context is passed through `untrusted()`, including the key
  * name (which comes from nix.conf / a flag and is not validated for control
  * chars) and our own note. Booleans/indices are inherently safe. */
-function shape(r: VerifyResult) {
+function shape(r: VerifyResult, narOk: boolean) {
   const t = r.transparency;
   return {
     storePath: untrusted(r.storePath, 512),
@@ -101,7 +109,8 @@ function shape(r: VerifyResult) {
       scanned: t.scanned,
       ...(t.note !== undefined ? { note: untrusted(t.note, 256) } : {}),
     },
-    verified: fullyVerified(r),
+    narHashVerified: narOk,
+    verified: fullyVerified(r) && narOk,
   };
 }
 
@@ -111,7 +120,7 @@ export async function verifyTool(
   input: { target: string },
 ): Promise<ReturnType<typeof shape> | ToolError> {
   const v = await runVerify(ctx, input.target);
-  return isError(v) ? v : shape(v.result);
+  return isError(v) ? v : shape(v.result, v.narOk);
 }
 
 export interface RiskVerdict {
@@ -124,14 +133,25 @@ export interface RiskVerdict {
 
 /** Map a verification result to a machine-actionable gate. Every code is backed
  * by a cryptographic fact in `proofs`; nothing here is a heuristic score. */
-export function assessRisk(r: VerifyResult): RiskVerdict {
-  const proofs = shape(r);
+export function assessRisk(r: VerifyResult, narOk: boolean): RiskVerdict {
+  const proofs = shape(r, narOk);
   const t = r.transparency;
   if (!r.signature.ok) {
     return {
       verdict: "deny",
       tier: r.signature.scope,
       reasonCodes: ["SIGNATURE_INVALID"],
+      proofs,
+      nextActions: ["build_locally", "pin_previous_verified_version"],
+    };
+  }
+  // The served bytes must hash to the signed narHash; a content mismatch denies
+  // regardless of tier (a valid signature over substituted bytes is still bad).
+  if (!narOk) {
+    return {
+      verdict: "deny",
+      tier: r.signature.scope,
+      reasonCodes: ["NAR_HASH_MISMATCH"],
       proofs,
       nextActions: ["build_locally", "pin_previous_verified_version"],
     };
@@ -179,5 +199,5 @@ export async function riskTool(
   input: { target: string },
 ): Promise<RiskVerdict | ToolError> {
   const v = await runVerify(ctx, input.target);
-  return isError(v) ? v : assessRisk(v.result);
+  return isError(v) ? v : assessRisk(v.result, v.narOk);
 }

@@ -1,6 +1,7 @@
-/** The running `vega` version. Bump this when cutting a release tag; `vega
- * doctor` compares it to the latest published tag to report staleness. */
-export const VERSION = "0.2.0";
+/** The running `vega` version. Kept in sync with package.json by a test (so it
+ * cannot drift on a release); `vega doctor` compares it to the latest published
+ * tag to report staleness. */
+export const VERSION = "0.3.0";
 
 /** The agent repo whose releases `vega doctor` checks against. */
 export const AGENT_REPO = "Ad-Astra-Computing/vega-agent";

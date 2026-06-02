@@ -12,7 +12,7 @@ const utf8 = new TextEncoder();
 const hex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
 const HASH = "abc123def456abc123def456abc123de";
 
-function ctxFor(opts: { keyName?: string; tamper?: (f: { narinfoText: string; sth: any; proof: any; leaves: string[] }) => void } = {}): {
+function ctxFor(opts: { keyName?: string; narOk?: boolean; tamper?: (f: { narinfoText: string; sth: any; proof: any; leaves: string[] }) => void } = {}): {
   ctx: ToolContext;
   pub: NixPublicKey;
 } {
@@ -59,6 +59,7 @@ function ctxFor(opts: { keyName?: string; tamper?: (f: { narinfoText: string; st
     cacheUrl: "https://vega-cache.dev",
     sharedKeyName: "vega-cache-1",
     resolveKey: async (sigNames) => (sigNames.includes(pub.name) ? pub : null),
+    verifyNar: async () => ({ ok: opts.narOk ?? true, detail: "test" }),
   };
   return { ctx, pub };
 }
@@ -86,7 +87,17 @@ describe("verifyTool", () => {
     expect(isError(r)).toBe(false);
     if (!isError(r)) {
       expect(r.verified).toBe(true);
+      expect(r.narHashVerified).toBe(true);
       expect(r.signature.scope).toBe("shared");
+    }
+  });
+  it("reports verified:false when the NAR bytes do not match, even if signed+logged", async () => {
+    const { ctx } = ctxFor({ narOk: false });
+    const r = await verifyTool(ctx, { target: HASH });
+    expect(isError(r)).toBe(false);
+    if (!isError(r)) {
+      expect(r.verified).toBe(false);
+      expect(r.narHashVerified).toBe(false);
     }
   });
   it("errors on a non-store-path target without calling the cache", async () => {
@@ -117,6 +128,19 @@ describe("riskTool verdicts", () => {
     if (!isError(r)) {
       expect(r.verdict).toBe("deny");
       expect(r.reasonCodes).toContain("INCLUSION_PROOF_FAILED");
+    }
+  });
+  it("denies a signed, logged build whose NAR bytes do not hash to the claim", async () => {
+    // Signature + inclusion are valid, but the served NAR re-derives to a
+    // different hash: a content mismatch must deny, not allow.
+    const { ctx } = ctxFor({ narOk: false });
+    const r = await riskTool(ctx, { target: HASH });
+    expect(isError(r)).toBe(false);
+    if (!isError(r)) {
+      expect(r.verdict).toBe("deny");
+      expect(r.reasonCodes).toContain("NAR_HASH_MISMATCH");
+      expect(r.proofs.verified).toBe(false);
+      expect(r.proofs.narHashVerified).toBe(false);
     }
   });
   it("warns on a scoped (non-shared) binding", async () => {

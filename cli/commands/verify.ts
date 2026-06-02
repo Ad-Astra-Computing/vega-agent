@@ -1,12 +1,10 @@
 import type { Command } from "commander";
-import { createZstdDecompress } from "node:zlib";
-import { Readable } from "node:stream";
 import pc from "picocolors";
 import { DEFAULT_CONTROL_PLANE, assertSafeControlPlane, controlPlaneFor } from "../context.js";
 import { star, info, success, warn, fail, keyValues, jsonEvent } from "../ui.js";
 import { parsePublicKey } from "../../src/nix/signing.js";
-import { verifyNarHash } from "../../src/nix/verify.js";
 import { parseNarInfo } from "../../src/nix/narinfo.js";
+import { checkNarHash } from "../nar-check.js";
 import type { NixPublicKey } from "../../src/nix/types.js";
 import { trustedKeys, pickTrustedKey } from "../keys.js";
 import { verifyBuild, fullyVerified, type Fetcher, type VerifyResult } from "../verify-core.js";
@@ -49,30 +47,6 @@ async function resolveKey(sigNames: string[], flag?: string): Promise<NixPublicK
   );
 }
 
-/** Re-derive the uncompressed NAR hash and compare to the signed claim. */
-async function checkNar(
-  cacheUrl: string,
-  url: string,
-  compression: string,
-  narHash: string,
-): Promise<{ ok: boolean; detail: string }> {
-  if (compression !== "zstd" && compression !== "none") {
-    return { ok: false, detail: `unsupported compression '${compression}' for local check` };
-  }
-  const res = await fetch(`${cacheUrl}/${url}`);
-  if (!res.ok || res.body === null) return { ok: false, detail: `NAR fetch failed (HTTP ${res.status})` };
-  let stream: ReadableStream<Uint8Array>;
-  if (compression === "zstd") {
-    const compressed = Readable.fromWeb(res.body as Parameters<typeof Readable.fromWeb>[0]);
-    stream = Readable.toWeb(compressed.pipe(createZstdDecompress())) as ReadableStream<Uint8Array>;
-  } else {
-    stream = res.body;
-  }
-  const r = await verifyNarHash(narHash, stream);
-  return r.ok
-    ? { ok: true, detail: r.actual }
-    : { ok: false, detail: `signed ${r.expected}, content ${r.actual}` };
-}
 
 function tick(ok: boolean): string {
   return ok ? pc.green("ok") : pc.red("FAIL");
@@ -126,7 +100,7 @@ export function registerVerify(program: Command): void {
         });
 
         const nar = opts.nar
-          ? await checkNar(cacheUrl, narInfo.url, narInfo.compression, narInfo.narHash)
+          ? await checkNarHash((p) => fetch(`${cacheUrl}${p}`, { signal: AbortSignal.timeout(60_000) }), narInfo)
           : null;
 
         const sig = result.signature;

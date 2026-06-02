@@ -1,5 +1,17 @@
 import { describe, it, expect } from "vitest";
-import { compareVersions } from "./version.js";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { VERSION, compareVersions } from "./version.js";
+
+describe("VERSION", () => {
+  it("matches package.json so the release version never drifts", () => {
+    const pkg = JSON.parse(
+      readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8"),
+    ) as { version: string };
+    expect(VERSION).toBe(pkg.version);
+  });
+});
 
 describe("compareVersions", () => {
   it("orders dotted numeric versions and ignores a leading v", () => {
