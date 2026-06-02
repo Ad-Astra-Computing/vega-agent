@@ -1,13 +1,21 @@
 version: 2
 updates:
-  # Keep the one runtime dependency current.
+  # Keep npm dependencies current. Minor/patch updates are grouped into one PR
+  # (which the auto-merge workflow merges once CI passes); major updates come as
+  # separate PRs for manual review.
   - package-ecosystem: npm
     directory: "/"
     schedule:
       interval: weekly
+    groups:
+      npm-minor-patch:
+        update-types: ["minor", "patch"]
   # Bump the SHA-pinned actions (in the workflows and the composite action) so
-  # pinning stays secure without going stale.
+  # pinning stays secure without going stale. Group them into one PR.
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
