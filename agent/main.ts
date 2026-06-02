@@ -11,6 +11,7 @@
 // builds, upstream; see test/), and the nix shelling in ./nix.ts.
 
 import { readFile, mkdtemp, rm } from "node:fs/promises";
+import { openAsBlob } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -90,7 +91,7 @@ async function cacheBuild(
 
   // Compress + upload + attest each path with bounded concurrency, so a large
   // closure's paths overlap instead of running strictly one at a time. Modest
-  // by default since each task reads its NAR into memory before the PUT.
+  // by default since each task compresses a NAR and holds open upload/attest work.
   let resumed = 0;
   const concurrency = Number(process.env.VEGA_UPLOAD_CONCURRENCY) || 4;
   const shared = await mapConcurrent(paths, concurrency, async (info) => {
@@ -105,7 +106,10 @@ async function cacheBuild(
       resumed++;
     } else {
       const uploadUrl = await client.uploadUrl(nar.url);
-      await client.putNar(uploadUrl, await readFile(nar.file));
+      // Stream the compressed NAR from disk as a file-backed Blob rather than
+      // reading the whole thing into memory: a heavy closure's NARs are large and
+      // VEGA_UPLOAD_CONCURRENCY of them buffered at once OOM-kills the runner.
+      await client.putNar(uploadUrl, await openAsBlob(nar.file));
     }
     const outputAttr = topPaths.has(info.path) ? attr : "";
     const result = await client.attest(

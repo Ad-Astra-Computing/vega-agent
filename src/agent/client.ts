@@ -157,7 +157,8 @@ export class ControlPlaneClient {
    * Fetch with retry on transient failures (network errors and retryable HTTP
    * statuses). A non-retryable status throws immediately with a labeled error;
    * exhausting the retry budget rethrows the last failure. The body must be
-   * replayable (string or Buffer here), which all callers satisfy.
+   * replayable across attempts (a string, Buffer, or file-backed Blob, all of
+   * which can be re-read), which every caller satisfies.
    */
   private async fetchWithRetry(url: string, init: RequestInit, label: string): Promise<Response> {
     let lastErr: unknown;
@@ -195,7 +196,9 @@ export class ControlPlaneClient {
     return url;
   }
 
-  /** Upload NAR bytes directly to R2 via the presigned URL. */
+  /** Upload a NAR directly to R2 via the presigned URL. Callers pass a file-backed
+   * Blob (see openAsBlob) so the compressed NAR streams from disk rather than being
+   * buffered in memory; the Blob is re-readable, so the retry path still works. */
   async putNar(presignedUrl: string, body: BodyInit): Promise<void> {
     await this.fetchWithRetry(presignedUrl, { method: "PUT", body }, "nar upload");
   }

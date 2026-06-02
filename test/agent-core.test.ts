@@ -1,4 +1,8 @@
 import { describe, it, expect } from "vitest";
+import { writeFile, rm } from "node:fs/promises";
+import { openAsBlob } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fetchActionsOidcToken } from "../src/agent/oidc.js";
 import { ControlPlaneClient } from "../src/agent/client.js";
 import { buildAttestBody } from "../src/agent/narinfo.js";
@@ -66,6 +70,30 @@ describe("ControlPlaneClient", () => {
     const client = new ControlPlaneClient(base, "jwt", fn);
     await client.putNar("https://r2/put?sig=x", new Uint8Array([1, 2, 3]));
     expect(calls[0]!.url).toBe("https://r2/put?sig=x");
+  });
+
+  it("streams a file-backed Blob and re-reads it on retry (replayable, no full-buffer)", async () => {
+    const file = join(tmpdir(), `vega-nar-${Math.random().toString(36).slice(2)}.bin`);
+    const bytes = new Uint8Array([10, 20, 30, 40, 50]);
+    await writeFile(file, bytes);
+    try {
+      let n = 0;
+      const bodies: string[] = [];
+      const fn = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const req = new Request(input as RequestInfo, init);
+        bodies.push(Buffer.from(await req.arrayBuffer()).toString("hex"));
+        n += 1;
+        return n < 2 ? new Response("busy", { status: 503 }) : new Response(null, { status: 200 });
+      }) as unknown as typeof fetch;
+      const client = new ControlPlaneClient(base, "jwt", fn, fastRetry);
+      // openAsBlob is how the agent passes NARs: a file-backed Blob undici streams.
+      await client.putNar("https://r2/put?sig=x", await openAsBlob(file));
+      expect(n).toBe(2); // 503 then success
+      // The Blob was re-read on the retry: both attempts saw the same full bytes.
+      expect(bodies).toEqual(["0a141e2832", "0a141e2832"]);
+    } finally {
+      await rm(file, { force: true });
+    }
   });
 
   it("posts an attestation and returns the decision", async () => {
