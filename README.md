@@ -25,7 +25,7 @@ nix profile install github:Ad-Astra-Computing/vega-agent#vega   # or install it
 Or add it to your flake, pinned to a release tag for repeatable builds:
 
 ```nix
-inputs.vega.url = "github:Ad-Astra-Computing/vega-agent/v0.3.0";
+inputs.vega.url = "github:Ad-Astra-Computing/vega-agent/v0.4.0";
 # optional, to share this flake's nixpkgs:
 #   inputs.vega.inputs.nixpkgs.follows = "nixpkgs";
 ```
