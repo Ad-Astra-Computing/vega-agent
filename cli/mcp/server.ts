@@ -109,6 +109,27 @@ export async function handleRpc(ctx: ToolContext, req: Rpc): Promise<object | nu
   }
 }
 
+/** Decode one stdin line into a request to dispatch, a JSON-RPC error response
+ * to emit, or null (a blank line to skip). Malformed JSON yields -32700 (parse
+ * error); an oversized or non-object frame yields -32600 (invalid request), per
+ * JSON-RPC 2.0, with `id: null` since the request id cannot be recovered. */
+export function decodeFrame(line: string): { req: Rpc } | { errorResponse: object } | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  const errResp = (code: number, message: string) => ({
+    errorResponse: { jsonrpc: "2.0", id: null, error: { code, message } },
+  });
+  if (trimmed.length > MAX_FRAME) return errResp(-32600, "Invalid Request: frame too large");
+  let v: unknown;
+  try {
+    v = JSON.parse(trimmed);
+  } catch {
+    return errResp(-32700, "Parse error");
+  }
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return errResp(-32600, "Invalid Request");
+  return { req: v as Rpc };
+}
+
 /** Run the server over stdin/stdout until EOF. Newline-delimited JSON-RPC. */
 export async function runStdio(ctx: ToolContext): Promise<void> {
   process.stdin.setEncoding("utf8");
@@ -122,16 +143,15 @@ export async function runStdio(ctx: ToolContext): Promise<void> {
     }
     let nl: number;
     while ((nl = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, nl).trim();
+      const line = buf.slice(0, nl);
       buf = buf.slice(nl + 1);
-      if (!line || line.length > MAX_FRAME) continue;
-      let req: Rpc;
-      try {
-        req = JSON.parse(line) as Rpc;
-      } catch {
-        continue; // ignore malformed lines
+      const decoded = decodeFrame(line);
+      if (decoded === null) continue;
+      if ("errorResponse" in decoded) {
+        process.stdout.write(JSON.stringify(decoded.errorResponse) + "\n");
+        continue;
       }
-      const res = await handleRpc(ctx, req);
+      const res = await handleRpc(ctx, decoded.req);
       if (res) process.stdout.write(JSON.stringify(res) + "\n");
     }
   }

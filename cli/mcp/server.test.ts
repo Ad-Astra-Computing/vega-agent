@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { handleRpc } from "./server.js";
+import { handleRpc, decodeFrame } from "./server.js";
 import type { ToolContext } from "./tools.js";
 
 // A stub context whose cache always 404s, so tool calls resolve to a structured
@@ -55,5 +55,27 @@ describe("MCP server protocol", () => {
     expect(await handleRpc(ctx, req(undefined, "notifications/initialized"))).toBeNull();
     const r = (await handleRpc(ctx, req(6, "does/not/exist"))) as any;
     expect(r.error.code).toBe(-32601);
+  });
+});
+
+describe("decodeFrame", () => {
+  const code = (d: ReturnType<typeof decodeFrame>) =>
+    d && "errorResponse" in d ? (d.errorResponse as any).error.code : undefined;
+  it("returns -32700 for malformed JSON", () => {
+    expect(code(decodeFrame("{not json"))).toBe(-32700);
+  });
+  it("returns -32600 for a non-object frame", () => {
+    expect(code(decodeFrame("123"))).toBe(-32600);
+    expect(code(decodeFrame("[1,2]"))).toBe(-32600);
+  });
+  it("returns -32600 for an oversized frame", () => {
+    expect(code(decodeFrame('{"a":"' + "x".repeat(9 * 1024 * 1024) + '"}'))).toBe(-32600);
+  });
+  it("skips a blank line", () => {
+    expect(decodeFrame("   ")).toBeNull();
+  });
+  it("passes a valid request through", () => {
+    const d = decodeFrame('{"jsonrpc":"2.0","id":1,"method":"ping"}');
+    expect(d && "req" in d && d.req.method).toBe("ping");
   });
 });
