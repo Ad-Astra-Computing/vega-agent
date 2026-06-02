@@ -34,8 +34,10 @@ jobs:
         with:
           # Pin the installer itself, not just the wrapper action: the action
           # otherwise fetches the latest installer at runtime, leaving a mutable
-          # dependency in the signing/publish path. Pinned to an immutable commit.
-          source-revision: 9a5e37a9ad25e62337dda5be777007c70c470bfc # nix-installer v3.21.0
+          # dependency in the signing/publish path. Pin to a released installer
+          # version (the CDN serves prebuilt artifacts by tag, not by arbitrary
+          # revision).
+          source-tag: v3.21.0
           extra-conf: |
             experimental-features = nix-command flakes
             sandbox = true
