@@ -157,7 +157,7 @@ async function main(): Promise<void> {
   // Mint once up front to fail fast if `id-token: write` is missing, rather than
   // only after a long build. The provider re-mints when the token nears expiry.
   await provider.get();
-  const client = new ControlPlaneClient(controlPlane, () => provider.get());
+  const client = new ControlPlaneClient(controlPlane, (force) => provider.get(force));
 
   const opts: CacheOpts = {
     skipUpstream: process.env.VEGA_SKIP_UPSTREAM === "true",

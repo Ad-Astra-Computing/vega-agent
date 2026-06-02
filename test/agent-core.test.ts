@@ -168,6 +168,39 @@ describe("ControlPlaneClient", () => {
     })).rejects.toThrow(/403/);
     expect(calls.length).toBe(1); // no retry on 403
   });
+
+  it("re-mints and retries once when a 401 means the token expired mid-run", async () => {
+    const minted: string[] = [];
+    const tokenFn = async (force?: boolean) => {
+      const t = force ? "fresh" : "old";
+      minted.push(t);
+      return t;
+    };
+    const { fn, calls } = fakeFetch((req) =>
+      req.headers.get("authorization") === "Bearer fresh"
+        ? new Response(JSON.stringify({ url: "https://r2/put?sig=x" }))
+        : new Response("expired", { status: 401 }),
+    );
+    const client = new ControlPlaneClient(base, tokenFn, fn, fastRetry);
+    expect(await client.uploadUrl("nar/abc.nar.zst")).toBe("https://r2/put?sig=x");
+    expect(calls.length).toBe(2); // first 401 with the stale token, then success with the fresh one
+    expect(calls[0]!.headers.get("authorization")).toBe("Bearer old");
+    expect(calls[1]!.headers.get("authorization")).toBe("Bearer fresh");
+    expect(minted).toEqual(["old", "fresh"]); // the 401 forced a fresh mint
+  });
+
+  it("gives up after a second 401 (a real auth failure, not just expiry)", async () => {
+    let forced = false;
+    const tokenFn = async (force?: boolean) => {
+      if (force) forced = true;
+      return "stale";
+    };
+    const { fn, calls } = fakeFetch(() => new Response("denied", { status: 401 }));
+    const client = new ControlPlaneClient(base, tokenFn, fn, fastRetry);
+    await expect(client.uploadUrl("nar/x.nar.zst")).rejects.toThrow(/401/);
+    expect(calls.length).toBe(2); // one forced-fresh retry, then give up
+    expect(forced).toBe(true);
+  });
 });
 
 describe("buildAttestBody", () => {

@@ -22,7 +22,9 @@ export function jwtExpSeconds(jwt: string): number | null {
 }
 
 export interface TokenProvider {
-  get(): Promise<string>;
+  /** Get a valid token. `force` bypasses the cache to mint a fresh one (used to
+   * recover from a server-rejected/expired token mid-run). */
+  get(force?: boolean): Promise<string>;
 }
 
 export class OidcTokenProvider implements TokenProvider {
@@ -40,9 +42,11 @@ export class OidcTokenProvider implements TokenProvider {
     private readonly now: () => number = Date.now,
   ) {}
 
-  async get(): Promise<string> {
+  async get(force = false): Promise<string> {
     const nowS = Math.floor(this.now() / 1000);
-    if (this.cached !== null && nowS + this.skewSeconds < this.expSeconds) {
+    // `force` skips the cache to recover from a token the server rejected with a
+    // 401 even though it still looked unexpired locally (e.g. under clock skew).
+    if (!force && this.cached !== null && nowS + this.skewSeconds < this.expSeconds) {
       return this.cached;
     }
     const token = await this.mint();
