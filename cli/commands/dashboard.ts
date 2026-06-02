@@ -4,14 +4,21 @@ import { platform } from "node:os";
 import { requireCredential, authHeaders, safeError } from "../context.js";
 import { star, info, fail } from "../ui.js";
 
-/** Open a URL in the platform browser via execFile (no shell, so the URL is a
- * single argument and cannot be interpreted as a command). */
+/** Open a URL in the platform browser via execFile, so the URL is passed as a
+ * single argument and never through a shell on any platform: `open` on macOS,
+ * `xdg-open` on Linux, and `rundll32 url.dll,FileProtocolHandler` on Windows
+ * (which takes the URL as data, not a command line). The URL origin is the
+ * locally-stored, HTTPS-validated control-plane (see cli/context.ts) and the
+ * code is URL-encoded, so it is also not attacker-controlled. */
 function openInBrowser(url: string): void {
   const [cmd, args] =
     platform() === "darwin"
       ? ["open", [url]]
       : platform() === "win32"
-        ? ["cmd", ["/c", "start", "", url]]
+        ? // rundll32's FileProtocolHandler opens the URL as data, never through a
+          // command line, so `cmd`-style metacharacters (& | < > ^ %) cannot be
+          // interpreted as command separators the way `cmd /c start` would.
+          ["rundll32.exe", ["url.dll,FileProtocolHandler", url]]
         : ["xdg-open", [url]];
   execFile(cmd as string, args as string[], (err) => {
     if (err) info(`Could not open a browser automatically. Visit:\n  ${url}`);
