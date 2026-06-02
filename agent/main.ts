@@ -18,7 +18,7 @@ import { fetchActionsOidcToken } from "../src/agent/oidc.js";
 import { OidcTokenProvider } from "../src/agent/token-provider.js";
 import { ControlPlaneClient } from "../src/agent/client.js";
 import { buildAttestBody } from "../src/agent/narinfo.js";
-import { partitionByUpstream } from "../src/agent/upstream.js";
+import { planUploads } from "../src/agent/upload-plan.js";
 import { mapConcurrent } from "../src/agent/concurrency.js";
 import { tenantSubstituter } from "../src/agent/substituter.js";
 import { parseVegaConfig, type VegaConfig } from "../src/agent/config.js";
@@ -54,6 +54,9 @@ interface CacheOpts {
   trustedKeys?: string[];
   /** Builder opted out of publishing continent (privacy.continent=false). */
   noContinent?: boolean;
+  /** This tenant's cache URL. Paths already there (from a prior run) are skipped,
+   * so a re-run after a timeout/failure resumes instead of re-uploading. */
+  resumeUrl?: string;
 }
 
 /** Build one installable and upload+attest its (optionally novel-only) closure. */
@@ -70,15 +73,19 @@ async function cacheBuild(
   const topPaths = new Set((await pathInfoOutputs(installable)).map((o) => o.path));
   console.log(`Closure has ${closure.length} path(s).`);
 
-  let paths = closure;
+  // Decide what actually needs uploading: drop paths upstream already serves,
+  // then drop paths this tenant already has from a prior run (resumability).
+  const plan = await planUploads(closure.map((p) => p.path), {
+    upstreamUrl: opts.skipUpstream ? opts.upstreamUrl : undefined,
+    resumeUrl: opts.resumeUrl,
+  });
+  const toUpload = new Set(plan.toUpload);
+  const paths = closure.filter((p) => toUpload.has(p.path));
   if (opts.skipUpstream) {
-    const { novel, upstream } = await partitionByUpstream(
-      closure.map((p) => p.path),
-      opts.upstreamUrl,
-    );
-    const novelSet = new Set(novel);
-    paths = closure.filter((p) => novelSet.has(p.path));
-    console.log(`Skipping ${upstream.length} path(s) in ${opts.upstreamUrl}; pushing ${paths.length} novel.`);
+    console.log(`Skipping ${plan.skippedUpstream.length} path(s) in ${opts.upstreamUrl}.`);
+  }
+  if (plan.skippedResume.length > 0) {
+    console.log(`Resuming: ${plan.skippedResume.length} path(s) already uploaded; ${paths.length} remain.`);
   }
 
   // Compress + upload + attest each path with bounded concurrency, so a large
@@ -158,6 +165,12 @@ async function main(): Promise<void> {
   // feed a malicious substitute into a build that then vouches for it.
   // Enabled by the action input (VEGA_REUSE_CACHE) or `reuse-cache: true` in vega.yaml.
   const repository = process.env.GITHUB_REPOSITORY;
+  // Resumability is independent of reuse-cache: probe this tenant for paths a
+  // prior run already uploaded and skip them, so a re-run after a timeout or a
+  // mid-upload failure does not redo the whole closure. Reading the public
+  // tenant narinfo is not the same as substituting from it, so this is safe even
+  // for shared-tier reproducer jobs (which keep reuse-cache off).
+  if (repository) opts.resumeUrl = tenantSubstituter(controlPlane, repository).url;
   const reuseCache = process.env.VEGA_REUSE_CACHE === "true" || (config?.reuseCache ?? false);
   if (repository && reuseCache) {
     try {
