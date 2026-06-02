@@ -16,7 +16,7 @@
     "@noble/hashes": "^2.2.0",
     "commander": "^15.0.0",
     "picocolors": "^1.1.1",
-    "tsx": "^4.22.3",
+    "tsx": "^4.22.4",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
