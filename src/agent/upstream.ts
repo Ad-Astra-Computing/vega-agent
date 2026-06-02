@@ -56,3 +56,37 @@ export async function partitionByUpstream(
   paths.forEach((path, i) => (hit[i] ? upstream : novel).push(path));
   return { novel, upstream };
 }
+
+/**
+ * Is the exact compressed NAR object already present at `readBase`? Used to
+ * resume a re-run after a timeout/mid-upload failure by skipping the PUT of a
+ * NAR that a prior run of THIS build already uploaded.
+ *
+ * Crucially this probes the CONTENT-ADDRESSED object key (`nar/<fileHash>.nar.zst`,
+ * see {@link makeNar}), not the store-path narinfo. A 200 there means the bytes
+ * we are about to upload are already stored, byte-for-byte, so the PUT is a
+ * genuine no-op. Probing the store-path narinfo instead would be unsound: an
+ * input-addressed store path can have divergent NAR contents, so its presence is
+ * not proof of identical bytes, and skipping on it could suppress a fresh (or
+ * reproducer) build's evidence. This only ever skips the redundant upload; the
+ * caller still always attests the locally built output.
+ *
+ * Fail-open: any error/timeout/non-200 returns false, so a transient probe
+ * failure re-uploads (safe) rather than dropping the object.
+ */
+export async function narObjectExists(
+  readBase: string,
+  narUrl: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<boolean> {
+  const base = readBase.replace(/\/$/, "");
+  try {
+    const res = await fetchImpl(`${base}/${narUrl}`, {
+      method: "HEAD",
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    });
+    return res.status === 200;
+  } catch {
+    return false;
+  }
+}

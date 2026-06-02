@@ -19,6 +19,7 @@ import { OidcTokenProvider } from "../src/agent/token-provider.js";
 import { ControlPlaneClient } from "../src/agent/client.js";
 import { buildAttestBody } from "../src/agent/narinfo.js";
 import { planUploads } from "../src/agent/upload-plan.js";
+import { narObjectExists } from "../src/agent/upstream.js";
 import { mapConcurrent } from "../src/agent/concurrency.js";
 import { tenantSubstituter } from "../src/agent/substituter.js";
 import { parseVegaConfig, type VegaConfig } from "../src/agent/config.js";
@@ -54,8 +55,10 @@ interface CacheOpts {
   trustedKeys?: string[];
   /** Builder opted out of publishing continent (privacy.continent=false). */
   noContinent?: boolean;
-  /** This tenant's cache URL. Paths already there (from a prior run) are skipped,
-   * so a re-run after a timeout/failure resumes instead of re-uploading. */
+  /** This tenant's cache read URL. After building a path's NAR, a re-run skips
+   * the PUT when that exact content-addressed object is already present, so a
+   * run after a timeout/failure resumes instead of re-uploading. The output is
+   * always attested regardless, so resuming never drops a path's evidence. */
   resumeUrl?: string;
 }
 
@@ -73,29 +76,37 @@ async function cacheBuild(
   const topPaths = new Set((await pathInfoOutputs(installable)).map((o) => o.path));
   console.log(`Closure has ${closure.length} path(s).`);
 
-  // Decide what actually needs uploading: drop paths upstream already serves,
-  // then drop paths this tenant already has from a prior run (resumability).
+  // Decide what needs processing: drop only paths upstream already serves.
+  // Resumability is handled per-path below (skip the redundant PUT, always
+  // attest), so it can key on exact bytes and never drops a path's evidence.
   const plan = await planUploads(closure.map((p) => p.path), {
     upstreamUrl: opts.skipUpstream ? opts.upstreamUrl : undefined,
-    resumeUrl: opts.resumeUrl,
   });
   const toUpload = new Set(plan.toUpload);
   const paths = closure.filter((p) => toUpload.has(p.path));
   if (opts.skipUpstream) {
     console.log(`Skipping ${plan.skippedUpstream.length} path(s) in ${opts.upstreamUrl}.`);
   }
-  if (plan.skippedResume.length > 0) {
-    console.log(`Resuming: ${plan.skippedResume.length} path(s) already uploaded; ${paths.length} remain.`);
-  }
 
   // Compress + upload + attest each path with bounded concurrency, so a large
   // closure's paths overlap instead of running strictly one at a time. Modest
   // by default since each task reads its NAR into memory before the PUT.
+  let resumed = 0;
   const concurrency = Number(process.env.VEGA_UPLOAD_CONCURRENCY) || 4;
   const shared = await mapConcurrent(paths, concurrency, async (info) => {
     const nar = await makeNar(info.path, opts.work);
-    const uploadUrl = await client.uploadUrl(nar.url);
-    await client.putNar(uploadUrl, await readFile(nar.file));
+    // Resume: if a prior run of THIS build already uploaded this exact compressed
+    // NAR (content-addressed key), skip only the redundant PUT. We still always
+    // attest the locally built output below, so resuming never suppresses a
+    // path's evidence (which would be unsound for the shared-tier attester).
+    const alreadyUploaded =
+      opts.resumeUrl !== undefined && (await narObjectExists(opts.resumeUrl, nar.url));
+    if (alreadyUploaded) {
+      resumed++;
+    } else {
+      const uploadUrl = await client.uploadUrl(nar.url);
+      await client.putNar(uploadUrl, await readFile(nar.file));
+    }
     const outputAttr = topPaths.has(info.path) ? attr : "";
     const result = await client.attest(
       buildAttestBody(info, nar, outputAttr, { noContinent: opts.noContinent }),
@@ -108,6 +119,9 @@ async function cacheBuild(
     console.log(`${tag} ${info.path} (${result.decision.shared.reason})`);
     return result.publishedShared;
   });
+  if (resumed > 0) {
+    console.log(`Resumed: ${resumed} NAR(s) already uploaded by a prior run; re-attested without re-uploading.`);
+  }
   return { promoted: shared.filter(Boolean).length, total: paths.length };
 }
 
