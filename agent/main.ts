@@ -25,6 +25,7 @@ import { mapConcurrent } from "../src/agent/concurrency.js";
 import { tenantSubstituter } from "../src/agent/substituter.js";
 import { parseVegaConfig, type VegaConfig } from "../src/agent/config.js";
 import { resolveBuilds } from "../src/agent/builds.js";
+import { sha256NixHashToBase64 } from "../src/nix/hash.js";
 import { nixBuild, pathInfoClosure, pathInfoOutputs, makeNar, currentSystem, flakeShow } from "./nix.js";
 import { flattenFlakeShow } from "../src/agent/outputs.js";
 
@@ -105,11 +106,14 @@ async function cacheBuild(
     if (alreadyUploaded) {
       resumed++;
     } else {
-      const uploadUrl = await client.uploadUrl(nar.url);
+      // Bind the upload to the NAR's sha256 so R2 verifies it and stores the
+      // checksum (the edge then verifies fileHash at attest without re-hashing).
+      const checksum = sha256NixHashToBase64(nar.fileHash);
+      const uploadUrl = await client.uploadUrl(nar.url, nar.fileHash);
       // Stream the compressed NAR from disk as a file-backed Blob rather than
       // reading the whole thing into memory: a heavy closure's NARs are large and
       // VEGA_UPLOAD_CONCURRENCY of them buffered at once OOM-kills the runner.
-      await client.putNar(uploadUrl, await openAsBlob(nar.file));
+      await client.putNar(uploadUrl, await openAsBlob(nar.file), checksum);
     }
     const outputAttr = topPaths.has(info.path) ? attr : "";
     const result = await client.attest(

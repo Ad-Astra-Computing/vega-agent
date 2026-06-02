@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fetchActionsOidcToken } from "../src/agent/oidc.js";
 import { ControlPlaneClient } from "../src/agent/client.js";
+import { sha256NixBase32, sha256NixHashToBase64 } from "../src/nix/hash.js";
 import { buildAttestBody } from "../src/agent/narinfo.js";
 import { lockedInstallable } from "../src/agent/reproduce.js";
 import { partitionByUpstream } from "../src/agent/upstream.js";
@@ -70,6 +71,24 @@ describe("ControlPlaneClient", () => {
     const client = new ControlPlaneClient(base, "jwt", fn);
     await client.putNar("https://r2/put?sig=x", new Uint8Array([1, 2, 3]));
     expect(calls[0]!.url).toBe("https://r2/put?sig=x");
+    expect(calls[0]!.headers.get("x-amz-checksum-sha256")).toBeNull(); // omitted without a checksum
+  });
+
+  it("sends the fileHash so the presigned PUT is bound to its sha256 checksum", async () => {
+    const fileHash = sha256NixBase32(new Uint8Array([1, 2, 3]));
+    const { fn, calls } = fakeFetch(() => new Response(JSON.stringify({ url: "https://r2/put?sig=x" })));
+    const client = new ControlPlaneClient(base, "jwt", fn);
+    await client.uploadUrl("nar/abc.nar.zst", fileHash);
+    expect(JSON.parse(await calls[0]!.text())).toEqual({ narUrl: "nar/abc.nar.zst", fileHash });
+  });
+
+  it("sends x-amz-checksum-sha256 on the NAR PUT when a checksum is given", async () => {
+    const fileHash = sha256NixBase32(new Uint8Array([1, 2, 3]));
+    const checksum = sha256NixHashToBase64(fileHash);
+    const { fn, calls } = fakeFetch(() => new Response(null, { status: 200 }));
+    const client = new ControlPlaneClient(base, "jwt", fn);
+    await client.putNar("https://r2/put?sig=x", new Uint8Array([1, 2, 3]), checksum);
+    expect(calls[0]!.headers.get("x-amz-checksum-sha256")).toBe(checksum);
   });
 
   it("streams a file-backed Blob and re-reads it on retry (replayable, no full-buffer)", async () => {

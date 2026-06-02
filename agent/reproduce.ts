@@ -20,6 +20,7 @@ import { ControlPlaneClient } from "../src/agent/client.js";
 import { buildAttestBody } from "../src/agent/narinfo.js";
 import { lockedInstallable } from "../src/agent/reproduce.js";
 import type { BuildProvenance } from "../src/trust/policy.js";
+import { sha256NixHashToBase64 } from "../src/nix/hash.js";
 import { nixBuild, pathInfoOutputs, makeNar } from "./nix.js";
 
 function requireEnv(name: string): string {
@@ -77,10 +78,11 @@ async function main(): Promise<void> {
         if (info.narHash !== expectNarHash) diverged++;
       }
       const nar = await makeNar(info.path, work);
-      const uploadUrl = await client.uploadUrl(nar.url);
+      const checksum = sha256NixHashToBase64(nar.fileHash);
+      const uploadUrl = await client.uploadUrl(nar.url, nar.fileHash);
       // Stream the NAR from disk (file-backed Blob) rather than buffering the
       // whole compressed file in memory; large closures otherwise OOM the worker.
-      await client.putNar(uploadUrl, await openAsBlob(nar.file));
+      await client.putNar(uploadUrl, await openAsBlob(nar.file), checksum);
       const result = await client.attest(buildAttestBody(info, nar, provenance.attr));
       if (result.publishedShared) agreed++;
       const tag = result.publishedShared ? "[shared]" : "[pending]";

@@ -8,6 +8,7 @@ import { ControlPlaneClient } from "../../src/agent/client.js";
 import { buildAttestBody } from "../../src/agent/narinfo.js";
 import { partitionByUpstream } from "../../src/agent/upstream.js";
 import { mapConcurrent } from "../../src/agent/concurrency.js";
+import { sha256NixHashToBase64 } from "../../src/nix/hash.js";
 import { nixBuild, pathInfoClosure, makeNar } from "../../agent/nix.js";
 import { requireCredential } from "../context.js";
 import { star, success, info, fail, isTTY } from "../ui.js";
@@ -87,8 +88,9 @@ export function registerPush(program: Command): void {
 
             await mapConcurrent(paths, opts.jobs, async (p) => {
               const nar = await makeNar(p.path, work);
-              const url = await client.uploadUrl(nar.url);
-              await client.putNar(url, await openAsBlob(nar.file));
+              const checksum = sha256NixHashToBase64(nar.fileHash);
+              const url = await client.uploadUrl(nar.url, nar.fileHash);
+              await client.putNar(url, await openAsBlob(nar.file), checksum);
               await client.push(buildAttestBody(p, nar));
               tick(nar.fileSize, p.path);
             });

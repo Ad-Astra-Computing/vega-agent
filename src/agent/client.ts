@@ -181,14 +181,18 @@ export class ControlPlaneClient {
     throw lastErr instanceof Error ? lastErr : new Error(`${label} failed`);
   }
 
-  /** Ask for a presigned PUT URL for a `nar/...` key. */
-  async uploadUrl(narUrl: string): Promise<string> {
+  /** Ask for a presigned PUT URL for a `nar/...` key. Passing `fileHash`
+   * (sha256:<nixbase32>) binds the presigned PUT to that checksum, so R2 verifies
+   * the upload and stores its SHA-256 — letting attest verify without a Worker
+   * re-hash (which 503s on multi-GB NARs). The companion {@link putNar} must then
+   * send the matching `x-amz-checksum-sha256` header. */
+  async uploadUrl(narUrl: string, fileHash?: string): Promise<string> {
     const res = await this.authedFetch(
       `${this.baseUrl}/api/cache/upload-url`,
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ narUrl }),
+        body: JSON.stringify(fileHash === undefined ? { narUrl } : { narUrl, fileHash }),
       },
       "upload-url",
     );
@@ -198,9 +202,15 @@ export class ControlPlaneClient {
 
   /** Upload a NAR directly to R2 via the presigned URL. Callers pass a file-backed
    * Blob (see openAsBlob) so the compressed NAR streams from disk rather than being
-   * buffered in memory; the Blob is re-readable, so the retry path still works. */
-  async putNar(presignedUrl: string, body: BodyInit): Promise<void> {
-    await this.fetchWithRetry(presignedUrl, { method: "PUT", body }, "nar upload");
+   * buffered in memory; the Blob is re-readable, so the retry path still works.
+   * When `sha256Base64` is given it must equal the value the presigned URL was
+   * signed with (see {@link uploadUrl}); R2 rejects the PUT if the bytes disagree. */
+  async putNar(presignedUrl: string, body: BodyInit, sha256Base64?: string): Promise<void> {
+    const init: RequestInit =
+      sha256Base64 === undefined
+        ? { method: "PUT", body }
+        : { method: "PUT", body, headers: { "x-amz-checksum-sha256": sha256Base64 } };
+    await this.fetchWithRetry(presignedUrl, init, "nar upload");
   }
 
   /** Submit an attestation; returns the promotion decision. */
