@@ -18,6 +18,7 @@ import { registerPush } from "./commands/push.js";
 import { registerStatus } from "./commands/status.js";
 import { registerDoctor } from "./commands/doctor.js";
 import { registerVerify } from "./commands/verify.js";
+import { registerDiff } from "./commands/diff.js";
 import { registerMcp } from "./commands/mcp.js";
 
 const program = new Command();
@@ -37,6 +38,7 @@ program
       "  vega login\n" +
       "  vega push .#my-package\n" +
       "  vega verify /nix/store/<hash>-hello-2.12.1\n" +
+      "  vega diff .#my-package\n" +
       "  vega view --format nix-conf\n" +
       "  vega trust add github:alice --scope hello\n",
   );
@@ -51,6 +53,7 @@ registerPush(program);
 registerStatus(program);
 registerDoctor(program);
 registerVerify(program);
+registerDiff(program);
 registerMcp(program);
 
 async function run(): Promise<void> {
