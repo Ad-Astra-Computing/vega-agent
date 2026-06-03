@@ -5,7 +5,7 @@ import { parsePublicKey } from "../../src/nix/signing.js";
 import { trustedKeys, pickTrustedKey } from "../keys.js";
 import { runStdio } from "../mcp/server.js";
 import type { ToolContext } from "../mcp/tools.js";
-import type { Fetcher } from "../verify-core.js";
+import { withRetry, type Fetcher } from "../verify-core.js";
 import { checkNarHash } from "../nar-check.js";
 
 const SHARED_KEY_NAME = "vega-cache-1";
@@ -84,7 +84,7 @@ export function registerMcp(program: Command): void {
       // Diagnostics go to stderr; stdout is reserved for JSON-RPC.
       process.stderr.write(`vega mcp: serving over stdio against ${cacheUrl}\n`);
       const ctx: ToolContext = {
-        fetcher: boundedFetcher(cacheUrl, MAX_RESPONSE_BYTES),
+        fetcher: withRetry(boundedFetcher(cacheUrl, MAX_RESPONSE_BYTES)),
         cacheUrl,
         sharedKeyName: SHARED_KEY_NAME,
         maxScan,
