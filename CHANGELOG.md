@@ -26,6 +26,19 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
   so the control plane always derived and stored a build's continent. The agent
   now transmits the opt-out and the server records the continent as unknown.
 
+## [0.4.3] - 2026-06-03
+
+### Fixed
+
+- `vega verify` and `vega mcp` now retry a transient server error (HTTP 5xx)
+  from the cache, with bounded exponential backoff, before reporting a failure.
+  A single transient 5xx (for example a momentary Durable Object error on a
+  heavily-written endpoint such as `/log/entry`) previously failed the entire
+  verification, which surfaced as `vega mcp` reporting an error on a build that
+  is in fact verifiable. A 2xx, 3xx, or 4xx response is a definitive answer and
+  is never retried (a 404 means "no such build"). Affects read-only,
+  idempotent GETs only.
+
 ## [0.2.0] - 2026-06-01
 
 ### Added

@@ -26,6 +26,42 @@ export interface FetchResult {
 }
 export type Fetcher = (path: string) => Promise<FetchResult>;
 
+/**
+ * Wrap a fetcher so a TRANSIENT server error (HTTP 5xx) or a thrown network
+ * error is retried with exponential backoff, while 2xx/3xx/4xx are returned
+ * as-is (a 404 "not found" or 4xx is a real answer, never retried). This makes
+ * verification resilient to a transient cache error (for example a momentary
+ * Durable Object error on a heavily-written endpoint) instead of failing the
+ * whole check on one 500. Idempotent GETs only, so retrying is safe. `sleep` is
+ * injectable for tests.
+ */
+export function withRetry(
+  inner: Fetcher,
+  opts: { tries?: number; baseMs?: number; sleep?: (ms: number) => Promise<void> } = {},
+): Fetcher {
+  const tries = Math.max(1, opts.tries ?? 3);
+  const baseMs = opts.baseMs ?? 150;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  return async (path) => {
+    let lastErr: unknown;
+    for (let i = 0; i < tries; i++) {
+      try {
+        const res = await inner(path);
+        if (res.status >= 500 && res.status <= 599 && i < tries - 1) {
+          await sleep(baseMs * 2 ** i);
+          continue;
+        }
+        return res;
+      } catch (e) {
+        lastErr = e;
+        if (i >= tries - 1) throw e;
+        await sleep(baseMs * 2 ** i);
+      }
+    }
+    throw lastErr;
+  };
+}
+
 export interface Sth {
   size: number;
   rootHash: string;
