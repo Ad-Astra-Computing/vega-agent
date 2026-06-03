@@ -31,10 +31,56 @@ function extractHash(arg: string): string {
 export function isTenantScope(cacheUrl: string): boolean {
   try {
     const p = new URL(cacheUrl).pathname.replace(/\/+$/, "");
-    return /^\/tenant\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(p) || /^\/tenant\/owner:[0-9]+$/.test(p);
+    // Each segment must start alphanumeric, so "." / ".." path segments (which
+    // URL normalization would collapse to escape /tenant/) are rejected.
+    return (
+      /^\/tenant\/[A-Za-z0-9][A-Za-z0-9._-]{0,99}\/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(p) ||
+      /^\/tenant\/owner:[0-9]+$/.test(p)
+    );
   } catch {
     return false;
   }
+}
+
+/** A well-formed tenant identifier: `<owner>/<repo>` or `owner:<id>`. Each path
+ * segment must start alphanumeric, so a crafted "." / ".." segment cannot
+ * collapse under URL normalization and escape the /tenant/ route. */
+const TENANT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$|^owner:[0-9]+$/;
+
+/** When a build is not in the shared cache, ask the cache's /api/status which
+ * tenant(s) hold it and fetch that tenant's narinfo, so a bare `vega verify`
+ * resolves a tenant-only build. Returns null if no single tenant holds it; if
+ * several do, it exits with the exact per-tenant commands to disambiguate. */
+export async function discoverTenant(
+  baseUrl: string,
+  hash: string,
+): Promise<{ url: string; narText: string } | null> {
+  let tenants: string[];
+  try {
+    const sres = await fetch(`${baseUrl}/api/status/${hash}`);
+    if (!sres.ok) return null;
+    const body = (await sres.json()) as { tenants?: unknown };
+    tenants = Array.isArray(body.tenants)
+      ? [
+          ...new Set(
+            body.tenants.filter((t): t is string => typeof t === "string" && TENANT_ID.test(t)),
+          ),
+        ].slice(0, 50) // dedupe and bound, so a hostile response cannot blow up
+      : [];
+  } catch {
+    return null;
+  }
+  if (tenants.length === 0) return null;
+  if (tenants.length > 1) {
+    fail(
+      `${hash} is cached in multiple tenants; verify a specific one:`,
+      tenants.map((t) => `  vega verify ${hash} --url ${baseUrl}/tenant/${t}`),
+    );
+  }
+  const url = `${baseUrl}/tenant/${tenants[0]}`;
+  const nres = await fetch(`${url}/${hash}.narinfo`);
+  if (!nres.ok) return null;
+  return { url, narText: await nres.text() };
 }
 
 /** Resolve the key to verify against, in order: explicit flag, then a
@@ -117,15 +163,29 @@ export function registerVerify(program: Command): void {
           json?: boolean;
         },
       ) => {
-        const cacheUrl = assertSafeControlPlane(controlPlaneFor(opts.url));
+        let cacheUrl = assertSafeControlPlane(controlPlaneFor(opts.url));
         const hash = extractHash(target);
 
         // Fetch the narinfo ONCE; this single snapshot drives key resolution,
         // signature + log verification, and the NAR re-derivation, so a cache
         // cannot serve one narinfo to be verified and another to be hashed.
+        let narText: string;
         const res = await fetch(`${cacheUrl}/${hash}.narinfo`);
-        if (!res.ok) fail(`no build found for ${hash} (HTTP ${res.status})`);
-        const narInfo = parseNarInfo(await res.text());
+        if (res.ok) {
+          narText = await res.text();
+        } else if (res.status === 404 && !isTenantScope(cacheUrl)) {
+          // Not in the shared scope: discover which tenant holds it (via the
+          // cache's /api/status) and verify against that tenant scope, so a bare
+          // `vega verify <hash>` works for a tenant-only build, not just shared.
+          const found = await discoverTenant(cacheUrl, hash);
+          if (found === null) fail(`no build found for ${hash} (HTTP ${res.status})`);
+          cacheUrl = found.url;
+          narText = found.narText;
+          info(`  ${pc.gray(`Not in the shared cache; verifying the tenant build at ${cacheUrl}`)}`);
+        } else {
+          fail(`no build found for ${hash} (HTTP ${res.status})`);
+        }
+        const narInfo = parseNarInfo(narText);
         const sigNames = narInfo.sigs.map((s) => s.slice(0, s.indexOf(":")).trim()).filter(Boolean);
         const publicKey = await resolveKey(cacheUrl, sigNames, opts.publicKey);
 
