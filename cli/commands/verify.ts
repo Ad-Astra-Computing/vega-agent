@@ -25,9 +25,23 @@ function extractHash(arg: string): string {
   return hash;
 }
 
+/** True only for an exact tenant substituter path: `/tenant/<owner>/<repo>` (the
+ * gh-actions tenant) or `/tenant/owner:<id>` (the owner-push namespace). Used to
+ * gate tenant-only behavior; a loose match like `/foo/tenant/bar` must not pass. */
+export function isTenantScope(cacheUrl: string): boolean {
+  try {
+    const p = new URL(cacheUrl).pathname.replace(/\/+$/, "");
+    return /^\/tenant\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(p) || /^\/tenant\/owner:[0-9]+$/.test(p);
+  } catch {
+    return false;
+  }
+}
+
 /** Resolve the key to verify against, in order: explicit flag, then a
- * trusted-public-keys entry whose name matches the narinfo's signature. */
-async function resolveKey(sigNames: string[], flag?: string): Promise<NixPublicKey> {
+ * trusted-public-keys entry whose name matches the narinfo's signature, then —
+ * for a tenant-scoped cache — the verification key the cache publishes at
+ * `<url>/key`. */
+async function resolveKey(cacheUrl: string, sigNames: string[], flag?: string): Promise<NixPublicKey> {
   if (flag) {
     try {
       return parsePublicKey(flag);
@@ -37,6 +51,31 @@ async function resolveKey(sigNames: string[], flag?: string): Promise<NixPublicK
   }
   const pk = pickTrustedKey(await trustedKeys(), sigNames);
   if (pk) return pk;
+  // A tenant-scoped cache (URL under /tenant/<owner>/<repo>) publishes its own
+  // verification key at <url>/key, so verifying your OWN tenant build needs no
+  // prior key setup. The shared scope is deliberately excluded: its signature
+  // must be checked against the pinned shared key, never one served by the same
+  // cache it certifies. Transparency-log inclusion and the NAR re-hash are
+  // verified independently of this key.
+  if (isTenantScope(cacheUrl)) {
+    try {
+      const res = await fetch(`${cacheUrl}/key`);
+      if (res.ok) {
+        const { publicKey } = (await res.json()) as { publicKey?: unknown };
+        if (typeof publicKey === "string") {
+          const name = publicKey.slice(0, publicKey.indexOf(":")).trim();
+          if (sigNames.includes(name)) {
+            warn(
+              `using the tenant key '${name}' published by the cache; pin it with --public-key for third-party verification.`,
+            );
+            return parsePublicKey(publicKey);
+          }
+        }
+      }
+    } catch {
+      // Fall through to the explicit-key guidance below.
+    }
+  }
   fail(
     `no trusted public key found for this build (it is signed by: ${sigNames.join(", ") || "nothing"}).`,
     [
@@ -88,7 +127,7 @@ export function registerVerify(program: Command): void {
         if (!res.ok) fail(`no build found for ${hash} (HTTP ${res.status})`);
         const narInfo = parseNarInfo(await res.text());
         const sigNames = narInfo.sigs.map((s) => s.slice(0, s.indexOf(":")).trim()).filter(Boolean);
-        const publicKey = await resolveKey(sigNames, opts.publicKey);
+        const publicKey = await resolveKey(cacheUrl, sigNames, opts.publicKey);
 
         const fetcher: Fetcher = (path) => fetch(`${cacheUrl}${path}`);
         const result: VerifyResult = await verifyBuild({
@@ -107,11 +146,19 @@ export function registerVerify(program: Command): void {
         const t = result.transparency;
         const narOk = nar === null || nar.ok;
         const verified = fullyVerified(result) && narOk;
+        // Pointing verify at a tenant scope (--url .../tenant/<owner>/<repo>) is
+        // an explicit request to verify a tenant build, for which a valid Vega
+        // tenant-key signature ("scoped") plus actually-checked matching bytes IS
+        // the success criterion. Requires the NAR check (not --no-nar) and the
+        // scoped Vega key specifically, never an upstream-mirror signature.
+        const narChecked = nar !== null && nar.ok;
+        const tenantOk = isTenantScope(cacheUrl) && sig.ok && sig.scope === "scoped" && narChecked;
         // A valid scoped/upstream signature is a real result but NOT full Vega
-        // verification; it only yields exit 0 when explicitly allowed, so a CI
-        // `vega verify && ...` cannot be satisfied by a signature-only build.
+        // verification; outside a tenant scope it only yields exit 0 when
+        // explicitly allowed, so a default CI `vega verify && ...` cannot be
+        // satisfied by a signature-only build.
         const signatureOnlyOk = sig.ok && narOk && sig.scope !== "shared" && !t.found;
-        const exitOk = verified || (Boolean(opts.allowSignatureOnly) && signatureOnlyOk);
+        const exitOk = verified || tenantOk || (Boolean(opts.allowSignatureOnly) && signatureOnlyOk);
 
         if (opts.json) {
           jsonEvent({ hash, ...result, nar: nar ?? undefined, verified, exitOk });
@@ -136,6 +183,15 @@ export function registerVerify(program: Command): void {
         if (t.note && sig.scope !== "shared") info(`\n  ${pc.gray(t.note)}`);
         if (verified) {
           success("Verified: signed, in the public log, and the bytes match.");
+        } else if (tenantOk) {
+          // Tenant-scope verification: signed by this cache's own tenant key and
+          // the bytes match. This is a tenant/self check, NOT independent
+          // third-party trust; the shared (globally-trusted) tier additionally
+          // requires independent reproduction and public transparency-log inclusion.
+          success("Verified in your tenant tier: signed by the tenant key and the bytes match.");
+          info(
+            `  ${pc.gray("Tenant-scope (not third-party): the shared tier adds independent reproduction and public-log inclusion.")}`,
+          );
         } else if (signatureOnlyOk) {
           // A valid signature-only result (scoped Vega key or upstream mirror).
           // It is informative, but not full Vega verification.
