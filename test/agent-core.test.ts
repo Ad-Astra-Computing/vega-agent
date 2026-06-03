@@ -51,16 +51,15 @@ describe("ControlPlaneClient", () => {
   const base = "https://api.vega.io";
 
   it("requests a presigned upload URL with the bearer token", async () => {
-    const { fn, calls } = fakeFetch((req) => {
+    const { fn } = fakeFetch((req) => {
       expect(req.method).toBe("POST");
       expect(new URL(req.url).pathname).toBe("/api/cache/upload-url");
       expect(req.headers.get("authorization")).toBe("Bearer jwt");
       return new Response(JSON.stringify({ url: "https://r2/put?sig=x" }));
     });
     const client = new ControlPlaneClient(base, "jwt", fn);
-    const url = await client.uploadUrl("nar/abc.nar.zst");
+    const url = await client.uploadUrl("nar/abc.nar.zst", "sha256:1bn7y79qj9cs5l0hqjjvb9ccfg6w5qg5x6f0a3d9b1c2e3f4g5h6i");
     expect(url).toBe("https://r2/put?sig=x");
-    expect(JSON.parse(await calls[0]!.text())).toEqual({ narUrl: "nar/abc.nar.zst" });
   });
 
   it("PUTs NAR bytes to the presigned URL", async () => {
@@ -69,9 +68,8 @@ describe("ControlPlaneClient", () => {
       return new Response(null, { status: 200 });
     });
     const client = new ControlPlaneClient(base, "jwt", fn);
-    await client.putNar("https://r2/put?sig=x", new Uint8Array([1, 2, 3]));
+    await client.putNar("https://r2/put?sig=x", new Uint8Array([1, 2, 3]), "Zm9vYmFyYmF6");
     expect(calls[0]!.url).toBe("https://r2/put?sig=x");
-    expect(calls[0]!.headers.get("x-amz-checksum-sha256")).toBeNull(); // omitted without a checksum
   });
 
   it("sends the fileHash so the presigned PUT is bound to its sha256 checksum", async () => {
@@ -106,7 +104,7 @@ describe("ControlPlaneClient", () => {
       }) as unknown as typeof fetch;
       const client = new ControlPlaneClient(base, "jwt", fn, fastRetry);
       // openAsBlob is how the agent passes NARs: a file-backed Blob undici streams.
-      await client.putNar("https://r2/put?sig=x", await openAsBlob(file));
+      await client.putNar("https://r2/put?sig=x", await openAsBlob(file), "Zm9vYmFyYmF6");
       expect(n).toBe(2); // 503 then success
       // The Blob was re-read on the retry: both attempts saw the same full bytes.
       expect(bodies).toEqual(["0a141e2832", "0a141e2832"]);
@@ -168,7 +166,7 @@ describe("ControlPlaneClient", () => {
   it("throws on a non-2xx response", async () => {
     const { fn } = fakeFetch(() => new Response("nope", { status: 401 }));
     const client = new ControlPlaneClient(base, "jwt", fn);
-    await expect(client.uploadUrl("nar/x.nar.zst")).rejects.toThrow(/401/);
+    await expect(client.uploadUrl("nar/x.nar.zst", "sha256:1bn7y79qj9cs5l0hqjjvb9ccfg6w5qg5x6f0a3d9b1c2e3f4g5h6i")).rejects.toThrow(/401/);
   });
 
   // No-wait retry config for deterministic tests.
@@ -183,7 +181,7 @@ describe("ControlPlaneClient", () => {
         : new Response(JSON.stringify({ url: "https://r2/put?sig=x" }));
     });
     const client = new ControlPlaneClient(base, "jwt", fn, fastRetry);
-    expect(await client.uploadUrl("nar/abc.nar.zst")).toBe("https://r2/put?sig=x");
+    expect(await client.uploadUrl("nar/abc.nar.zst", "sha256:1bn7y79qj9cs5l0hqjjvb9ccfg6w5qg5x6f0a3d9b1c2e3f4g5h6i")).toBe("https://r2/put?sig=x");
     expect(calls.length).toBe(3); // two 503s, then success
   });
 
@@ -194,14 +192,14 @@ describe("ControlPlaneClient", () => {
       return n < 2 ? Promise.reject(new Error("ECONNRESET")) : Promise.resolve(new Response(null, { status: 200 }));
     }) as unknown as typeof fetch;
     const client = new ControlPlaneClient(base, "jwt", fn, fastRetry);
-    await expect(client.putNar("https://r2/put?sig=x", new Uint8Array([1]))).resolves.toBeUndefined();
+    await expect(client.putNar("https://r2/put?sig=x", new Uint8Array([1]), "Zm9vYmFyYmF6")).resolves.toBeUndefined();
     expect(n).toBe(2);
   });
 
   it("gives up after exhausting retries on a persistent 503", async () => {
     const { fn, calls } = fakeFetch(() => new Response("busy", { status: 503 }));
     const client = new ControlPlaneClient(base, "jwt", fn, fastRetry);
-    await expect(client.uploadUrl("nar/x.nar.zst")).rejects.toThrow(/503/);
+    await expect(client.uploadUrl("nar/x.nar.zst", "sha256:1bn7y79qj9cs5l0hqjjvb9ccfg6w5qg5x6f0a3d9b1c2e3f4g5h6i")).rejects.toThrow(/503/);
     expect(calls.length).toBe(5); // attempts cap
   });
 
@@ -229,7 +227,7 @@ describe("ControlPlaneClient", () => {
         : new Response("expired", { status: 401 }),
     );
     const client = new ControlPlaneClient(base, tokenFn, fn, fastRetry);
-    expect(await client.uploadUrl("nar/abc.nar.zst")).toBe("https://r2/put?sig=x");
+    expect(await client.uploadUrl("nar/abc.nar.zst", "sha256:1bn7y79qj9cs5l0hqjjvb9ccfg6w5qg5x6f0a3d9b1c2e3f4g5h6i")).toBe("https://r2/put?sig=x");
     expect(calls.length).toBe(2); // first 401 with the stale token, then success with the fresh one
     expect(calls[0]!.headers.get("authorization")).toBe("Bearer old");
     expect(calls[1]!.headers.get("authorization")).toBe("Bearer fresh");
@@ -244,7 +242,7 @@ describe("ControlPlaneClient", () => {
     };
     const { fn, calls } = fakeFetch(() => new Response("denied", { status: 401 }));
     const client = new ControlPlaneClient(base, tokenFn, fn, fastRetry);
-    await expect(client.uploadUrl("nar/x.nar.zst")).rejects.toThrow(/401/);
+    await expect(client.uploadUrl("nar/x.nar.zst", "sha256:1bn7y79qj9cs5l0hqjjvb9ccfg6w5qg5x6f0a3d9b1c2e3f4g5h6i")).rejects.toThrow(/401/);
     expect(calls.length).toBe(2); // one forced-fresh retry, then give up
     expect(forced).toBe(true);
   });
