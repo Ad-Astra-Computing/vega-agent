@@ -52,3 +52,27 @@ export function resolveBuilds(
   }
   return out;
 }
+
+/**
+ * Whether an installable's flake refers to the running repository's own flake.
+ * Vega records gh-actions provenance from the OIDC repo (`github:<repository>`),
+ * so an attestation is only reproducible if what was built IS that repo's flake.
+ * Local checkouts (`.#`, an absolute path, the flake dir) and an explicit
+ * `github:<repository>` reference qualify; a foreign flake (e.g. nixpkgs or
+ * another repo) does not, and the recorded candidate would be unbuildable.
+ */
+export function installableTargetsOwnRepo(
+  installable: string,
+  flakeDir: string,
+  repository: string | undefined,
+): boolean {
+  const ref = (installable.split("#")[0] ?? "").replace(/\/+$/, "");
+  const dir = flakeDir.replace(/\/+$/, "");
+  if (ref === "" || ref === "." || ref === dir) return true;
+  if (ref.startsWith("./") || ref.startsWith("/") || ref.startsWith("path:")) return true;
+  if (repository) {
+    const m = /^github:([^/]+\/[^/?#]+)/.exec(ref);
+    if (m && m[1]!.toLowerCase() === repository.toLowerCase()) return true;
+  }
+  return false;
+}

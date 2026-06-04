@@ -24,7 +24,7 @@ import { narObjectExists } from "../src/agent/upstream.js";
 import { mapConcurrent } from "../src/agent/concurrency.js";
 import { tenantSubstituter } from "../src/agent/substituter.js";
 import { parseVegaConfig, type VegaConfig } from "../src/agent/config.js";
-import { resolveBuilds } from "../src/agent/builds.js";
+import { resolveBuilds, installableTargetsOwnRepo } from "../src/agent/builds.js";
 import { sha256NixHashToBase64 } from "../src/nix/hash.js";
 import { nixBuild, pathInfoClosure, pathInfoOutputs, makeNar, currentSystem, flakeShow } from "./nix.js";
 import { flattenFlakeShow } from "../src/agent/outputs.js";
@@ -150,6 +150,21 @@ async function main(): Promise<void> {
     config && config.include.length > 0 ? flattenFlakeShow(await flakeShow(flakeDir)) : undefined;
   const builds = resolveBuilds(config, fallback, flakeDir, sys, flakeOutputs);
   if (config) console.log(`vega.yaml: building ${builds.length} declared output(s).`);
+
+  // Vega records gh-actions provenance from the OIDC repo, so a build that is not
+  // the repository's own flake is attested as github:<repo>#<attr> and cannot be
+  // reproduced (the repo has no such output). Warn loudly; it stays at tenant tier.
+  const repo = process.env.GITHUB_REPOSITORY;
+  for (const b of builds) {
+    if (!installableTargetsOwnRepo(b.installable, flakeDir, repo)) {
+      console.warn(
+        `::warning::Building '${b.installable}', but Vega records this attestation as ` +
+          `github:${repo ?? "<repo>"}#${b.attr}. A reproduction worker rebuilds that, so ` +
+          `unless this repository's own flake builds '${b.attr}', the output cannot be ` +
+          `reproduced and stays at tenant tier. Build the repo's own flake (e.g. '.#${b.attr}').`,
+      );
+    }
+  }
 
   // Capture the runner's OIDC request credential, then DROP it from the
   // environment before shelling out to nix, so nothing a build spawns can mint a
