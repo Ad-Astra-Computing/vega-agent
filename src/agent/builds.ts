@@ -68,11 +68,19 @@ export function installableTargetsOwnRepo(
 ): boolean {
   const ref = (installable.split("#")[0] ?? "").replace(/\/+$/, "");
   const dir = flakeDir.replace(/\/+$/, "");
-  if (ref === "" || ref === "." || ref === dir) return true;
-  if (ref.startsWith("./") || ref.startsWith("/") || ref.startsWith("path:")) return true;
+  // Only the WORKSPACE flake qualifies as local: the CLI default `.#`, or the
+  // resolved `<flakeDir>#attr` (optionally `path:`-prefixed). A DIFFERENT local
+  // path (e.g. `/tmp/other#pkg` or `path:/tmp/other#pkg`, or a `./sub` flake) is
+  // foreign: Vega still records the attestation as `github:<repository>#attr`, so
+  // a reproducer rebuilds the repo flake and the output is unreproducible, so warn.
+  const local = ref.replace(/^path:/, "");
+  if (local === "" || local === "." || local === dir) return true;
   if (repository) {
     const m = /^github:([^/]+\/[^/?#]+)/.exec(ref);
-    if (m && m[1]!.toLowerCase() === repository.toLowerCase()) return true;
+    // A `?dir=<sub>` subflake is recorded and rebuilt as the repository's ROOT
+    // flake, so its output is unreproducible even though owner/repo matches:
+    // treat it as foreign so the warning still fires.
+    if (m && m[1]!.toLowerCase() === repository.toLowerCase() && !/[?&]dir=/.test(ref)) return true;
   }
   return false;
 }

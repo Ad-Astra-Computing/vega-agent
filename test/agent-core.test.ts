@@ -469,5 +469,17 @@ describe("installableTargetsOwnRepo", () => {
   it("rejects a foreign flake (unreproducible provenance)", () => {
     expect(installableTargetsOwnRepo("github:NixOS/nixpkgs/rev#figlet", "/repo", repo)).toBe(false);
     expect(installableTargetsOwnRepo("github:someone/other#x", "/repo", repo)).toBe(false);
+    // Same repo but a ?dir= subflake: provenance is the ROOT flake, so unreproducible.
+    expect(installableTargetsOwnRepo("github:Ad-Astra-Computing/vega-cache-example?dir=sub#pkg", "/repo", repo)).toBe(false);
+  });
+
+  it("rejects a foreign LOCAL flake but accepts the workspace by path/path:", () => {
+    // A different local flake is still recorded as github:<repo> -> unreproducible.
+    expect(installableTargetsOwnRepo("/tmp/other#pkg", "/repo", repo)).toBe(false);
+    expect(installableTargetsOwnRepo("path:/tmp/other#pkg", "/repo", repo)).toBe(false);
+    expect(installableTargetsOwnRepo("./sub#pkg", "/repo", repo)).toBe(false);
+    // The workspace flake itself, by absolute path or path:, still qualifies.
+    expect(installableTargetsOwnRepo("/repo#pkg", "/repo", repo)).toBe(true);
+    expect(installableTargetsOwnRepo("path:/repo#pkg", "/repo", repo)).toBe(true);
   });
 });
