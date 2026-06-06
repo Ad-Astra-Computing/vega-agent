@@ -25,6 +25,8 @@ import { mapConcurrent } from "../src/agent/concurrency.js";
 import { tenantSubstituter } from "../src/agent/substituter.js";
 import { parseVegaConfig, type VegaConfig } from "../src/agent/config.js";
 import { resolveBuilds, installableTargetsOwnRepo } from "../src/agent/builds.js";
+import { scanStorePath, redactKnownSecrets } from "../src/agent/secret-scan.js";
+import { workflowWarning } from "../src/agent/gha.js";
 import { sha256NixHashToBase64 } from "../src/nix/hash.js";
 import { nixBuild, pathInfoClosure, pathInfoOutputs, makeNar, currentSystem, flakeShow } from "./nix.js";
 import { flattenFlakeShow } from "../src/agent/outputs.js";
@@ -33,6 +35,12 @@ function requireEnv(name: string): string {
   const v = process.env[name];
   if (!v) throw new Error(`missing required env: ${name}`);
   return v;
+}
+
+/** Emit a GitHub Actions `::warning::` with attacker-influenced message data
+ * escaped, so a newline cannot inject a second, forged workflow command. */
+function ghaWarn(message: string): void {
+  console.warn(workflowWarning(message));
 }
 
 /** Load and validate `vega.yaml` from the repo root, or null if there is none. */
@@ -62,6 +70,9 @@ interface CacheOpts {
    * run after a timeout/failure resumes instead of re-uploading. The output is
    * always attested regardless, so resuming never drops a path's evidence. */
   resumeUrl?: string;
+  /** Scan each build's own output for secrets before upload and warn (default
+   * true). Disabled by `secret-scan: false` in vega.yaml. */
+  secretScan?: boolean;
 }
 
 /** Build one installable and upload+attest its (optionally novel-only) closure. */
@@ -77,6 +88,25 @@ async function cacheBuild(
   const closure = await pathInfoClosure(installable);
   const topPaths = new Set((await pathInfoOutputs(installable)).map((o) => o.path));
   console.log(`Closure has ${closure.length} path(s).`);
+
+  // Secret scan (warn-by-default): a build cached to Vega's public, append-only
+  // store cannot be unpublished, so warn BEFORE upload if this build's OWN output
+  // contains a recognizable credential. Scans only the top output paths (the
+  // build's own bytes), not the public dependency closure. Disable with
+  // `secret-scan: false` in vega.yaml.
+  if (opts.secretScan !== false) {
+    for (const top of topPaths) {
+      for (const h of await scanStorePath(top)) {
+        // Redact the file path too: a derivation can NAME a file after a token,
+        // so the path itself may carry the secret the preview redacts.
+        ghaWarn(
+          `possible ${h.kind} in ${redactKnownSecrets(h.file)}:${h.line} (${h.preview}). ` +
+            `This output is about to be published to Vega's public cache and cannot be ` +
+            `unpublished. Remove the secret, or set 'secret-scan: false' in vega.yaml to silence.`,
+        );
+      }
+    }
+  }
 
   // Decide what needs processing: drop only paths upstream already serves.
   // Resumability is handled per-path below (skip the redundant PUT, always
@@ -157,8 +187,8 @@ async function main(): Promise<void> {
   const repo = process.env.GITHUB_REPOSITORY;
   for (const b of builds) {
     if (!installableTargetsOwnRepo(b.installable, flakeDir, repo)) {
-      console.warn(
-        `::warning::Building '${b.installable}', but Vega records this attestation as ` +
+      ghaWarn(
+        `Building '${b.installable}', but Vega records this attestation as ` +
           `github:${repo ?? "<repo>"}#${b.attr}. A reproduction worker rebuilds that, so ` +
           `unless this repository's own flake builds '${b.attr}', the output cannot be ` +
           `reproduced and stays at tenant tier. Build the repo's own flake (e.g. '.#${b.attr}').`,
@@ -189,6 +219,9 @@ async function main(): Promise<void> {
     // Honor the vega.yaml opt-out: when continent publishing is off, tell the
     // control plane not to derive/record this build's continent.
     noContinent: config?.privacy.continent === false,
+    // Secret scan on by default (incl. the CLI-installable path with no config);
+    // `secret-scan: false` in vega.yaml turns it off.
+    secretScan: config?.secretScan ?? true,
   };
 
   // Register Vega's own tenant cache as a substituter so a cold runner pulls
