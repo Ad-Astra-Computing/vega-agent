@@ -41,6 +41,13 @@ export interface VegaConfig {
    */
   include: string[];
   exclude: string[];
+  /**
+   * Scan each build's own output for credentials (private keys, cloud/service
+   * tokens) before uploading, and warn on a hit (default true). A path cached to
+   * the public, content-addressed store cannot be unpublished, so this is the
+   * last point a leaked secret can be caught. Set `secret-scan: false` to disable.
+   */
+  secretScan: boolean;
   privacy: {
     /** Publish the builder's continent (default true). */
     continent: boolean;
@@ -126,6 +133,7 @@ export function parseVegaConfig(raw: unknown): VegaConfig {
     devShells,
     include,
     exclude,
+    secretScan: asBool(root["secret-scan"], "secret-scan", true),
     privacy: {
       continent: asBool(privacyRaw.continent, "privacy.continent", true),
       pseudonym: asBool(privacyRaw.pseudonym, "privacy.pseudonym", false),
