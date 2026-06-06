@@ -9,7 +9,7 @@ import { sha256NixBase32, sha256NixHashToBase64 } from "../src/nix/hash.js";
 import { buildAttestBody } from "../src/agent/narinfo.js";
 import { lockedInstallable } from "../src/agent/reproduce.js";
 import { partitionByUpstream } from "../src/agent/upstream.js";
-import { resolveBuilds } from "../src/agent/builds.js";
+import { resolveBuilds, installableTargetsOwnRepo } from "../src/agent/builds.js";
 import { parseVegaConfig } from "../src/agent/config.js";
 
 /** Minimal fake of fetch that records calls and returns scripted responses. */
@@ -455,5 +455,31 @@ describe("resolveBuilds (vega.yaml drives what is built)", () => {
   it("requires flakeOutputs when include matchers are declared", () => {
     const cfg = parseVegaConfig({ include: ["packages.*.*"] });
     expect(() => resolveBuilds(cfg, ".#", "/repo")).toThrow(/flakeOutputs/);
+  });
+});
+
+describe("installableTargetsOwnRepo", () => {
+  const repo = "Ad-Astra-Computing/vega-cache-example";
+  it("accepts local checkouts and the repo's own github flake", () => {
+    expect(installableTargetsOwnRepo(".#hello", "/repo", repo)).toBe(true);
+    expect(installableTargetsOwnRepo("/repo#hello", "/repo", repo)).toBe(true);
+    expect(installableTargetsOwnRepo("github:Ad-Astra-Computing/vega-cache-example#hello", "/repo", repo)).toBe(true);
+    expect(installableTargetsOwnRepo("github:Ad-Astra-Computing/vega-cache-example/abc123#hello", "/repo", repo)).toBe(true);
+  });
+  it("rejects a foreign flake (unreproducible provenance)", () => {
+    expect(installableTargetsOwnRepo("github:NixOS/nixpkgs/rev#figlet", "/repo", repo)).toBe(false);
+    expect(installableTargetsOwnRepo("github:someone/other#x", "/repo", repo)).toBe(false);
+    // Same repo but a ?dir= subflake: provenance is the ROOT flake, so unreproducible.
+    expect(installableTargetsOwnRepo("github:Ad-Astra-Computing/vega-cache-example?dir=sub#pkg", "/repo", repo)).toBe(false);
+  });
+
+  it("rejects a foreign LOCAL flake but accepts the workspace by path/path:", () => {
+    // A different local flake is still recorded as github:<repo> -> unreproducible.
+    expect(installableTargetsOwnRepo("/tmp/other#pkg", "/repo", repo)).toBe(false);
+    expect(installableTargetsOwnRepo("path:/tmp/other#pkg", "/repo", repo)).toBe(false);
+    expect(installableTargetsOwnRepo("./sub#pkg", "/repo", repo)).toBe(false);
+    // The workspace flake itself, by absolute path or path:, still qualifies.
+    expect(installableTargetsOwnRepo("/repo#pkg", "/repo", repo)).toBe(true);
+    expect(installableTargetsOwnRepo("path:/repo#pkg", "/repo", repo)).toBe(true);
   });
 });

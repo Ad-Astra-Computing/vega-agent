@@ -52,3 +52,35 @@ export function resolveBuilds(
   }
   return out;
 }
+
+/**
+ * Whether an installable's flake refers to the running repository's own flake.
+ * Vega records gh-actions provenance from the OIDC repo (`github:<repository>`),
+ * so an attestation is only reproducible if what was built IS that repo's flake.
+ * Local checkouts (`.#`, an absolute path, the flake dir) and an explicit
+ * `github:<repository>` reference qualify; a foreign flake (e.g. nixpkgs or
+ * another repo) does not, and the recorded candidate would be unbuildable.
+ */
+export function installableTargetsOwnRepo(
+  installable: string,
+  flakeDir: string,
+  repository: string | undefined,
+): boolean {
+  const ref = (installable.split("#")[0] ?? "").replace(/\/+$/, "");
+  const dir = flakeDir.replace(/\/+$/, "");
+  // Only the WORKSPACE flake qualifies as local: the CLI default `.#`, or the
+  // resolved `<flakeDir>#attr` (optionally `path:`-prefixed). A DIFFERENT local
+  // path (e.g. `/tmp/other#pkg` or `path:/tmp/other#pkg`, or a `./sub` flake) is
+  // foreign: Vega still records the attestation as `github:<repository>#attr`, so
+  // a reproducer rebuilds the repo flake and the output is unreproducible, so warn.
+  const local = ref.replace(/^path:/, "");
+  if (local === "" || local === "." || local === dir) return true;
+  if (repository) {
+    const m = /^github:([^/]+\/[^/?#]+)/.exec(ref);
+    // A `?dir=<sub>` subflake is recorded and rebuilt as the repository's ROOT
+    // flake, so its output is unreproducible even though owner/repo matches:
+    // treat it as foreign so the warning still fires.
+    if (m && m[1]!.toLowerCase() === repository.toLowerCase() && !/[?&]dir=/.test(ref)) return true;
+  }
+  return false;
+}
