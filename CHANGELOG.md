@@ -6,6 +6,26 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-07
+
+### Added
+
+- `vega diff <installable>` checks whether a flake output reproduces on the
+  machine you run it on. It rebuilds the output and, on a mismatch, runs
+  diffoscope and names the likely cause and its standard fix using the same
+  diagnosis taxonomy the cache uses server-side. Exits non-zero when the output
+  does not reproduce, so it works as a CI gate; `--json` emits the structured
+  verdict.
+- Client-side secret scanning before publish. The agent scans each build's own
+  output for recognizable credentials (private keys, cloud and service tokens)
+  and warns before upload, since a path published to the cache cannot be
+  unpublished. Detection is by specific format, not entropy, so it ignores the
+  base32 store hashes that fill a NAR. On by default; disable with
+  `secret-scan: false` in `vega.yaml`.
+- `extra-substituters` / `extra-trusted-public-keys` action inputs: pull heavy
+  dependencies from a trusted upstream cache (e.g. a project's Cachix) instead of
+  building them from source.
+
 ### Changed
 
 - The agent no longer enforces its own build timeout by default. A build's only
@@ -13,12 +33,11 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
   is never SIGTERM-killed (which discarded all completed store paths and made
   Vega look broken on heavy closures). Opt into an explicit per-build cap with
   the new `build-timeout-minutes` action input (default `0`, disabled).
-
-### Added
-
-- `extra-substituters` / `extra-trusted-public-keys` action inputs: pull heavy
-  dependencies from a trusted upstream cache (e.g. a project's Cachix) instead of
-  building them from source.
+- The agent warns when a build it attests is not the running repository's own
+  flake (a foreign installable, a path outside the checkout, or a
+  `github:owner/repo?dir=sub` subflake). The cache records reproduction
+  provenance from the repository, so such a candidate cannot be reproduced and
+  stays at tenant tier.
 
 ### Fixed
 
