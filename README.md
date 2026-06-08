@@ -25,7 +25,7 @@ nix profile install github:Ad-Astra-Computing/vega-agent#vega   # or install it
 Or add it to your flake, pinned to a release tag for repeatable builds:
 
 ```nix
-inputs.vega.url = "github:Ad-Astra-Computing/vega-agent/v0.4.2";
+inputs.vega.url = "github:Ad-Astra-Computing/vega-agent/v0.6.0";
 # optional, to share this flake's nixpkgs:
 #   inputs.vega.inputs.nixpkgs.follows = "nixpkgs";
 ```
@@ -40,7 +40,9 @@ Quickstart:
 vega login                  # enroll this machine (GitHub device flow)
 vega push .#my-package      # build locally, upload novel paths to your namespace
 vega verify /nix/store/<h>  # independently verify a build: signature + transparency log + NAR bytes
-vega mcp                    # read-only MCP server for AI agents (vega_verify, vega_risk)
+vega diff .#my-package      # rebuild locally and check reproducibility; explain any divergence
+vega gate .#my-package      # gate CI on the dependency-closure delta vs a committed baseline
+vega mcp                    # read-only MCP server for AI agents (vega_verify, vega_risk, vega_reproduce)
 vega view                   # print the nix.conf substituter + keys for your view
 vega trust add github:alice # trust another builder (scoped, revocable)
 vega status                 # auth + connectivity
@@ -49,13 +51,20 @@ vega doctor                 # diagnose nix / zstd / auth, and check for a newer 
 
 `vega verify` checks the cache's signature against a key you already trust, the
 signed tree head, the build's RFC 9162 inclusion proof, and re-derives the NAR
-hash — proof, not trust. `vega mcp` exposes that to coding agents over the Model
-Context Protocol so an agent can gate a dependency on `allow`/`warn`/`deny`
-before installing it.
+hash — proof, not trust. `vega diff` rebuilds locally and tells you whether a
+build is reproducible, naming the cause of any divergence. `vega gate` builds an
+installable, diffs its dependency closure against a committed `vega-closure.lock`
+baseline, and emits `allow`/`warn`/`deny`, exiting non-zero on `deny`, so CI can
+gate on what a change adds to the dependency closure: new store paths warn, and
+crossing your configured thresholds (added size or path count) denies. `vega mcp`
+exposes
+verification, the `allow`/`warn`/`deny` risk gate, and the read-only
+reproduction-status query to coding agents over the Model Context Protocol, so an
+agent can check a dependency before installing it.
 
 Full command set: `login`, `logout`, `whoami`, `status`, `doctor`, `push`,
-`verify`, `mcp`, `trust` (`add`/`remove`/`list`), `view`; run `vega <command>
---help` for details.
+`verify`, `diff`, `gate`, `mcp`, `trust` (`add`/`remove`/`list`), `view`; run
+`vega <command> --help` for details.
 The GitHub token from `login` is used once and never stored; only a short-lived
 Vega credential is kept (`~/.config/vega/credential`, mode 0600), and the control
 plane is required to be https.
