@@ -5,11 +5,20 @@ import { dirname, join } from "node:path";
 import { VERSION, compareVersions } from "./version.js";
 
 describe("VERSION", () => {
+  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+
   it("matches package.json so the release version never drifts", () => {
-    const pkg = JSON.parse(
-      readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8"),
-    ) as { version: string };
+    const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { version: string };
     expect(VERSION).toBe(pkg.version);
+  });
+
+  it("matches the flake.nix agent version, which tags the published builder image", () => {
+    // The release workflow tags/signs the GHCR image with flake.nix's
+    // `agent.version`, and rejects the release if it disagrees with the tag.
+    // If this drifts, `gh release create vX` fails at publish time, so pin it here.
+    const flake = readFileSync(join(root, "flake.nix"), "utf8");
+    const m = /pname = "vega-agent";\s*\n\s*version = "([^"]+)"/.exec(flake);
+    expect(m?.[1]).toBe(VERSION);
   });
 });
 
