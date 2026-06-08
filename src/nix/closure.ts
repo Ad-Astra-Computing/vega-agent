@@ -34,21 +34,41 @@ interface RawEntry {
  * well-formed store paths throw, since a closure must be addressable.
  */
 export function parseClosure(json: unknown): ClosurePath[] {
+  if (!Array.isArray(json) && (typeof json !== "object" || json === null)) {
+    throw new Error("unexpected nix path-info output: not an array or object");
+  }
+  // A malformed entry must throw, not be dropped: a silently shorter closure
+  // would UNDER-report the new paths the gate exists to catch.
   const entries: Array<{ path: string } & RawEntry> = Array.isArray(json)
-    ? (json as RawEntry[]).filter((e): e is { path: string } & RawEntry => typeof e?.path === "string")
-    : Object.entries((json ?? {}) as Record<string, RawEntry>).map(([path, v]) => ({ path, ...v }));
-  return entries
-    .map((e) => ({
+    ? (json as RawEntry[]).map((e, i) => {
+        if (typeof e?.path !== "string") throw new Error(`path-info entry ${i} has no string path`);
+        return e as { path: string } & RawEntry;
+      })
+    : // `path` LAST so the authoritative object key wins over any `path` field
+      // inside the value; guard a non-object value so it is not spread.
+      Object.entries(json as Record<string, RawEntry>).map(([path, v]) => ({
+        ...(typeof v === "object" && v !== null ? v : {}),
+        path,
+      }));
+  return dedupeByPath(
+    entries.map((e) => ({
       path: e.path,
       hash: storePathHash(e.path as StorePath),
       name: storePathName(e.path as StorePath),
-      narSize: typeof e.narSize === "number" && Number.isFinite(e.narSize) ? e.narSize : 0,
+      narSize: typeof e.narSize === "number" && Number.isFinite(e.narSize) && e.narSize >= 0 ? e.narSize : 0,
       references: Array.isArray(e.references) ? e.references.filter((r) => typeof r === "string") : [],
-    }))
-    .sort(byPath);
+    })),
+  ).sort(byPath);
 }
 
 const byPath = (a: ClosurePath, b: ClosurePath): number => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+
+/** A closure is a SET of paths: collapse any duplicate so counts and sizes are
+ * not inflated by a repeated entry (e.g. a hand-edited baseline). */
+function dedupeByPath(paths: ClosurePath[]): ClosurePath[] {
+  const seen = new Set<string>();
+  return paths.filter((p) => (seen.has(p.path) ? false : (seen.add(p.path), true)));
+}
 
 /** The difference between a baseline closure and a current one. */
 export interface ClosureDelta {
@@ -93,23 +113,30 @@ export function serializeBaseline(paths: ClosurePath[]): string {
   return [...paths].sort(byPath).map((p) => `${p.narSize} ${p.path}`).join("\n") + "\n";
 }
 
-/** Parse a baseline lockfile written by {@link serializeBaseline}. */
+/**
+ * Parse a baseline lockfile written by {@link serializeBaseline}. A committed
+ * lockfile is trusted input, so a corrupt line (bad spacing, non-numeric or
+ * negative size, or a non-store path) THROWS rather than being coerced to a
+ * zero-size path that would silently skew the verdict; the caller fails closed.
+ */
 export function parseBaseline(text: string): ClosurePath[] {
-  return text
+  const paths = text
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l.length > 0)
     .map((line) => {
       const sp = line.indexOf(" ");
-      const narSize = sp >= 0 ? Number(line.slice(0, sp)) : NaN;
-      const path = sp >= 0 ? line.slice(sp + 1) : line;
+      if (sp < 0) throw new Error(`invalid baseline line (expected "<narSize> <path>"): ${line}`);
+      const narSize = Number(line.slice(0, sp));
+      if (!Number.isFinite(narSize) || narSize < 0) throw new Error(`invalid narSize in baseline line: ${line}`);
+      const path = line.slice(sp + 1);
       return {
         path,
-        hash: storePathHash(path as StorePath),
+        hash: storePathHash(path as StorePath), // throws on a non-store path
         name: storePathName(path as StorePath),
-        narSize: Number.isFinite(narSize) ? narSize : 0,
+        narSize,
         references: [],
       };
-    })
-    .sort(byPath);
+    });
+  return dedupeByPath(paths).sort(byPath);
 }

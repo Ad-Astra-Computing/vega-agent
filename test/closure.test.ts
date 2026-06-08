@@ -32,6 +32,28 @@ describe("parseClosure", () => {
   it("throws on a non-store-path entry (a closure must be addressable)", () => {
     expect(() => parseClosure({ "/etc/passwd": { narSize: 1 } })).toThrow();
   });
+
+  it("throws on a non-array, non-object root", () => {
+    expect(() => parseClosure("nope")).toThrow();
+    expect(() => parseClosure(null)).toThrow();
+  });
+
+  it("throws on an array entry with no path (never silently drops it)", () => {
+    expect(() => parseClosure([{ narSize: 10 }])).toThrow();
+  });
+
+  it("dedupes a repeated path so counts are not inflated", () => {
+    const c = parseClosure([
+      { path: hello, narSize: 10 },
+      { path: hello, narSize: 10 },
+    ]);
+    expect(c).toHaveLength(1);
+  });
+
+  it("uses the object KEY as the path, even if the value carries a conflicting path field", () => {
+    const c = parseClosure({ [hello]: { path: glibc, narSize: 10 } } as Record<string, unknown>);
+    expect(c[0]!.path).toBe(hello); // the authoritative key wins
+  });
 });
 
 describe("diffClosures", () => {
@@ -65,5 +87,15 @@ describe("baseline serialize/parse", () => {
     const back = parseBaseline(text);
     expect(back.map((p) => p.path)).toEqual([hello, glibc]);
     expect(back[0]).toMatchObject({ narSize: 10, name: "hello-2.12.1" });
+  });
+
+  it("throws on a corrupt baseline (non-numeric/negative size or no space), failing closed", () => {
+    expect(() => parseBaseline(`abc ${hello}`)).toThrow();
+    expect(() => parseBaseline(hello)).toThrow(); // no "<size> " prefix
+    expect(() => parseBaseline(`-5 ${hello}`)).toThrow();
+  });
+
+  it("dedupes repeated baseline lines", () => {
+    expect(parseBaseline(`10 ${hello}\n10 ${hello}\n`)).toHaveLength(1);
   });
 });

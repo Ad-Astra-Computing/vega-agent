@@ -72,7 +72,11 @@ export function registerGate(program: Command): void {
       }
 
       if (opts.update) {
-        await writeFile(opts.baseline, serializeBaseline(current));
+        try {
+          await writeFile(opts.baseline, serializeBaseline(current));
+        } catch (e) {
+          fail(`could not write baseline ${opts.baseline}`, [(e as Error).message]);
+        }
         if (opts.json) return jsonEvent({ installable, updated: opts.baseline, paths: current.length });
         success(`wrote baseline ${pc.bold(opts.baseline)} (${current.length} paths)`);
         return;
@@ -84,7 +88,13 @@ export function registerGate(program: Command): void {
       } catch {
         const verdict = opts.allowMissingBaseline ? "allow" : "deny";
         if (opts.json) {
-          jsonEvent({ installable, verdict, reasonCodes: ["closure.missing_baseline"], baseline: opts.baseline });
+          jsonEvent({
+            installable,
+            verdict,
+            reasonCodes: ["closure.missing_baseline"],
+            baseline: opts.baseline,
+            hint: `vega gate ${installable} --update`,
+          });
           if (verdict === "deny") process.exitCode = 1;
           return;
         }
@@ -97,7 +107,24 @@ export function registerGate(program: Command): void {
         fail(`no baseline ${opts.baseline}`, next);
       }
 
-      const baseline = parseBaseline(baselineText);
+      let baseline;
+      try {
+        baseline = parseBaseline(baselineText);
+      } catch (e) {
+        // A corrupt/invalid committed baseline means the gate cannot be trusted: fail closed.
+        if (opts.json) {
+          jsonEvent({
+            installable,
+            verdict: "deny",
+            reasonCodes: ["closure.invalid_baseline"],
+            baseline: opts.baseline,
+            error: (e as Error).message,
+          });
+          process.exitCode = 1;
+          return;
+        }
+        fail(`invalid baseline ${opts.baseline}`, [(e as Error).message, `regenerate it: vega gate ${installable} --update`]);
+      }
       const delta = diffClosures(baseline, current);
       const baseTotal = baseline.reduce((n, p) => n + p.narSize, 0);
       const policy: GatePolicy = {
