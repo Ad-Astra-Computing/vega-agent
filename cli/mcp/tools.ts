@@ -201,3 +201,91 @@ export async function riskTool(
   const v = await runVerify(ctx, input.target);
   return isError(v) ? v : assessRisk(v.result, v.narOk);
 }
+
+const REPRO_STATUSES = ["reproducible", "diverged", "uncorroborated", "mirrored", "unknown"] as const;
+type ReproStatus = (typeof REPRO_STATUSES)[number];
+const REPRO_VERDICT: Record<ReproStatus, "allow" | "warn" | "deny"> = {
+  reproducible: "allow",
+  diverged: "deny",
+  uncorroborated: "warn",
+  mirrored: "warn",
+  unknown: "warn",
+};
+
+export interface ReproduceVerdict {
+  /** The validated store-path hash queried. */
+  target: string;
+  verdict: "allow" | "warn" | "deny";
+  reproduction: { status: ReproStatus; agreeCount: number; diverged: boolean; inSharedCache: boolean };
+  reasonCodes: string[];
+  nextActions: string[];
+}
+
+/**
+ * Parse a `/api/status` response into ONLY the fields vega_reproduce uses. An
+ * unknown verdict collapses to "unknown" and counts default to 0, so a malformed
+ * or hostile response can never crash the tool or smuggle an unsanitized string
+ * into the result (the output is built from validated enums and numbers only).
+ */
+export function parseReproStatus(json: unknown): {
+  status: ReproStatus;
+  agreeCount: number;
+  inSharedCache: boolean;
+} {
+  const o = (json ?? {}) as { verdict?: unknown; agree?: unknown; inSharedCache?: unknown };
+  const status: ReproStatus =
+    typeof o.verdict === "string" && (REPRO_STATUSES as readonly string[]).includes(o.verdict)
+      ? (o.verdict as ReproStatus)
+      : "unknown";
+  const agreeCount =
+    typeof o.agree === "number" && Number.isFinite(o.agree) && o.agree >= 0 ? Math.floor(o.agree) : 0;
+  return { status, agreeCount, inSharedCache: o.inSharedCache === true };
+}
+
+/** Pure verdict from a parsed status; no caller/server strings echoed. */
+export function assessReproduction(
+  hash: string,
+  s: { status: ReproStatus; agreeCount: number; inSharedCache: boolean },
+): ReproduceVerdict {
+  const verdict = REPRO_VERDICT[s.status];
+  const diverged = s.status === "diverged";
+  const nextActions: string[] =
+    verdict === "allow" ? [] : ["reproduce it yourself locally: vega diff <the flake output or store path>"];
+  if (diverged) nextActions.unshift("this build is non-reproducible: a Vega reproduction disagreed with it");
+  return {
+    target: hash,
+    verdict,
+    reproduction: { status: s.status, agreeCount: s.agreeCount, diverged, inSharedCache: s.inSharedCache },
+    reasonCodes: [`reproduce.${s.status}`],
+    nextActions,
+  };
+}
+
+/**
+ * `vega_reproduce`: READ-ONLY. Reports whether Vega has independently reproduced a
+ * build, by querying the pinned cache's `/api/status`. It NEVER rebuilds (a build
+ * spends compute and evaluates untrusted Nix; that stays out of the MCP surface,
+ * LLM06). When the build is not reproduced it suggests running `vega diff`
+ * locally rather than doing it.
+ */
+export async function reproduceTool(
+  ctx: ToolContext,
+  input: { target: string },
+): Promise<ReproduceVerdict | ToolError> {
+  const hash = parseStorePathHash(input.target);
+  if (hash === null) return { error: `'${untrusted(input.target, 80)}' is not a store path or hash` };
+  let res: Awaited<ReturnType<ToolContext["fetcher"]>>;
+  try {
+    res = await ctx.fetcher(`/api/status/${hash}`);
+  } catch {
+    return { error: `status lookup failed for ${hash}` };
+  }
+  if (!res.ok) return { error: `no status for ${hash} (HTTP ${res.status})` };
+  let json: unknown;
+  try {
+    json = await res.json();
+  } catch {
+    return { error: `malformed status response for ${hash}` };
+  }
+  return assessReproduction(hash, parseReproStatus(json));
+}

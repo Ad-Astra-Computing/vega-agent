@@ -10,7 +10,7 @@
  * read-only; `tools/call` only ever dispatches to the verify/risk handlers.
  */
 
-import { verifyTool, riskTool, isError, type ToolContext } from "./tools.js";
+import { verifyTool, riskTool, reproduceTool, isError, type ToolContext } from "./tools.js";
 import { untrusted } from "./sanitize.js";
 import { VERSION } from "../version.js";
 
@@ -55,6 +55,18 @@ const TOOLS: {
       "cryptographic facts, never a heuristic score.",
     inputSchema: TARGET_SCHEMA,
     run: riskTool,
+  },
+  {
+    name: "vega_reproduce",
+    description:
+      "Report whether Vega has independently REPRODUCED a Nix build, by querying " +
+      "the cache's reproduction status. Returns allow/warn/deny with a status " +
+      "(reproducible, uncorroborated, mirrored, diverged), the count of agreeing " +
+      "builders, and reason codes. Read-only: it NEVER rebuilds. When a build is " +
+      "not yet reproduced it suggests running `vega diff` locally rather than " +
+      "doing it for you.",
+    inputSchema: TARGET_SCHEMA,
+    run: reproduceTool,
   },
 ];
 
