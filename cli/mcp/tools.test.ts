@@ -6,7 +6,7 @@ import { leafHash, merkleRoot, inclusionProof } from "../../src/transparency/mer
 import { sthMessage, type Fetcher } from "../verify-core.js";
 import type { NarInfo, NixPublicKey } from "../../src/nix/types.js";
 import { untrusted, untrustedList } from "./sanitize.js";
-import { verifyTool, riskTool, isError, type ToolContext } from "./tools.js";
+import { verifyTool, riskTool, reproduceTool, parseReproStatus, assessReproduction, isError, type ToolContext } from "./tools.js";
 
 const utf8 = new TextEncoder();
 const hex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
@@ -159,5 +159,59 @@ describe("riskTool verdicts", () => {
       expect(r.tier).toBe("upstream");
       expect(r.reasonCodes).toContain("NOT_A_VEGA_TRUST_STATEMENT");
     }
+  });
+});
+
+describe("vega_reproduce", () => {
+  const statusCtx = (status: Record<string, unknown> | null): ToolContext => ({
+    fetcher: async (path: string) =>
+      status !== null && path === `/api/status/${HASH}`
+        ? { ok: true, status: 200, text: async () => JSON.stringify(status), json: async () => status }
+        : { ok: false, status: 404, text: async () => "", json: async () => ({}) },
+    cacheUrl: "https://vega-cache.dev",
+    sharedKeyName: "vega-cache-1",
+    resolveKey: async () => null,
+    verifyNar: async () => ({ ok: true, detail: "" }),
+  });
+
+  it("parseReproStatus collapses an unknown/hostile verdict to 'unknown' and bad counts to 0", () => {
+    expect(parseReproStatus({ verdict: "reproducible", agree: 3, inSharedCache: true })).toEqual({
+      status: "reproducible",
+      agreeCount: 3,
+      inSharedCache: true,
+    });
+    expect(parseReproStatus({ verdict: "\x1b[31mEVIL", agree: "x" }).status).toBe("unknown");
+    expect(parseReproStatus({}).agreeCount).toBe(0);
+  });
+
+  it("allows a reproducible build with no next actions", () => {
+    const r = assessReproduction(HASH, { status: "reproducible", agreeCount: 2, inSharedCache: true });
+    expect(r.verdict).toBe("allow");
+    expect(r.nextActions).toEqual([]);
+    expect(r.reasonCodes).toEqual(["reproduce.reproducible"]);
+  });
+
+  it("denies a diverged build and flags non-reproducibility", () => {
+    const r = assessReproduction(HASH, { status: "diverged", agreeCount: 1, inSharedCache: false });
+    expect(r.verdict).toBe("deny");
+    expect(r.reproduction.diverged).toBe(true);
+    expect(r.nextActions[0]).toMatch(/non-reproducible/);
+  });
+
+  it("warns an uncorroborated build and suggests vega diff (never rebuilds)", () => {
+    const r = assessReproduction(HASH, { status: "uncorroborated", agreeCount: 1, inSharedCache: false });
+    expect(r.verdict).toBe("warn");
+    expect(r.nextActions.join(" ")).toMatch(/vega diff/);
+  });
+
+  it("reproduceTool queries /api/status and returns the verdict", async () => {
+    const r = await reproduceTool(statusCtx({ verdict: "reproducible", agree: 2, inSharedCache: true }), { target: HASH });
+    expect(isError(r)).toBe(false);
+    expect((r as { verdict: string }).verdict).toBe("allow");
+  });
+
+  it("reproduceTool errors on a non-store-path target and on a 404", async () => {
+    expect(isError(await reproduceTool(statusCtx({}), { target: "not a path" }))).toBe(true);
+    expect(isError(await reproduceTool(statusCtx(null), { target: HASH }))).toBe(true);
   });
 });

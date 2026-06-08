@@ -27,7 +27,7 @@ describe("MCP server protocol", () => {
   it("lists exactly the read-only verify + risk tools", async () => {
     const r = (await handleRpc(ctx, req(2, "tools/list"))) as any;
     const names = r.result.tools.map((t: any) => t.name);
-    expect(names).toEqual(["vega_verify", "vega_risk"]);
+    expect(names).toEqual(["vega_verify", "vega_risk", "vega_reproduce"]);
     expect(r.result.tools[0].inputSchema.required).toEqual(["target"]);
   });
 
