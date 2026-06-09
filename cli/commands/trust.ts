@@ -4,7 +4,17 @@ import pc from "picocolors";
 import { requireCredential, authHeaders, safeError, type StoredCredential } from "../context.js";
 import { star, info, success, fail, jsonEvent, isTTY } from "../ui.js";
 
-type Scope = { kind: "all" } | { kind: "package"; name: string };
+type Scope =
+  | { kind: "all" }
+  | { kind: "package"; name: string }
+  | { kind: "flake"; name: string }
+  | { kind: "org"; name: string };
+
+interface ScopeOpts {
+  package?: string;
+  flake?: string;
+  org?: string;
+}
 
 /** Resolve a GitHub login to its immutable numeric id; pass a numeric id through. */
 async function resolveBuilder(subject: string): Promise<string> {
@@ -20,11 +30,33 @@ async function resolveBuilder(subject: string): Promise<string> {
   return String(id);
 }
 
-function scopeOf(opts: { package?: string }): Scope {
-  return opts.package ? { kind: "package", name: opts.package } : { kind: "all" };
+function scopeOf(opts: ScopeOpts): Scope {
+  const given = [opts.package && "--package", opts.flake && "--flake", opts.org && "--org"].filter(Boolean);
+  if (given.length > 1) fail(`use at most one of ${given.join(", ")}`);
+  if (opts.package) return { kind: "package", name: opts.package };
+  if (opts.flake !== undefined) {
+    const name = opts.flake.toLowerCase();
+    if (!/^[a-z0-9][a-z0-9-]{0,38}\/[a-z0-9._-]{1,100}$/.test(name)) fail("--flake must be a GitHub owner/repo");
+    return { kind: "flake", name };
+  }
+  if (opts.org !== undefined) {
+    const name = opts.org.toLowerCase();
+    if (!/^[a-z0-9][a-z0-9-]{0,38}$/.test(name)) fail("--org must be a GitHub owner");
+    return { kind: "org", name };
+  }
+  return { kind: "all" };
 }
 function scopeLabel(s: Scope): string {
-  return s.kind === "all" ? "all builds" : `the ${pc.bold(s.name)} package`;
+  switch (s.kind) {
+    case "all":
+      return "all builds";
+    case "package":
+      return `the ${pc.bold(s.name)} package`;
+    case "flake":
+      return `builds with verified provenance from the ${pc.bold(s.name)} flake`;
+    case "org":
+      return `builds with verified provenance from any ${pc.bold(s.name)} repo`;
+  }
 }
 
 async function confirm(question: string): Promise<boolean> {
@@ -54,8 +86,15 @@ export function registerTrust(program: Command): void {
     .command("add <subject>")
     .description("Trust builds from a GitHub user or numeric id")
     .option("--package <name>", "Restrict to one package (default: all their builds)")
+    .option("--flake <owner/repo>", "Restrict to builds with verified provenance from this flake")
+    .option("--org <owner>", "Restrict to builds with verified provenance from any repo under this org")
     .option("-y, --yes", "Skip the confirmation prompt")
-    .action(async (subject: string, opts: { package?: string; yes?: boolean }) => {
+    .addHelpText(
+      "after",
+      "\n--flake/--org match only builds with a verified github-hosted CI attestation\n" +
+        "from that flake/org; a build without one is not covered by these scopes.\n",
+    )
+    .action(async (subject: string, opts: ScopeOpts & { yes?: boolean }) => {
       const cred = await requireCredential();
       const builder = await resolveBuilder(subject);
       const scope = scopeOf(opts);
@@ -77,7 +116,9 @@ export function registerTrust(program: Command): void {
     .command("remove <subject>")
     .description("Revoke a trust edge")
     .option("--package <name>", "The scoped package (omit for the all-builds edge)")
-    .action(async (subject: string, opts: { package?: string }) => {
+    .option("--flake <owner/repo>", "The scoped flake")
+    .option("--org <owner>", "The scoped org")
+    .action(async (subject: string, opts: ScopeOpts) => {
       const cred = await requireCredential();
       const builder = await resolveBuilder(subject);
       const scope = scopeOf(opts);
