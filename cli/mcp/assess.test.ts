@@ -11,6 +11,7 @@ import {
   assessChangeTool,
   MAX_ASSESS_PATHS,
   MCP_ASSESS_MAX_PATHS,
+  MCP_ASSESS_NAR_TIMEOUT_MS,
   VERDICT_SCHEMA_VERSION,
 } from "./assess.js";
 import { parseAddedPaths } from "../commands/assess.js";
@@ -156,6 +157,22 @@ describe("assessChange", () => {
     expect(r.evidence.addedClosure).toEqual({ count: 2, assessed: 1, truncated: true });
     expect(r.reasonCodes).toContain("change.timeBudgetExceeded");
     expect(r.verdict).not.toBe("allow");
+  });
+
+  it("the MCP tool caps a single in-flight NAR fetch to the assess timeout", async () => {
+    // Records the per-call NAR timeout each path verification requests, so one
+    // slow NAR cannot overrun the wall-clock budget by the full default timeout.
+    const seen: Array<number | undefined> = [];
+    const base = ctxFor();
+    const ctx: ToolContext = {
+      ...base,
+      verifyNar: async (info, opts) => {
+        seen.push(opts?.timeoutMs);
+        return { ok: true, checked: true, detail: "test" };
+      },
+    };
+    await assessChangeTool(ctx, { paths: [GOOD_PATH] });
+    expect(seen).toEqual([MCP_ASSESS_NAR_TIMEOUT_MS]);
   });
 
   it("the MCP tool caps the path count tighter than the CLI core", async () => {

@@ -6,6 +6,12 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+### Changed
+
+- `vega_assess_change` now caps a single in-flight NAR fetch (20s) in addition to
+  its path cap and wall-clock budget, so one slow NAR cannot overrun the budget by
+  the full default timeout. `verifyNar` accepts an optional per-call timeout.
+
 ## [0.7.0] - 2026-06-09
 
 ### Added
@@ -31,6 +37,22 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
   a hash mismatch. For an upstream mirror an unchecked NAR stays `allow` with a
   `NAR_NOT_LOCALLY_CHECKED` disclosure (nix re-checks the hash on substitution);
   for the shared tier it warns.
+
+## [0.6.0] - 2026-06-08
+
+### Added
+
+- `vega gate <installable>` — a dependency-closure supply-chain gate. It builds
+  an installable, computes its closure, and compares it against a committed
+  `vega-closure.lock` baseline, emitting `allow`/`warn`/`deny` (exit non-zero on
+  `deny`) for CI. The size signal is added bytes as a fraction of the baseline so
+  a removal cannot mask a new dependency; `--update` writes the baseline;
+  thresholds are flag-configurable. `--json` emits the structured verdict.
+- `vega_reproduce` adds reproducibility to the MCP surface: a read-only tool that
+  queries the cache's recorded reproduction status (`reproducible`,
+  `uncorroborated`, `mirrored`, `diverged`, `unknown`) with the count of agreeing
+  builders. It never rebuilds, suggesting `vega diff` for a local check instead.
+  Parsing fails closed on malformed input.
 
 ## [0.5.0] - 2026-06-07
 
