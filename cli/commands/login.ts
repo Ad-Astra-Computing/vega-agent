@@ -16,13 +16,14 @@ export function registerLogin(program: Command): void {
   program
     .command("login")
     .description("Enroll this machine with the GitHub device flow")
-    .option("--control-plane <url>", "Vega control plane URL (default: prod, or $VEGA_URL)")
+    .option("--url <url>", "Vega control plane URL (default: prod, or $VEGA_URL)")
+    .option("--control-plane <url>", "alias for --url")
     .addHelpText(
       "after",
       "\nThe GitHub token is used once and never stored; only the Vega credential is kept.\n",
     )
-    .action(async (opts: { controlPlane?: string }) => {
-      const url = controlPlaneFor(opts.controlPlane);
+    .action(async (opts: { url?: string; controlPlane?: string }) => {
+      const url = controlPlaneFor(opts.url || opts.controlPlane);
       const dc = await requestDeviceCode(VEGA_GITHUB_CLIENT_ID);
       info(`\n  Open ${pc.cyan(dc.verificationUri)} and enter code:  ${pc.bold(dc.userCode)}\n`);
       info("  Waiting for authorization...");

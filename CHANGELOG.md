@@ -6,6 +6,13 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+### Added
+
+- `vega doctor --json` emits the structured checks (`{ ok, checks }`), so the only
+  query command that lacked `--json` now matches its peers for scripting/CI.
+- `vega login --url <url>` is the control-plane flag, matching `verify`/`assess`/
+  `mcp`; `--control-plane` stays as an alias.
+
 ### Changed
 
 - `vega_assess_change` now caps a single in-flight NAR fetch (20s) in addition to

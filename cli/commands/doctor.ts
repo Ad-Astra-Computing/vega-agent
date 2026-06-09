@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import pc from "picocolors";
 import { loadCredentialMaybe, DEFAULT_CONTROL_PLANE } from "../context.js";
-import { star, info } from "../ui.js";
+import { star, info, jsonEvent } from "../ui.js";
 import { VERSION, AGENT_REPO, compareVersions } from "../version.js";
 
 const exec = promisify(execFile);
@@ -29,7 +29,8 @@ export function registerDoctor(program: Command): void {
   program
     .command("doctor")
     .description("Diagnose local setup: nix, zstd, auth, connectivity")
-    .action(async () => {
+    .option("--json", "output JSON")
+    .action(async (opts: { json?: boolean }) => {
       const checks: Check[] = [];
 
       const nix = await onPath("nix", ["--version"]);
@@ -103,13 +104,19 @@ export function registerDoctor(program: Command): void {
         checks.push({ name: "version", level: "ok", detail: `${VERSION} (offline)` });
       }
 
+      const failed = checks.some((c) => c.level === "fail");
+      if (opts.json) {
+        jsonEvent({ ok: !failed, checks });
+        if (failed) process.exitCode = 1;
+        return;
+      }
+
       info(star("Vega doctor"));
       const mark = { ok: pc.green("ok  "), warn: pc.yellow("warn"), fail: pc.red("fail") };
       for (const c of checks) {
         info(`  ${mark[c.level]}  ${c.name.padEnd(14)} ${pc.gray(c.detail)}`);
         if (c.fix) info(`        ${pc.gray("fix:")} ${pc.cyan(c.fix)}`);
       }
-      const failed = checks.some((c) => c.level === "fail");
       if (failed) process.exitCode = 1;
     });
 }
