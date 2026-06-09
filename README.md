@@ -45,7 +45,7 @@ vega gate .#my-package      # gate CI on the dependency-closure delta vs a commi
 vega assess --added-paths - # gate a change's added store paths on their trust standing (read-only)
 vega mcp                    # read-only MCP server for AI agents (verify, risk, reproduce, assess_change)
 vega view                   # print the nix.conf substituter + keys for your view
-vega trust add github:alice # trust another builder (scoped, revocable)
+vega trust add github:alice # trust a builder (scoped --package/--flake/--org, revocable)
 vega status                 # auth + connectivity
 vega doctor                 # diagnose nix / zstd / auth, and check for a newer release
 ```
