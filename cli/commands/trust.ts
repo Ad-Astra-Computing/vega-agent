@@ -70,11 +70,17 @@ async function confirm(question: string): Promise<boolean> {
   }
 }
 
-async function postTrust(cred: StoredCredential, path: string, builder: string, scope: Scope): Promise<void> {
+async function postTrust(
+  cred: StoredCredential,
+  path: string,
+  builder: string,
+  scope: Scope,
+  acceptUnreproducible = false,
+): Promise<void> {
   const res = await fetch(`${cred.url}${path}`, {
     method: "POST",
     headers: authHeaders(cred),
-    body: JSON.stringify({ builder, scope }),
+    body: JSON.stringify(acceptUnreproducible ? { builder, scope, acceptUnreproducible } : { builder, scope }),
   });
   if (!res.ok) fail(`${path} failed (${await safeError(res)})`);
 }
@@ -88,13 +94,17 @@ export function registerTrust(program: Command): void {
     .option("--package <name>", "Restrict to one package (default: all their builds)")
     .option("--flake <owner/repo>", "Restrict to builds with verified provenance from this flake")
     .option("--org <owner>", "Restrict to builds with verified provenance from any repo under this org")
+    .option("--accept-unreproducible", "Also accept this builder's builds Vega's reproducer diverged from (risky)")
     .option("-y, --yes", "Skip the confirmation prompt")
     .addHelpText(
       "after",
       "\n--flake/--org match only builds with a verified github-hosted CI attestation\n" +
-        "from that flake/org; a build without one is not covered by these scopes.\n",
+        "from that flake/org; a build without one is not covered by these scopes.\n" +
+        "\nBy default Vega withholds a binding its own reproducer diverged from (got a\n" +
+        "different hash than the builder). --accept-unreproducible opts THIS edge into\n" +
+        "serving those anyway, at your own risk (e.g. a known-nondeterministic build).\n",
     )
-    .action(async (subject: string, opts: ScopeOpts & { yes?: boolean }) => {
+    .action(async (subject: string, opts: ScopeOpts & { yes?: boolean; acceptUnreproducible?: boolean }) => {
       const cred = await requireCredential();
       const builder = await resolveBuilder(subject);
       const scope = scopeOf(opts);
@@ -103,12 +113,15 @@ export function registerTrust(program: Command): void {
       info(`  Builder:  ${pc.bold(subject)} (id ${builder})`);
       info(`  Scope:    ${scopeLabel(scope)}`);
       info(`  Effect:   matching builds may be substituted into your Vega view`);
+      if (opts.acceptUnreproducible) {
+        info(`  ${pc.yellow("Risk:")}     also accepts builds Vega's reproducer DIVERGED from (not independently verified)`);
+      }
       info(pc.gray("\nThis does NOT give them access to your namespace; it lets their matching"));
       info(pc.gray("build outputs satisfy your Nix substitutions within the scope above.\n"));
       if (!opts.yes && !(await confirm("Continue?"))) {
         fail("aborted (no trust edge created).", isTTY ? undefined : ["vega trust add <subject> --yes"]);
       }
-      await postTrust(cred, "/api/trust", builder, scope);
+      await postTrust(cred, "/api/trust", builder, scope, opts.acceptUnreproducible);
       success(`You now trust builds from ${pc.bold(subject)} for ${scopeLabel(scope)}.`);
     });
 
