@@ -12,6 +12,10 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
   query command that lacked `--json` now matches its peers for scripting/CI.
 - `vega login --url <url>` is the control-plane flag, matching `verify`/`assess`/
   `mcp`; `--control-plane` stays as an alias.
+- `vega trust add --flake <owner/repo>` / `--org <owner>` scope a build-trust edge
+  to a flake or org. Unlike `--package` (which matches the builder-controlled
+  store-path name), these match only a build with a verified github-hosted CI
+  attestation from that flake/org, so a build without one is not covered.
 
 ### Changed
 
