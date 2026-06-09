@@ -6,6 +6,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-09
+
 ### Added
 
 - `vega assess` and the `vega_assess_change` MCP tool: a read-only, change-level
