@@ -66,9 +66,14 @@ export function buildToolContext(
     ...(opts.maxScan !== undefined ? { maxScan: opts.maxScan } : {}),
     resolveKey: async (sigNames) => flagKey ?? pickTrustedKey(await trustedKeys(), sigNames),
     // Streaming NAR fetch (decompress + hash), bounded by a timeout rather than a
-    // byte cap since a legitimate NAR can be large.
-    verifyNar: (info) =>
-      checkNarHash((p) => fetch(`${cacheUrl}${p}`, { signal: AbortSignal.timeout(NAR_TIMEOUT_MS) }), info),
+    // byte cap since a legitimate NAR can be large. A caller may pass a smaller
+    // per-call timeout (the change gate does, to keep one in-flight NAR within
+    // its wall-clock budget).
+    verifyNar: (info, opts) =>
+      checkNarHash(
+        (p) => fetch(`${cacheUrl}${p}`, { signal: AbortSignal.timeout(opts?.timeoutMs ?? NAR_TIMEOUT_MS) }),
+        info,
+      ),
   };
 }
 

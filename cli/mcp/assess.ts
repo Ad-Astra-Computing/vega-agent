@@ -71,12 +71,19 @@ export const MAX_ASSESS_PATHS = 50;
  * verdict; the worst case is then roughly the budget plus one in-flight NAR. */
 export const MCP_ASSESS_MAX_PATHS = 25;
 export const MCP_ASSESS_BUDGET_MS = 60_000;
+/** Per-path NAR fetch timeout under the MCP budget. Smaller than the default NAR
+ * timeout so a single in-flight NAR cannot overrun the wall-clock budget by much:
+ * the worst case becomes roughly the budget plus this, not the full default. */
+export const MCP_ASSESS_NAR_TIMEOUT_MS = 20_000;
 
 export interface AssessOptions {
   /** Hard cap on how many unique paths are verified (default MAX_ASSESS_PATHS). */
   maxPaths?: number;
   /** Wall-clock budget for the whole call; verification stops once it elapses. */
   budgetMs?: number;
+  /** Per-path NAR fetch timeout (caps a single in-flight NAR; default is the
+   * fetcher's own NAR timeout). */
+  narTimeoutMs?: number;
   /** Injectable clock for deterministic tests (defaults to Date.now). */
   now?: () => number;
 }
@@ -90,9 +97,9 @@ function worst(a: Verdict, b: Verdict): Verdict {
 /** Verify one added path and map it to a per-path verdict. A path we cannot make
  * a trust statement about (not in the cache, no trusted key, not a store path) is
  * a WARN with the classifier code; a path a proof refutes is a DENY. */
-async function assessOnePath(ctx: ToolContext, raw: string): Promise<PathAssessment> {
+async function assessOnePath(ctx: ToolContext, raw: string, narTimeoutMs?: number): Promise<PathAssessment> {
   const path = untrusted(raw, 512);
-  const v = await runVerify(ctx, raw);
+  const v = await runVerify(ctx, raw, narTimeoutMs !== undefined ? { timeoutMs: narTimeoutMs } : undefined);
   if (isError(v)) {
     return { path, verdict: "warn", tier: "unknown", reasonCodes: [v.code ?? "NOT_ASSESSABLE"] };
   }
@@ -131,7 +138,7 @@ export async function assessChange(
       timedOut = true;
       break;
     }
-    paths.push(await assessOnePath(ctx, p));
+    paths.push(await assessOnePath(ctx, p, opts.narTimeoutMs));
   }
 
   const verdicts: Record<Verdict, number> = { allow: 0, warn: 0, deny: 0 };
@@ -195,5 +202,9 @@ export async function assessChangeTool(
   ctx: ToolContext,
   input: { paths: string[] },
 ): Promise<VegaVerdict<ChangeAssessmentEvidence>> {
-  return assessChange(ctx, input.paths, { maxPaths: MCP_ASSESS_MAX_PATHS, budgetMs: MCP_ASSESS_BUDGET_MS });
+  return assessChange(ctx, input.paths, {
+    maxPaths: MCP_ASSESS_MAX_PATHS,
+    budgetMs: MCP_ASSESS_BUDGET_MS,
+    narTimeoutMs: MCP_ASSESS_NAR_TIMEOUT_MS,
+  });
 }

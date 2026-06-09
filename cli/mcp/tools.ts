@@ -43,8 +43,15 @@ export interface ToolContext {
    * `checked` (default true when omitted) is false when the byte check could NOT
    * be performed (a compression we cannot decompress locally, or a fetch
    * failure). That is distinct from a hash MISMATCH (`ok: false, checked: true`):
-   * "not checked" is unverified, not refuted, and must never deny on its own. */
-  verifyNar(info: Pick<NarInfo, "url" | "compression" | "narHash">): Promise<{ ok: boolean; detail: string; checked?: boolean }>;
+   * "not checked" is unverified, not refuted, and must never deny on its own.
+   *
+   * `opts.timeoutMs` overrides the default NAR fetch timeout for this one call,
+   * so a caller assessing many paths under a wall-clock budget (the change gate)
+   * can cap a single in-flight NAR rather than letting it run the full default. */
+  verifyNar(
+    info: Pick<NarInfo, "url" | "compression" | "narHash">,
+    opts?: { timeoutMs?: number },
+  ): Promise<{ ok: boolean; detail: string; checked?: boolean }>;
   /** Bound the transparency-log scan (LLM10, unbounded consumption). */
   maxScan?: number;
 }
@@ -63,6 +70,7 @@ export function isError(v: unknown): v is ToolError {
 export async function runVerify(
   ctx: ToolContext,
   target: string,
+  narOpts?: { timeoutMs?: number },
 ): Promise<{ result: VerifyResult; narOk: boolean; narChecked: boolean; narDetail: string } | ToolError> {
   const hash = parseStorePathHash(target);
   if (hash === null) return { error: `'${untrusted(target, 80)}' is not a store path or hash`, code: "NOT_A_STORE_PATH" };
@@ -94,7 +102,7 @@ export async function runVerify(
   // `checked` defaults to true (a stub or legacy path that only reports ok/detail
   // means it performed the check); it is false only when the byte check could not
   // run (a compression we cannot decompress locally, or a fetch failure).
-  const nar = await ctx.verifyNar(info);
+  const nar = await ctx.verifyNar(info, narOpts);
   return { result, narOk: nar.ok, narChecked: nar.checked !== false, narDetail: nar.detail };
 }
 
