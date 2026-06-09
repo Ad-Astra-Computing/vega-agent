@@ -42,7 +42,8 @@ vega push .#my-package      # build locally, upload novel paths to your namespac
 vega verify /nix/store/<h>  # independently verify a build: signature + transparency log + NAR bytes
 vega diff .#my-package      # rebuild locally and check reproducibility; explain any divergence
 vega gate .#my-package      # gate CI on the dependency-closure delta vs a committed baseline
-vega mcp                    # read-only MCP server for AI agents (vega_verify, vega_risk, vega_reproduce)
+vega assess --added-paths - # gate a change's added store paths on their trust standing (read-only)
+vega mcp                    # read-only MCP server for AI agents (verify, risk, reproduce, assess_change)
 vega view                   # print the nix.conf substituter + keys for your view
 vega trust add github:alice # trust another builder (scoped, revocable)
 vega status                 # auth + connectivity
@@ -56,15 +57,18 @@ build is reproducible, naming the cause of any divergence. `vega gate` builds an
 installable, diffs its dependency closure against a committed `vega-closure.lock`
 baseline, and emits `allow`/`warn`/`deny`, exiting non-zero on `deny`, so CI can
 gate on what a change adds to the dependency closure: new store paths warn, and
-crossing your configured thresholds (added size or path count) denies. `vega mcp`
-exposes
-verification, the `allow`/`warn`/`deny` risk gate, and the read-only
-reproduction-status query to coding agents over the Model Context Protocol, so an
-agent can check a dependency before installing it.
+crossing your configured thresholds (added size or path count) denies. `vega
+assess` takes the store paths a change adds (already resolved, e.g. piped from
+`vega gate --json`) and rolls each path's proof-backed verdict up into one
+`allow`/`warn`/`deny` for the whole change, with a per-path breakdown; it is
+read-only and builds nothing. `vega mcp` exposes verification, the
+`allow`/`warn`/`deny` risk gate, the read-only reproduction-status query, and the
+change-level `assess_change` gate to coding agents over the Model Context
+Protocol, so an agent can check a dependency before installing it.
 
 Full command set: `login`, `logout`, `whoami`, `status`, `doctor`, `push`,
-`verify`, `diff`, `gate`, `mcp`, `trust` (`add`/`remove`/`list`), `view`; run
-`vega <command> --help` for details.
+`verify`, `diff`, `gate`, `assess`, `mcp`, `trust` (`add`/`remove`/`list`),
+`view`; run `vega <command> --help` for details.
 The GitHub token from `login` is used once and never stored; only a short-lived
 Vega credential is kept (`~/.config/vega/credential`, mode 0600), and the control
 plane is required to be https.

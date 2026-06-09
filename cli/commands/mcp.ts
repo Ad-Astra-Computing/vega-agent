@@ -2,52 +2,10 @@ import type { Command } from "commander";
 import { DEFAULT_CONTROL_PLANE, assertSafeControlPlane, controlPlaneFor } from "../context.js";
 import { fail } from "../ui.js";
 import { parsePublicKey } from "../../src/nix/signing.js";
-import { trustedKeys, pickTrustedKey } from "../keys.js";
 import { runStdio } from "../mcp/server.js";
-import type { ToolContext } from "../mcp/tools.js";
-import { withRetry, type Fetcher } from "../verify-core.js";
-import { checkNarHash } from "../nar-check.js";
+import { buildToolContext } from "../mcp/runtime.js";
 
-const SHARED_KEY_NAME = "vega-cache-1";
-const MAX_RESPONSE_BYTES = 4 * 1024 * 1024; // narinfo/sth/entry/proof are tiny
 const MCP_MAX_SCAN = 2000; // default cap for automated MCP calls
-const REQUEST_TIMEOUT_MS = 15_000; // small bodies; fail fast on a stalled cache
-const NAR_TIMEOUT_MS = 120_000; // NARs can be large but must still terminate
-
-/** A fetcher that aborts any response exceeding `maxBytes`, so a hostile cache
- * cannot exhaust memory by returning a giant narinfo/proof/entry body, and times
- * out a stalled response so a single call cannot hang the serial stdio server. */
-function boundedFetcher(base: string, maxBytes: number): Fetcher {
-  return async (path) => {
-    const res = await fetch(`${base}${path}`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
-    let body: string | null = null;
-    const read = async (): Promise<string> => {
-      if (body !== null) return body;
-      const reader = res.body?.getReader();
-      if (!reader) return (body = "");
-      const chunks: Uint8Array[] = [];
-      let total = 0;
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        total += value.byteLength;
-        if (total > maxBytes) {
-          await reader.cancel();
-          throw new Error("response exceeds size limit");
-        }
-        chunks.push(value);
-      }
-      const buf = new Uint8Array(total);
-      let off = 0;
-      for (const c of chunks) {
-        buf.set(c, off);
-        off += c.byteLength;
-      }
-      return (body = new TextDecoder().decode(buf));
-    };
-    return { ok: res.ok, status: res.status, text: read, json: async () => JSON.parse(await read()) };
-  };
-}
 
 export function registerMcp(program: Command): void {
   program
@@ -60,7 +18,7 @@ export function registerMcp(program: Command): void {
       "after",
       "\nAdd to an MCP client (e.g. Claude Code) as a stdio server:\n" +
         '  { "command": "vega", "args": ["mcp"] }\n' +
-        "Tools: vega_verify, vega_risk (both read-only).",
+        "Tools: vega_verify, vega_risk, vega_reproduce, vega_assess_change (all read-only).",
     )
     .action(async (opts: { url: string; publicKey?: string; maxScan?: number }) => {
       const cacheUrl = assertSafeControlPlane(controlPlaneFor(opts.url));
@@ -83,17 +41,6 @@ export function registerMcp(program: Command): void {
       }
       // Diagnostics go to stderr; stdout is reserved for JSON-RPC.
       process.stderr.write(`vega mcp: serving over stdio against ${cacheUrl}\n`);
-      const ctx: ToolContext = {
-        fetcher: withRetry(boundedFetcher(cacheUrl, MAX_RESPONSE_BYTES)),
-        cacheUrl,
-        sharedKeyName: SHARED_KEY_NAME,
-        maxScan,
-        resolveKey: async (sigNames) => flagKey ?? pickTrustedKey(await trustedKeys(), sigNames),
-        // Streaming NAR fetch (decompress + hash), bounded by a timeout rather
-        // than a byte cap since a legitimate NAR can be large.
-        verifyNar: (info) =>
-          checkNarHash((p) => fetch(`${cacheUrl}${p}`, { signal: AbortSignal.timeout(NAR_TIMEOUT_MS) }), info),
-      };
-      await runStdio(ctx);
+      await runStdio(buildToolContext(cacheUrl, { flagKey, maxScan }));
     });
 }

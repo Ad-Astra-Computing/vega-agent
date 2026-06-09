@@ -6,6 +6,30 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+### Added
+
+- `vega assess` and the `vega_assess_change` MCP tool: a read-only, change-level
+  trust gate. Given the store paths a change ADDS (already resolved, e.g. piped
+  from `vega gate --json`), it rolls each path's proof-backed verdict up into one
+  `allow`/`warn`/`deny` for the whole change, with a per-path breakdown. It
+  resolves and builds nothing. The MCP tool is bounded (a path cap plus a
+  wall-clock budget), so one call cannot monopolize the server; a change it could
+  not assess in full is reported as truncated and is never `allow`.
+- A shared verdict envelope (`vega.verdict.v1`): `schemaVersion`, `tool`,
+  `target`, `verdict`, `reasonCodes`, `nextActions`, and a tool-specific
+  `evidence` payload, so a consumer can branch on a stable shape.
+
+### Changed
+
+- The NAR re-hash now reports three states (`verified`, `mismatch`, `unchecked`)
+  instead of a single boolean. A byte check that could not run (a compression we
+  cannot decompress locally, e.g. an upstream `xz` mirror) is `unchecked`, which
+  is distinct from a proven `mismatch`: only a mismatch denies, `unchecked` never
+  reads as verified, and `vega_risk` no longer reports a valid upstream mirror as
+  a hash mismatch. For an upstream mirror an unchecked NAR stays `allow` with a
+  `NAR_NOT_LOCALLY_CHECKED` disclosure (nix re-checks the hash on substitution);
+  for the shared tier it warns.
+
 ## [0.5.0] - 2026-06-07
 
 ### Added

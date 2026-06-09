@@ -20,12 +20,16 @@ export type NarFetch = (path: string) => Promise<Response>;
 export async function checkNarHash(
   fetchNar: NarFetch,
   info: Pick<NarInfo, "url" | "compression" | "narHash">,
-): Promise<{ ok: boolean; detail: string }> {
+): Promise<{ ok: boolean; checked: boolean; detail: string }> {
+  // `checked: false` means the byte check was NOT PERFORMED (we cannot decompress
+  // this format, or the NAR could not be fetched), which is distinct from a hash
+  // MISMATCH (`ok: false, checked: true`). A caller must not treat "not checked"
+  // as "verified", nor as "refuted": it is simply unverified locally.
   if (info.compression !== "zstd" && info.compression !== "none") {
-    return { ok: false, detail: `unsupported compression '${info.compression}' for local check` };
+    return { ok: false, checked: false, detail: `unsupported compression '${info.compression}' for local check` };
   }
   const res = await fetchNar(`/${info.url}`);
-  if (!res.ok || res.body === null) return { ok: false, detail: `NAR fetch failed (HTTP ${res.status})` };
+  if (!res.ok || res.body === null) return { ok: false, checked: false, detail: `NAR fetch failed (HTTP ${res.status})` };
   let stream: ReadableStream<Uint8Array>;
   if (info.compression === "zstd") {
     const compressed = Readable.fromWeb(res.body as Parameters<typeof Readable.fromWeb>[0]);
@@ -35,6 +39,6 @@ export async function checkNarHash(
   }
   const r = await verifyNarHash(info.narHash, stream);
   return r.ok
-    ? { ok: true, detail: r.actual }
-    : { ok: false, detail: `signed ${r.expected}, content ${r.actual}` };
+    ? { ok: true, checked: true, detail: r.actual }
+    : { ok: false, checked: true, detail: `signed ${r.expected}, content ${r.actual}` };
 }

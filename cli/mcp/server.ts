@@ -11,6 +11,7 @@
  */
 
 import { verifyTool, riskTool, reproduceTool, isError, type ToolContext } from "./tools.js";
+import { assessChangeTool } from "./assess.js";
 import { untrusted } from "./sanitize.js";
 import { VERSION } from "../version.js";
 
@@ -29,12 +30,36 @@ const TARGET_SCHEMA = {
   additionalProperties: false,
 } as const;
 
-const TOOLS: {
+const PATHS_SCHEMA = {
+  type: "object",
+  properties: {
+    paths: {
+      type: "array",
+      items: { type: "string" },
+      description:
+        "The /nix/store paths the change ADDS (already resolved, e.g. the `added` " +
+        "array from `vega gate --json`). Read-only; nothing is built or realised.",
+    },
+  },
+  required: ["paths"],
+  additionalProperties: false,
+} as const;
+
+/** A tool validates its raw arguments (returning an error string for a -32602
+ * Invalid Params, or null when ok) and then runs. This lets tools take different
+ * input shapes (a single `target`, or a `paths` array) through one dispatcher. */
+interface ToolSpec {
   name: string;
   description: string;
   inputSchema: unknown;
-  run: (ctx: ToolContext, input: { target: string }) => Promise<unknown>;
-}[] = [
+  validate: (args: Record<string, unknown>) => string | null;
+  run: (ctx: ToolContext, args: Record<string, unknown>) => Promise<unknown>;
+}
+
+const needTarget = (a: Record<string, unknown>) =>
+  typeof a.target === "string" ? null : "missing required string argument 'target'";
+
+const TOOLS: ToolSpec[] = [
   {
     name: "vega_verify",
     description:
@@ -43,7 +68,8 @@ const TOOLS: {
       "signed transparency-log tree head, and the build's RFC 9162 inclusion " +
       "proof. Returns proof-backed facts. Read-only; installs nothing.",
     inputSchema: TARGET_SCHEMA,
-    run: verifyTool,
+    validate: needTarget,
+    run: (ctx, a) => verifyTool(ctx, { target: a.target as string }),
   },
   {
     name: "vega_risk",
@@ -54,7 +80,8 @@ const TOOLS: {
       "install, or depend on it. Read-only; every verdict is backed by " +
       "cryptographic facts, never a heuristic score.",
     inputSchema: TARGET_SCHEMA,
-    run: riskTool,
+    validate: needTarget,
+    run: (ctx, a) => riskTool(ctx, { target: a.target as string }),
   },
   {
     name: "vega_reproduce",
@@ -66,7 +93,24 @@ const TOOLS: {
       "not yet reproduced it suggests running `vega diff` locally rather than " +
       "doing it for you.",
     inputSchema: TARGET_SCHEMA,
-    run: reproduceTool,
+    validate: needTarget,
+    run: (ctx, a) => reproduceTool(ctx, { target: a.target as string }),
+  },
+  {
+    name: "vega_assess_change",
+    description:
+      "Gate a dependency CHANGE before installing it: given the store paths the " +
+      "change adds (already resolved, e.g. from `vega gate --json`), return ONE " +
+      "allow/warn/deny for the whole change plus a per-path breakdown. Each path " +
+      "gets the same proof-backed verdict as vega_risk. Read-only: it resolves " +
+      "and builds nothing. Bounded to a fixed number of paths per call; a larger " +
+      "change is reported as truncated and cannot be 'allow'.",
+    inputSchema: PATHS_SCHEMA,
+    validate: (a) =>
+      Array.isArray(a.paths) && a.paths.every((p) => typeof p === "string")
+        ? null
+        : "missing required string-array argument 'paths'",
+    run: (ctx, a) => assessChangeTool(ctx, { paths: a.paths as string[] }),
   },
 ];
 
@@ -99,13 +143,14 @@ export async function handleRpc(ctx: ToolContext, req: Rpc): Promise<object | nu
         return ok({ tools: TOOLS.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })) });
       case "tools/call": {
         const name = req.params?.name;
-        const args = (req.params?.arguments ?? {}) as { target?: unknown };
+        const args = (req.params?.arguments ?? {}) as Record<string, unknown>;
         const tool = TOOLS.find((t) => t.name === name);
         if (!tool) return fail(-32602, `unknown tool: ${untrusted(String(name), 64)}`);
-        if (typeof args.target !== "string") return fail(-32602, "missing required string argument 'target'");
+        const invalid = tool.validate(args);
+        if (invalid) return fail(-32602, invalid);
         let out: unknown;
         try {
-          out = await tool.run(ctx, { target: args.target });
+          out = await tool.run(ctx, args);
         } catch (e) {
           // A throwing cache (malformed narinfo/proof JSON, etc.) is a tool
           // result error, not a protocol crash.

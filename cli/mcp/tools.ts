@@ -38,28 +38,37 @@ export interface ToolContext {
   /** Re-derive the NAR bytes for a narinfo and confirm they hash to the signed
    * narHash. A valid signature and log record only bind the narinfo; this is the
    * independent content check, so without it a signed/logged narinfo over corrupt
-   * or substituted bytes would falsely verify. Bounded by a fetch timeout. */
-  verifyNar(info: Pick<NarInfo, "url" | "compression" | "narHash">): Promise<{ ok: boolean; detail: string }>;
+   * or substituted bytes would falsely verify. Bounded by a fetch timeout.
+   *
+   * `checked` (default true when omitted) is false when the byte check could NOT
+   * be performed (a compression we cannot decompress locally, or a fetch
+   * failure). That is distinct from a hash MISMATCH (`ok: false, checked: true`):
+   * "not checked" is unverified, not refuted, and must never deny on its own. */
+  verifyNar(info: Pick<NarInfo, "url" | "compression" | "narHash">): Promise<{ ok: boolean; detail: string; checked?: boolean }>;
   /** Bound the transparency-log scan (LLM10, unbounded consumption). */
   maxScan?: number;
 }
 
 export interface ToolError {
   error: string;
+  /** A stable, caller-safe classifier for the failure, so an aggregator (e.g.
+   * the change assessor) can distinguish "cannot make a trust statement" cases
+   * (NOT_IN_CACHE, NO_TRUSTED_KEY, NOT_A_STORE_PATH) from a proven-bad verdict. */
+  code?: "NOT_A_STORE_PATH" | "NOT_IN_CACHE" | "NO_TRUSTED_KEY";
 }
 export function isError(v: unknown): v is ToolError {
   return typeof v === "object" && v !== null && typeof (v as ToolError).error === "string";
 }
 
-async function runVerify(
+export async function runVerify(
   ctx: ToolContext,
   target: string,
-): Promise<{ result: VerifyResult; narOk: boolean; narDetail: string } | ToolError> {
+): Promise<{ result: VerifyResult; narOk: boolean; narChecked: boolean; narDetail: string } | ToolError> {
   const hash = parseStorePathHash(target);
-  if (hash === null) return { error: `'${untrusted(target, 80)}' is not a store path or hash` };
+  if (hash === null) return { error: `'${untrusted(target, 80)}' is not a store path or hash`, code: "NOT_A_STORE_PATH" };
 
   const res = await ctx.fetcher(`/${hash}.narinfo`);
-  if (!res.ok) return { error: `no build found for ${hash} (HTTP ${res.status})` };
+  if (!res.ok) return { error: `no build found for ${hash} (HTTP ${res.status})`, code: "NOT_IN_CACHE" };
   const info = parseNarInfo(await res.text());
   const sigNames = info.sigs.map((s) => s.slice(0, s.indexOf(":")).trim()).filter(Boolean);
 
@@ -69,6 +78,7 @@ async function runVerify(
       error: `no trusted public key is configured for this build (signed by: ${sigNames
         .map((s) => untrusted(s, 64))
         .join(", ")})`,
+      code: "NO_TRUSTED_KEY",
     };
   }
 
@@ -81,15 +91,22 @@ async function runVerify(
   });
   // Independent content check: re-derive the NAR bytes and confirm they hash to
   // the signed narHash. A build is only fully verified when this also passes.
+  // `checked` defaults to true (a stub or legacy path that only reports ok/detail
+  // means it performed the check); it is false only when the byte check could not
+  // run (a compression we cannot decompress locally, or a fetch failure).
   const nar = await ctx.verifyNar(info);
-  return { result, narOk: nar.ok, narDetail: nar.detail };
+  return { result, narOk: nar.ok, narChecked: nar.checked !== false, narDetail: nar.detail };
 }
 
 /** Shape a VerifyResult into a fully-sanitized tool payload: EVERY string that
  * enters the agent's context is passed through `untrusted()`, including the key
  * name (which comes from nix.conf / a flag and is not validated for control
- * chars) and our own note. Booleans/indices are inherently safe. */
-function shape(r: VerifyResult, narOk: boolean) {
+ * chars) and our own note. Booleans/indices are inherently safe.
+ *
+ * `narHashChecked` distinguishes "we re-hashed the bytes" from "we could not"
+ * (e.g. an unsupported compression); `narHashVerified` is true only when the
+ * check ran AND matched, so "not checked" can never read as "verified". */
+function shape(r: VerifyResult, narOk: boolean, narChecked: boolean) {
   const t = r.transparency;
   return {
     storePath: untrusted(r.storePath, 512),
@@ -109,8 +126,9 @@ function shape(r: VerifyResult, narOk: boolean) {
       scanned: t.scanned,
       ...(t.note !== undefined ? { note: untrusted(t.note, 256) } : {}),
     },
-    narHashVerified: narOk,
-    verified: fullyVerified(r) && narOk,
+    narHashChecked: narChecked,
+    narHashVerified: narChecked && narOk,
+    verified: fullyVerified(r) && narChecked && narOk,
   };
 }
 
@@ -120,7 +138,7 @@ export async function verifyTool(
   input: { target: string },
 ): Promise<ReturnType<typeof shape> | ToolError> {
   const v = await runVerify(ctx, input.target);
-  return isError(v) ? v : shape(v.result, v.narOk);
+  return isError(v) ? v : shape(v.result, v.narOk, v.narChecked);
 }
 
 export interface RiskVerdict {
@@ -132,10 +150,25 @@ export interface RiskVerdict {
 }
 
 /** Map a verification result to a machine-actionable gate. Every code is backed
- * by a cryptographic fact in `proofs`; nothing here is a heuristic score. */
-export function assessRisk(r: VerifyResult, narOk: boolean): RiskVerdict {
-  const proofs = shape(r, narOk);
+ * by a cryptographic fact in `proofs`; nothing here is a heuristic score.
+ *
+ * `narChecked` (default true) is false when the byte re-hash could NOT be
+ * performed (a compression we cannot decompress locally). That is reported as
+ * NAR_NOT_LOCALLY_CHECKED and treated as unverified, never as refuted: it never
+ * denies and never reads as VERIFIED (proofs.narHashVerified stays false). For a
+ * Vega trust claim (shared tier) the missing local evidence downgrades a clean
+ * allow to a warn; for an upstream MIRROR it stays an allow with the disclosure,
+ * since the upstream signature is the trust anchor and nix re-checks the narHash
+ * on substitution (warning on a mirror's compression format would be noise). A
+ * byte check that RAN and disagreed (`narChecked && !narOk`) is a real mismatch
+ * and denies. The invariant: deny only on refutation; never call unchecked
+ * verified. */
+export function assessRisk(r: VerifyResult, narOk: boolean, narChecked = true): RiskVerdict {
+  const proofs = shape(r, narOk, narChecked);
   const t = r.transparency;
+  const unchecked = !narChecked;
+  const note = unchecked ? ["NAR_NOT_LOCALLY_CHECKED"] : [];
+
   if (!r.signature.ok) {
     return {
       verdict: "deny",
@@ -145,9 +178,9 @@ export function assessRisk(r: VerifyResult, narOk: boolean): RiskVerdict {
       nextActions: ["build_locally", "pin_previous_verified_version"],
     };
   }
-  // The served bytes must hash to the signed narHash; a content mismatch denies
-  // regardless of tier (a valid signature over substituted bytes is still bad).
-  if (!narOk) {
+  // A byte check that ran and FAILED is a content mismatch: deny regardless of
+  // tier (a valid signature over substituted bytes is still bad).
+  if (narChecked && !narOk) {
     return {
       verdict: "deny",
       tier: r.signature.scope,
@@ -157,10 +190,16 @@ export function assessRisk(r: VerifyResult, narOk: boolean): RiskVerdict {
     };
   }
   if (r.signature.scope === "upstream") {
+    // A verified mirror of an upstream cache; not a Vega trust statement. For an
+    // upstream mirror the trust anchor is the upstream signature (which the user
+    // trusts) and nix re-checks the narHash at substitution, so an unchecked NAR
+    // (e.g. an xz mirror we cannot decompress) stays an allow with an explicit
+    // disclosure rather than a warn: warning on the compression format an
+    // upstream mirror happens to use would be alert noise, not a trust signal.
     return {
       verdict: "allow",
       tier: "upstream",
-      reasonCodes: ["MIRRORED_UPSTREAM", "NOT_A_VEGA_TRUST_STATEMENT"],
+      reasonCodes: ["MIRRORED_UPSTREAM", "NOT_A_VEGA_TRUST_STATEMENT", ...note],
       proofs,
       nextActions: [],
     };
@@ -169,7 +208,7 @@ export function assessRisk(r: VerifyResult, narOk: boolean): RiskVerdict {
     return {
       verdict: "warn",
       tier: "scoped",
-      reasonCodes: ["SCOPED_BINDING_NOT_GLOBAL"],
+      reasonCodes: ["SCOPED_BINDING_NOT_GLOBAL", ...note],
       proofs,
       nextActions: ["request_shared_promotion", "build_locally"],
     };
@@ -183,6 +222,19 @@ export function assessRisk(r: VerifyResult, narOk: boolean): RiskVerdict {
   }
   if (!(t.leafHashOk && t.inclusionOk)) {
     return { verdict: "deny", tier: "shared", reasonCodes: ["INCLUSION_PROOF_FAILED"], proofs, nextActions: ["request_reproduction", "build_locally"] };
+  }
+  // Signed, logged, and included. The narHash is cryptographically bound by both
+  // the signature and the transparency record; if we could not re-hash the bytes
+  // locally, the trust chain still holds and nix re-checks them on substitution,
+  // but we did not personally confirm them: warn rather than a clean allow.
+  if (unchecked) {
+    return {
+      verdict: "warn",
+      tier: "shared",
+      reasonCodes: ["SHARED_REPRODUCED", "TRANSPARENCY_LOG_INCLUDED", "NAR_NOT_LOCALLY_CHECKED"],
+      proofs,
+      nextActions: ["substitute through nix, which re-checks the narHash"],
+    };
   }
   return {
     verdict: "allow",
@@ -199,7 +251,7 @@ export async function riskTool(
   input: { target: string },
 ): Promise<RiskVerdict | ToolError> {
   const v = await runVerify(ctx, input.target);
-  return isError(v) ? v : assessRisk(v.result, v.narOk);
+  return isError(v) ? v : assessRisk(v.result, v.narOk, v.narChecked);
 }
 
 const REPRO_STATUSES = ["reproducible", "diverged", "uncorroborated", "mirrored", "unknown"] as const;

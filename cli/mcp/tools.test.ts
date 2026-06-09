@@ -12,7 +12,7 @@ const utf8 = new TextEncoder();
 const hex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
 const HASH = "abc123def456abc123def456abc123de";
 
-function ctxFor(opts: { keyName?: string; narOk?: boolean; tamper?: (f: { narinfoText: string; sth: any; proof: any; leaves: string[] }) => void } = {}): {
+function ctxFor(opts: { keyName?: string; narOk?: boolean; narChecked?: boolean; tamper?: (f: { narinfoText: string; sth: any; proof: any; leaves: string[] }) => void } = {}): {
   ctx: ToolContext;
   pub: NixPublicKey;
 } {
@@ -59,7 +59,7 @@ function ctxFor(opts: { keyName?: string; narOk?: boolean; tamper?: (f: { narinf
     cacheUrl: "https://vega-cache.dev",
     sharedKeyName: "vega-cache-1",
     resolveKey: async (sigNames) => (sigNames.includes(pub.name) ? pub : null),
-    verifyNar: async () => ({ ok: opts.narOk ?? true, detail: "test" }),
+    verifyNar: async () => ({ ok: opts.narOk ?? true, checked: opts.narChecked ?? true, detail: "test" }),
   };
   return { ctx, pub };
 }
@@ -98,6 +98,19 @@ describe("verifyTool", () => {
     if (!isError(r)) {
       expect(r.verified).toBe(false);
       expect(r.narHashVerified).toBe(false);
+    }
+  });
+  it("distinguishes an unchecked NAR (unsupported compression) from a mismatch", async () => {
+    // narOk:false because the byte check could not run (checked:false), NOT
+    // because the bytes disagreed. verified is false, but it is unverified, not
+    // refuted: narHashChecked makes that explicit so it can never read as verified.
+    const { ctx } = ctxFor({ narOk: false, narChecked: false });
+    const r = await verifyTool(ctx, { target: HASH });
+    expect(isError(r)).toBe(false);
+    if (!isError(r)) {
+      expect(r.narHashChecked).toBe(false);
+      expect(r.narHashVerified).toBe(false);
+      expect(r.verified).toBe(false);
     }
   });
   it("errors on a non-store-path target without calling the cache", async () => {
@@ -158,6 +171,31 @@ describe("riskTool verdicts", () => {
       expect(r.verdict).toBe("allow");
       expect(r.tier).toBe("upstream");
       expect(r.reasonCodes).toContain("NOT_A_VEGA_TRUST_STATEMENT");
+    }
+  });
+  it("allows an upstream mirror whose NAR could not be re-hashed (xz), with disclosure", async () => {
+    // The common case: cache.nixos.org mirrors use xz, which we cannot decompress
+    // locally. For an upstream mirror the upstream signature is the trust anchor
+    // and nix re-checks the narHash on copy, so this stays an allow with an
+    // explicit NAR_NOT_LOCALLY_CHECKED disclosure; it must NEVER deny as a hash
+    // mismatch (warning on compression format would be alert noise).
+    const { ctx } = ctxFor({ keyName: "cache.nixos.org-1", narOk: false, narChecked: false });
+    const r = await riskTool(ctx, { target: HASH });
+    if (!isError(r)) {
+      expect(r.verdict).toBe("allow");
+      expect(r.tier).toBe("upstream");
+      expect(r.reasonCodes).toContain("NAR_NOT_LOCALLY_CHECKED");
+      expect(r.reasonCodes).not.toContain("NAR_HASH_MISMATCH");
+    }
+  });
+  it("warns (not allow, not deny) on a shared build whose NAR could not be re-hashed", async () => {
+    const { ctx } = ctxFor({ narOk: false, narChecked: false });
+    const r = await riskTool(ctx, { target: HASH });
+    if (!isError(r)) {
+      expect(r.verdict).toBe("warn");
+      expect(r.tier).toBe("shared");
+      expect(r.reasonCodes).toContain("NAR_NOT_LOCALLY_CHECKED");
+      expect(r.reasonCodes).not.toContain("NAR_HASH_MISMATCH");
     }
   });
 });
