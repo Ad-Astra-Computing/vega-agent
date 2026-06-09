@@ -20,6 +20,7 @@ import { registerDoctor } from "./commands/doctor.js";
 import { registerVerify } from "./commands/verify.js";
 import { registerDiff } from "./commands/diff.js";
 import { registerGate } from "./commands/gate.js";
+import { registerAssess } from "./commands/assess.js";
 import { registerMcp } from "./commands/mcp.js";
 
 const program = new Command();
@@ -56,6 +57,7 @@ registerDoctor(program);
 registerVerify(program);
 registerDiff(program);
 registerGate(program);
+registerAssess(program);
 registerMcp(program);
 
 async function run(): Promise<void> {

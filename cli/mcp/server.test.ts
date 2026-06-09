@@ -24,11 +24,13 @@ describe("MCP server protocol", () => {
     expect(r.result.capabilities.tools).toBeDefined();
   });
 
-  it("lists exactly the read-only verify + risk tools", async () => {
+  it("lists exactly the read-only tools", async () => {
     const r = (await handleRpc(ctx, req(2, "tools/list"))) as any;
     const names = r.result.tools.map((t: any) => t.name);
-    expect(names).toEqual(["vega_verify", "vega_risk", "vega_reproduce"]);
+    expect(names).toEqual(["vega_verify", "vega_risk", "vega_reproduce", "vega_assess_change"]);
     expect(r.result.tools[0].inputSchema.required).toEqual(["target"]);
+    const assess = r.result.tools.find((t: any) => t.name === "vega_assess_change");
+    expect(assess.inputSchema.required).toEqual(["paths"]);
   });
 
   it("dispatches tools/call and wraps the result as MCP content", async () => {
@@ -42,6 +44,21 @@ describe("MCP server protocol", () => {
     expect(unknown.error.code).toBe(-32602);
     const missing = (await handleRpc(ctx, req(5, "tools/call", { name: "vega_verify", arguments: {} }))) as any;
     expect(missing.error.code).toBe(-32602);
+    // vega_assess_change validates its own input shape: a missing/!string-array
+    // `paths` is a -32602, not a crash.
+    const badPaths = (await handleRpc(ctx, req(8, "tools/call", { name: "vega_assess_change", arguments: { paths: "x" } }))) as any;
+    expect(badPaths.error.code).toBe(-32602);
+  });
+
+  it("dispatches vega_assess_change over a paths array", async () => {
+    const r = (await handleRpc(
+      ctx,
+      req(9, "tools/call", { name: "vega_assess_change", arguments: { paths: ["abc123def456abc123def456abc123de"] } }),
+    )) as any;
+    expect(r.result.isError).toBe(false); // a 404 path is a warn, not a tool error
+    const out = JSON.parse(r.result.content[0].text);
+    expect(out.tool).toBe("vega_assess_change");
+    expect(out.verdict).toBe("warn"); // the stub 404s -> NOT_IN_CACHE -> warn
   });
 
   it("turns a throwing cache into an isError result, never a crash", async () => {
