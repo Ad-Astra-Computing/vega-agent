@@ -112,7 +112,6 @@ export function registerAssess(program: Command): void {
         warn(`change assessment: warn (${line}) [${result.reasonCodes.join(", ")}]`);
         for (const a of result.nextActions) info(a);
       } else {
-        process.exitCode = 1;
         fail(`change assessment: deny (${line}) [${result.reasonCodes.join(", ")}]`, result.nextActions);
       }
     });
