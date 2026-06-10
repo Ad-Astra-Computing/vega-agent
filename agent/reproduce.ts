@@ -12,7 +12,6 @@
 // ../src/agent/reproduce.ts and ../src/agent/narinfo.ts.
 
 import { mkdtemp, rm } from "node:fs/promises";
-import { openAsBlob } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fetchActionsOidcToken } from "../src/agent/oidc.js";
@@ -78,11 +77,10 @@ async function main(): Promise<void> {
         if (info.narHash !== expectNarHash) diverged++;
       }
       const nar = await makeNar(info.path, work);
+      // uploadNar streams the NAR from disk (file-backed Blob, not buffered: large
+      // closures otherwise OOM the worker) and re-mints on a presign expiry.
       const checksum = sha256NixHashToBase64(nar.fileHash);
-      const uploadUrl = await client.uploadUrl(nar.url, nar.fileHash);
-      // Stream the NAR from disk (file-backed Blob) rather than buffering the
-      // whole compressed file in memory; large closures otherwise OOM the worker.
-      await client.putNar(uploadUrl, await openAsBlob(nar.file), checksum);
+      await client.uploadNar(nar.url, nar.fileHash, nar.file, checksum);
       const result = await client.attest(buildAttestBody(info, nar, provenance.attr));
       if (result.publishedShared) agreed++;
       const tag = result.publishedShared ? "[shared]" : "[pending]";
