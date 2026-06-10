@@ -1,3 +1,4 @@
+import { openAsBlob } from "node:fs";
 import type { PromotionDecision } from "../trust/policy.js";
 
 /** Attest request body — the narinfo fields the runner claims for an output. */
@@ -74,6 +75,37 @@ export interface RetryOptions {
 // idempotent (attest dedups per attester, R2 PUT is content-addressed, presign
 // is stateless), so replaying them is safe.
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+
+// A presigned PUT URL whose validity window has lapsed returns 403 from R2 (the
+// signature is past X-Amz-Expires). We detect that client-side from the URL's own
+// X-Amz-Date + X-Amz-Expires so we can re-mint and retry, WITHOUT mistaking an
+// auth/checksum/object 403 (which happens well within the window) for an expiry.
+const PRESIGN_EXPIRY_MARGIN_MS = 60_000;
+
+/** Absolute expiry (ms since epoch) of a SigV4 presigned URL, or null if it lacks
+ * the signing params or they are malformed. X-Amz-Date is ISO basic, YYYYMMDDTHHMMSSZ. */
+function presignExpiryMs(url: string): number | null {
+  let q: URLSearchParams;
+  try {
+    q = new URL(url).searchParams;
+  } catch {
+    return null;
+  }
+  const date = q.get("X-Amz-Date");
+  const expires = q.get("X-Amz-Expires");
+  if (date === null || expires === null) return null;
+  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(date);
+  const secs = Number(expires);
+  if (m === null || !Number.isInteger(secs) || secs <= 0) return null;
+  return Date.UTC(+m[1]!, +m[2]! - 1, +m[3]!, +m[4]!, +m[5]!, +m[6]!) + secs * 1000;
+}
+
+/** Whether a 403 from a presigned PUT is an EXPIRY (the window lapsed) rather than
+ * a genuine auth/checksum/object error, judged from the URL's own validity window. */
+function presignLapsed(url: string, now: number): boolean {
+  const expiry = presignExpiryMs(url);
+  return expiry !== null && now >= expiry - PRESIGN_EXPIRY_MARGIN_MS;
+}
 
 const DEFAULT_RETRY: RetryOptions = {
   attempts: 5,
@@ -211,6 +243,26 @@ export class ControlPlaneClient {
       { method: "PUT", body, headers: { "x-amz-checksum-sha256": sha256Base64 } },
       "nar upload",
     );
+  }
+
+  /**
+   * Mint a presigned PUT and upload the NAR, re-minting ONCE if the URL's validity
+   * window lapsed before the upload finished. A multi-GB NAR can outrun the presign
+   * TTL, after which R2 403s the expired URL; a fresh URL lets the retry succeed. A
+   * 403 that is NOT an expiry (auth, checksum mismatch, object error, judged from
+   * the URL's own window) is surfaced, not retried, so real failures are never
+   * masked. The NAR streams from disk as a fresh file-backed Blob per attempt.
+   */
+  async uploadNar(narUrl: string, fileHash: string, file: string, sha256Base64: string): Promise<void> {
+    const url = await this.uploadUrl(narUrl, fileHash);
+    try {
+      await this.putNar(url, await openAsBlob(file), sha256Base64);
+      return;
+    } catch (e) {
+      if (!(e instanceof HttpError) || e.status !== 403 || !presignLapsed(url, Date.now())) throw e;
+    }
+    const fresh = await this.uploadUrl(narUrl, fileHash);
+    await this.putNar(fresh, await openAsBlob(file), sha256Base64);
   }
 
   /** Submit an attestation; returns the promotion decision. */

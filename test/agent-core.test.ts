@@ -113,6 +113,68 @@ describe("ControlPlaneClient", () => {
     }
   });
 
+  describe("uploadNar re-mints on a presign expiry", () => {
+    const fileHash = "sha256:1bn7y79qj9cs5l0hqjjvb9ccfg6w5qg5x6f0a3d9b1c2e3f4g5h6i";
+    const checksum = "Zm9vYmFyYmF6";
+    const amzDate = (ms: number) => new Date(ms).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+    const presign = (sig: string, dateMs: number, expires = 21600) =>
+      `https://r2/put?X-Amz-Date=${amzDate(dateMs)}&X-Amz-Expires=${expires}&X-Amz-Signature=${sig}`;
+    async function withNarFile<T>(run: (file: string) => Promise<T>): Promise<T> {
+      const file = join(tmpdir(), `vega-nar-${Math.random().toString(36).slice(2)}.bin`);
+      await writeFile(file, new Uint8Array([1, 2, 3]));
+      try {
+        return await run(file);
+      } finally {
+        await rm(file, { force: true });
+      }
+    }
+    // upload-url POSTs return `urls[mint]`; PUTs 403 unless the target is `okUrl`.
+    const uploader = (urls: string[], okUrl: string | null, mints: { n: number }, puts: string[]) =>
+      (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const req = new Request(input as RequestInfo, init);
+        if (new URL(req.url).pathname === "/api/cache/upload-url") {
+          const url = urls[Math.min(mints.n, urls.length - 1)]!;
+          mints.n += 1;
+          return new Response(JSON.stringify({ url }));
+        }
+        puts.push(req.url);
+        return new Response(null, { status: req.url === okUrl ? 200 : 403 });
+      }) as unknown as typeof fetch;
+
+    it("re-mints and retries once when the upload outran the presign window", async () => {
+      const expired = presign("a", Date.UTC(2020, 0, 1), 900); // long past its window
+      const fresh = presign("b", Date.now());
+      await withNarFile(async (file) => {
+        const mints = { n: 0 };
+        const puts: string[] = [];
+        const client = new ControlPlaneClient(base, "jwt", uploader([expired, fresh], fresh, mints, puts), fastRetry);
+        await client.uploadNar("nar/x.nar.zst", fileHash, file, checksum);
+        expect(mints.n).toBe(2); // initial mint + one re-mint
+        expect(puts).toEqual([expired, fresh]); // retried against the fresh URL
+      });
+    });
+
+    it("surfaces a 403 within the presign window without re-minting (not an expiry)", async () => {
+      const live = presign("a", Date.now()); // valid for ~6h, so a 403 is a real error
+      await withNarFile(async (file) => {
+        const mints = { n: 0 };
+        const client = new ControlPlaneClient(base, "jwt", uploader([live], null, mints, []), fastRetry);
+        await expect(client.uploadNar("nar/x.nar.zst", fileHash, file, checksum)).rejects.toThrow(/403/);
+        expect(mints.n).toBe(1); // did NOT re-mint a non-expiry 403
+      });
+    });
+
+    it("re-mints at most once; a second expiry still propagates", async () => {
+      const expired = presign("a", Date.UTC(2020, 0, 1), 900);
+      await withNarFile(async (file) => {
+        const mints = { n: 0 };
+        const client = new ControlPlaneClient(base, "jwt", uploader([expired], null, mints, []), fastRetry);
+        await expect(client.uploadNar("nar/x.nar.zst", fileHash, file, checksum)).rejects.toThrow(/403/);
+        expect(mints.n).toBe(2); // one retry, then gives up
+      });
+    });
+  });
+
   it("posts an attestation and returns the decision", async () => {
     const { fn } = fakeFetch(
       () =>

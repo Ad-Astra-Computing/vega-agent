@@ -11,7 +11,6 @@
 // builds, upstream; see test/), and the nix shelling in ./nix.ts.
 
 import { readFile, mkdtemp, rm } from "node:fs/promises";
-import { openAsBlob } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -138,12 +137,11 @@ async function cacheBuild(
     } else {
       // Bind the upload to the NAR's sha256 so R2 verifies it and stores the
       // checksum (the edge then verifies fileHash at attest without re-hashing).
+      // uploadNar streams the compressed NAR from disk as a file-backed Blob (not
+      // buffered: a heavy closure's NARs are large and VEGA_UPLOAD_CONCURRENCY of
+      // them in memory OOM-kills the runner) and re-mints on a presign expiry.
       const checksum = sha256NixHashToBase64(nar.fileHash);
-      const uploadUrl = await client.uploadUrl(nar.url, nar.fileHash);
-      // Stream the compressed NAR from disk as a file-backed Blob rather than
-      // reading the whole thing into memory: a heavy closure's NARs are large and
-      // VEGA_UPLOAD_CONCURRENCY of them buffered at once OOM-kills the runner.
-      await client.putNar(uploadUrl, await openAsBlob(nar.file), checksum);
+      await client.uploadNar(nar.url, nar.fileHash, nar.file, checksum);
     }
     const outputAttr = topPaths.has(info.path) ? attr : "";
     const result = await client.attest(

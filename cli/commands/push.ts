@@ -1,6 +1,5 @@
 import type { Command } from "commander";
 import { mkdtemp, rm } from "node:fs/promises";
-import { openAsBlob } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pc from "picocolors";
@@ -89,8 +88,7 @@ export function registerPush(program: Command): void {
             await mapConcurrent(paths, opts.jobs, async (p) => {
               const nar = await makeNar(p.path, work);
               const checksum = sha256NixHashToBase64(nar.fileHash);
-              const url = await client.uploadUrl(nar.url, nar.fileHash);
-              await client.putNar(url, await openAsBlob(nar.file), checksum);
+              await client.uploadNar(nar.url, nar.fileHash, nar.file, checksum);
               await client.push(buildAttestBody(p, nar));
               tick(nar.fileSize, p.path);
             });
