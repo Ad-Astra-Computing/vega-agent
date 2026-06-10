@@ -6,6 +6,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-10
+
 ### Added
 
 - `vega doctor --json` emits the structured checks (`{ ok, checks }`), so the only
@@ -160,5 +162,6 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
   bodies, and stdin frames. Reviewed against the OWASP Top 10 for LLM
   Applications and the MCP security guidance.
 
-[Unreleased]: https://github.com/Ad-Astra-Computing/vega-agent/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Ad-Astra-Computing/vega-agent/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/Ad-Astra-Computing/vega-agent/releases/tag/v0.8.0
 [0.2.0]: https://github.com/Ad-Astra-Computing/vega-agent/releases/tag/v0.2.0
