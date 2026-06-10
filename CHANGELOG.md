@@ -16,12 +16,24 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
   to a flake or org. Unlike `--package` (which matches the builder-controlled
   store-path name), these match only a build with a verified github-hosted CI
   attestation from that flake/org, so a build without one is not covered.
+- `vega trust add --accept-unreproducible` opts a single edge into serving a
+  builder's binding that Vega's own reproducer diverged from. Off by default (such
+  a binding is withheld); the flag prints a risk line and is the explicit,
+  revocable consent to accept it.
 
 ### Changed
 
 - `vega_assess_change` now caps a single in-flight NAR fetch (20s) in addition to
   its path cap and wall-clock budget, so one slow NAR cannot overrun the budget by
   the full default timeout. `verifyNar` accepts an optional per-call timeout.
+
+### Fixed
+
+- NAR upload re-mints the presigned URL and retries once when a large NAR outran
+  the presign window (R2 returns 403 on the expired URL). A 403 within the window
+  (auth, checksum, object error) still propagates, so a real failure is not masked.
+  This is the agent side of the multi-GB upload fix; the cache side raised the
+  presign TTL to six hours.
 
 ## [0.7.0] - 2026-06-09
 
