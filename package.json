@@ -1,6 +1,6 @@
 {
   "name": "vega-agent",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Build, attest, and independently reproduce Nix derivations for the Vega binary cache.",
   "license": "BSD-3-Clause",
   "type": "module",
