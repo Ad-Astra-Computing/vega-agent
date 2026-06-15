@@ -25,7 +25,7 @@ nix profile install github:Ad-Astra-Computing/vega-agent#vega   # or install it
 Or add it to your flake, pinned to a release tag for repeatable builds:
 
 ```nix
-inputs.vega.url = "github:Ad-Astra-Computing/vega-agent/v0.6.0";
+inputs.vega.url = "github:Ad-Astra-Computing/vega-agent/v0.8.0";
 # optional, to share this flake's nixpkgs:
 #   inputs.vega.inputs.nixpkgs.follows = "nixpkgs";
 ```
@@ -113,6 +113,13 @@ Useful action inputs:
   never killed.
 - `extra-substituters` / `extra-trusted-public-keys` — pull heavy dependencies
   from a trusted upstream cache (e.g. a project's Cachix) instead of from source.
+
+### Install the GitHub App
+
+Attestation uses the workflow's OIDC token and does not require the GitHub App.
+Install the [Vega GitHub App](https://github.com/apps/vega-cache) to get a **Vega**
+check on each attested commit. The check reports what was cached and links to the
+build status page.
 
 ## Reproducing another build
 
