@@ -6,6 +6,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-06-20
+
 ### Changed
 
 - The builder image auto-detects the Nix build sandbox (`VEGA_NIX_SANDBOX`,
@@ -18,11 +20,10 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
   `/etc/nix/nix.conf` is not rewritten, but `VEGA_NIX_SANDBOX=true` still holds
   its contract there (the container exits unless the mounted config's effective
   `sandbox` is `true` and `sandbox-fallback` is `false`). Previously the sandbox
-  was off unless
-  `VEGA_NIX_SANDBOX=true` was set by hand. The probe and the written config set
-  `sandbox-fallback = false`, so a build that cannot be sandboxed fails rather
-  than silently running unsandboxed (without this, Nix's default fallback let the
-  sandbox "succeed" without real isolation).
+  was off unless `VEGA_NIX_SANDBOX=true` was set by hand. The probe and the
+  written config set `sandbox-fallback = false`, so a build that cannot be
+  sandboxed fails rather than silently running unsandboxed (without this, Nix's
+  default fallback let the sandbox "succeed" without real isolation).
 - The builder image registers its baked store closure (`nix-store --load-db`)
   at startup, so a sandboxed build can mount each input's full closure. Without
   it a `sandbox = true` build failed because the builder's interpreter (glibc)
@@ -198,7 +199,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
   bodies, and stdin frames. Reviewed against the OWASP Top 10 for LLM
   Applications and the MCP security guidance.
 
-[Unreleased]: https://github.com/Ad-Astra-Computing/vega-agent/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/Ad-Astra-Computing/vega-agent/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/Ad-Astra-Computing/vega-agent/releases/tag/v0.10.0
 [0.9.0]: https://github.com/Ad-Astra-Computing/vega-agent/releases/tag/v0.9.0
 [0.8.0]: https://github.com/Ad-Astra-Computing/vega-agent/releases/tag/v0.8.0
 [0.2.0]: https://github.com/Ad-Astra-Computing/vega-agent/releases/tag/v0.2.0
