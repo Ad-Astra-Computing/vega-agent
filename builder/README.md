@@ -108,13 +108,26 @@ Notes:
   survives container *recreation*, you must `docker volume rm` it whenever you
   update the image; the safer default is no `/nix` volume, with `reuse-cache`
   substituting prior builds from your tenant.
-- Nix's build sandbox is OFF by default because Docker blocks it without
-  privilege. For a TRUSTED own-repo runner, run `--privileged` with
-  `-e VEGA_NIX_SANDBOX=true` to get the real sandbox. This is required for any
-  package that sets a setuid bit while unpacking (e.g. `google-chrome`'s
-  `chrome-sandbox`), which fails with "Operation not permitted" under
-  `sandbox=false`. Never use `--privileged` for the untrusted donate fleet; that
-  tier needs microVM isolation instead.
+- Nix's build sandbox is **auto-detected** (`VEGA_NIX_SANDBOX`, default `auto`).
+  At startup the entrypoint builds a throwaway derivation under the real sandbox
+  to learn whether this container can create the user namespace the sandbox
+  needs. Docker blocks that unless the container is launched with userns allowed
+  (`--privileged`, or `--security-opt seccomp=unconfined --security-opt
+  apparmor=unconfined`). The modes:
+  - `auto` (default): use `sandbox = true` when the probe succeeds, else fall
+    back to `sandbox = relaxed` with a warning.
+  - `true`: require the sandbox. If the probe fails the container exits rather
+    than silently building unsandboxed. Use this for a TRUSTED own-repo runner
+    you have launched with userns allowed.
+  - `false`: opt out (no probe).
+
+  A full sandbox is required for any package that sets a setuid bit while
+  unpacking (e.g. `google-chrome`'s `chrome-sandbox`), which fails with
+  "Operation not permitted" without it. Never use `--privileged` for the
+  untrusted donate fleet; that tier needs microVM isolation instead. An
+  operator-mounted `/etc/nix/nix.conf` is not rewritten (no probe); with
+  `VEGA_NIX_SANDBOX=true` the contract still holds, so the container exits if
+  the mounted config's effective `sandbox` is not `true`.
 - To pull heavy dependencies from a trusted upstream cache instead of building
   them, pass `-e VEGA_EXTRA_SUBSTITUTERS=...` and
   `-e VEGA_EXTRA_TRUSTED_PUBLIC_KEYS=...`.
@@ -139,4 +152,7 @@ self-hosted runner.
    closure may need DB registration (`nix-store --load-db`).
 4. node24: every action in the workflow must be node24-capable
    (`actions/checkout@v5+`, etc.); a node20-only action fails on this runner.
-5. Sandbox setup errors: run `--privileged` with `VEGA_NIX_SANDBOX=true`.
+5. Sandbox setup errors: the entrypoint auto-detects this and falls back to
+   `sandbox = relaxed` (or exits if you set `VEGA_NIX_SANDBOX=true`). For a full
+   sandbox, launch with userns allowed: `--privileged`, or `--security-opt
+   seccomp=unconfined --security-opt apparmor=unconfined`.
