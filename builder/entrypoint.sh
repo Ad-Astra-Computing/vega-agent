@@ -131,28 +131,30 @@ resolve_sandbox() {
   esac
 }
 
-# Echo Nix's effective `sandbox` setting (true|false|relaxed), or empty if it
-# cannot be read. Used to enforce the VEGA_NIX_SANDBOX=true contract against an
-# operator-mounted nix.conf we do not rewrite.
-effective_sandbox() {
-  local v
-  v="$(nix --extra-experimental-features nix-command config show sandbox 2>/dev/null)" || true
+# Echo Nix's effective value for a config setting (the value Nix itself computes
+# from the mounted nix.conf), or empty if it cannot be read.
+effective_setting() {
+  local name="$1" v
+  v="$(nix --extra-experimental-features nix-command config show "$name" 2>/dev/null)" || true
   if [ -z "$v" ]; then
-    v="$(nix --extra-experimental-features nix-command show-config 2>/dev/null | sed -n 's/^sandbox = //p' | head -n1)" || true
+    v="$(nix --extra-experimental-features nix-command show-config 2>/dev/null | sed -n "s/^${name} = //p" | head -n1)" || true
   fi
   printf '%s' "$v"
 }
 
 # When VEGA_NIX_SANDBOX=true the sandbox is REQUIRED. With an operator-mounted
 # nix.conf we do not rewrite the file, but we still hold the contract: refuse to
-# start if Nix's effective sandbox setting is not `true`, so a build asked to be
-# isolated never runs unsandboxed because of a mounted config. Returns non-zero
-# (caller exits) on a violation; a no-op for auto/false.
+# start unless the build is GUARANTEED sandboxed, i.e. effective sandbox = true
+# AND sandbox-fallback = false (otherwise a setup failure silently runs the build
+# unsandboxed). Returns non-zero (caller exits) on a violation; no-op for
+# auto/false.
 enforce_required_sandbox() {
   [ "${VEGA_NIX_SANDBOX:-auto}" = true ] || return 0
-  local eff; eff="$(effective_sandbox)"
-  [ "$eff" = true ] && return 0
-  echo "vega-builder: VEGA_NIX_SANDBOX=true but the mounted /etc/nix/nix.conf has sandbox = ${eff:-<unset>}. Set sandbox = true there, or unset VEGA_NIX_SANDBOX to use auto-detection." >&2
+  local eff_sb eff_fb
+  eff_sb="$(effective_setting sandbox)"
+  eff_fb="$(effective_setting sandbox-fallback)"
+  [ "$eff_sb" = true ] && [ "$eff_fb" = false ] && return 0
+  echo "vega-builder: VEGA_NIX_SANDBOX=true but the mounted /etc/nix/nix.conf has sandbox = ${eff_sb:-<unset>}, sandbox-fallback = ${eff_fb:-<unset>}. Set sandbox = true and sandbox-fallback = false there, or unset VEGA_NIX_SANDBOX to use auto-detection." >&2
   return 1
 }
 
@@ -160,13 +162,19 @@ enforce_required_sandbox() {
 # closure. The registration (VEGA_NIX_REGINFO, baked into the image) records each
 # store path's references, so a SANDBOXED build can mount each input's full
 # closure; without it the sandboxed builder cannot find its interpreter (glibc)
-# and fails with "No such file or directory". Idempotent: marked once loaded.
+# and fails with "No such file or directory". The marker is keyed by the
+# registration's content hash, so a persisted /nix DB from an OLDER image (whose
+# baked closure differs) is re-registered rather than skipped.
 init_store() {
   [ -e /nix/var/nix/db/db.sqlite ] || NIX_CONFIG='build-users-group =' nix-store --init
-  if [ -n "${VEGA_NIX_REGINFO:-}" ] && [ -e "${VEGA_NIX_REGINFO}" ] \
-     && [ ! -e /nix/var/nix/db/.vega-registered ]; then
-    NIX_CONFIG='build-users-group =' nix-store --load-db < "${VEGA_NIX_REGINFO}" \
-      && : > /nix/var/nix/db/.vega-registered
+  if [ -n "${VEGA_NIX_REGINFO:-}" ] && [ -e "${VEGA_NIX_REGINFO}" ]; then
+    local sig marker
+    sig="$(sha256sum "${VEGA_NIX_REGINFO}" | cut -c1-32)"
+    marker="/nix/var/nix/db/.vega-registered-${sig}"
+    if [ ! -e "$marker" ]; then
+      NIX_CONFIG='build-users-group =' nix-store --load-db < "${VEGA_NIX_REGINFO}" \
+        && : > "$marker"
+    fi
   fi
 }
 

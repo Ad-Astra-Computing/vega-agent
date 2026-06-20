@@ -16,8 +16,9 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
   sandbox and exits if it cannot start (so a build asked to be isolated never
   runs unsandboxed by surprise); `false` opts out. An operator-mounted
   `/etc/nix/nix.conf` is not rewritten, but `VEGA_NIX_SANDBOX=true` still holds
-  its contract there (the container exits if the mounted config's effective
-  `sandbox` is not `true`). Previously the sandbox was off unless
+  its contract there (the container exits unless the mounted config's effective
+  `sandbox` is `true` and `sandbox-fallback` is `false`). Previously the sandbox
+  was off unless
   `VEGA_NIX_SANDBOX=true` was set by hand. The probe and the written config set
   `sandbox-fallback = false`, so a build that cannot be sandboxed fails rather
   than silently running unsandboxed (without this, Nix's default fallback let the

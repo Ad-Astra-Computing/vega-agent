@@ -47,15 +47,22 @@ check "unset defaults to auto"       ""     0  0 true
 # unknown value falls through to the auto arm
 check "garbage -> auto behavior"     yes    0  0 true
 
-# enforce_required_sandbox: holds the "true means require sandbox" contract
-# against an operator-mounted nix.conf. Stub the effective setting.
-EFF=true
-effective_sandbox() { printf '%s' "$EFF"; }
+# enforce_required_sandbox: holds the "true means GUARANTEED sandboxed" contract
+# against an operator-mounted nix.conf, i.e. effective sandbox=true AND
+# sandbox-fallback=false. Stub the effective settings.
+EFF_SANDBOX=true
+EFF_FALLBACK=false
+effective_setting() {
+  case "$1" in
+    sandbox) printf '%s' "$EFF_SANDBOX" ;;
+    sandbox-fallback) printf '%s' "$EFF_FALLBACK" ;;
+  esac
+}
 
-# enforce <name> <VEGA_NIX_SANDBOX> <effective> <want_rc>
+# enforce <name> <VEGA_NIX_SANDBOX> <eff_sandbox> <eff_fallback> <want_rc>
 enforce() {
-  local name="$1" env_val="$2" eff="$3" want_rc="$4"
-  EFF="$eff"
+  local name="$1" env_val="$2" eff_sb="$3" eff_fb="$4" want_rc="$5"
+  EFF_SANDBOX="$eff_sb"; EFF_FALLBACK="$eff_fb"
   local rc
   VEGA_NIX_SANDBOX="$env_val" enforce_required_sandbox 2>/dev/null
   rc=$?
@@ -67,12 +74,13 @@ enforce() {
   fi
 }
 
-enforce "auto never enforces"        auto   false 0
-enforce "false never enforces"       false  false 0
-enforce "true + mounted true ok"     true   true  0
-enforce "true + mounted false fatal" true   false 1
-enforce "true + mounted relaxed fatal" true relaxed 1
-enforce "true + mounted unset fatal" true   ""    1
+enforce "auto never enforces"           auto  false false 0
+enforce "false never enforces"          false false true  0
+enforce "true + sandbox=true,fb=false"  true  true  false 0
+enforce "true + fb=true fatal"          true  true  true  1
+enforce "true + sandbox=false fatal"    true  false false 1
+enforce "true + sandbox=relaxed fatal"  true  relaxed false 1
+enforce "true + both unset fatal"       true  ""    ""    1
 
 if [ "$fails" -ne 0 ]; then
   echo "$fails test(s) failed" >&2
