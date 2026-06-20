@@ -37,6 +37,7 @@ Then put it on `PATH` via `vega.packages.${system}.default` (devShells,
 Quickstart:
 
 ```
+vega init                   # scaffold a CI workflow that caches this repo to Vega
 vega login                  # enroll this machine (GitHub device flow)
 vega push .#my-package      # build locally, upload novel paths to your namespace
 vega verify /nix/store/<h>  # independently verify a build: signature + transparency log + NAR bytes
@@ -66,8 +67,8 @@ read-only and builds nothing. `vega mcp` exposes verification, the
 change-level `assess_change` gate to coding agents over the Model Context
 Protocol, so an agent can check a dependency before installing it.
 
-Full command set: `login`, `logout`, `whoami`, `status`, `doctor`, `push`,
-`verify`, `diff`, `gate`, `assess`, `mcp`, `trust` (`add`/`remove`/`list`),
+Full command set: `init`, `login`, `logout`, `whoami`, `status`, `doctor`,
+`push`, `verify`, `diff`, `gate`, `assess`, `mcp`, `trust` (`add`/`remove`/`list`),
 `view`; run `vega <command> --help` for details.
 The GitHub token from `login` is used once and never stored; only a short-lived
 Vega credential is kept (`~/.config/vega/credential`, mode 0600), and the control
@@ -86,8 +87,11 @@ plane is required to be https.
 
 ## Attesting your own builds
 
-Call the composite action from a workflow that grants OIDC. Pin actions to a
-commit SHA rather than a tag.
+Run `vega init` to scaffold a complete, SHA-pinned `.github/workflows/vega-cache.yml`
+(the same recipe lives at [`examples/vega-cache.yml`](examples/vega-cache.yml)), or
+write it by hand. Call the composite action from a workflow that grants OIDC, and
+pin every action to a commit SHA rather than a tag (a moved tag is a supply-chain
+vector; a SHA is immutable).
 
 ```yaml
 permissions:
@@ -97,7 +101,10 @@ steps:
   - uses: actions/checkout@<sha>
   - uses: Ad-Astra-Computing/vega-agent/agent@<sha>
     with:
-      installable: .#packages.x86_64-linux.default
+      # github.workspace is the checkout root, so the build targets your repo's
+      # own flake and the attestation can be reproduced. A bare `.#attr` would
+      # resolve against the action, not your repo.
+      installable: "${{ github.workspace }}#packages.x86_64-linux.default"
       control-plane: https://vega-cache.dev
 ```
 

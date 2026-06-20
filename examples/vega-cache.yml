@@ -1,0 +1,43 @@
+# Build your flake in CI and publish its outputs to the Vega binary cache,
+# attested over GitHub Actions OIDC (no stored secret). Docs: https://docs.vega-cache.dev
+#
+# Pin actions to commit SHAs, not tags: a moved tag is a supply-chain vector and a
+# SHA is immutable. Enable Dependabot's github-actions ecosystem to bump them.
+name: Cache with Vega
+
+# Push and manual dispatch only, never pull_request: a fork PR can read the OIDC
+# token, so the id-token permission must not exist on a run that builds untrusted
+# PR code.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege: read the repo to build it, and mint an OIDC token so Vega can
+# verify the builder identity. Nothing else.
+permissions:
+  contents: read
+  id-token: write
+
+# One cache run per ref; do not cancel an in-flight push.
+concurrency:
+  group: vega-cache-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  cache:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false # no git push; do not leave the token in .git/config
+      - name: Build and publish to Vega
+        uses: Ad-Astra-Computing/vega-agent/agent@b7757ab80d86a1c18710836f4c38dfc127944eaa # v0.8.0
+        with:
+          # github.workspace is the checkout root, so the attestation's provenance
+          # matches the repo and the output can be reproduced. Change the attribute
+          # to whatever you want cached.
+          installable: "${{ github.workspace }}#packages.x86_64-linux.default"
+          control-plane: https://vega-cache.dev
+          skip-upstream: "true" # upload only paths cache.nixos.org does not already serve

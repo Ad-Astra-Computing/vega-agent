@@ -22,6 +22,7 @@ import { registerDiff } from "./commands/diff.js";
 import { registerGate } from "./commands/gate.js";
 import { registerAssess } from "./commands/assess.js";
 import { registerMcp } from "./commands/mcp.js";
+import { registerInit } from "./commands/init.js";
 
 const program = new Command();
 
@@ -37,6 +38,7 @@ program
   .addHelpText(
     "after",
     "\nExamples:\n" +
+      "  vega init\n" +
       "  vega login\n" +
       "  vega push .#my-package\n" +
       "  vega verify /nix/store/<hash>-hello-2.12.1\n" +
@@ -59,6 +61,7 @@ registerDiff(program);
 registerGate(program);
 registerAssess(program);
 registerMcp(program);
+registerInit(program);
 
 async function run(): Promise<void> {
   // Bare `vega` shows an animated brand splash, then help (not an error).
