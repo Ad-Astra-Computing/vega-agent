@@ -6,6 +6,19 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-20
+
+### Added
+
+- `vega init` scaffolds a complete `.github/workflows/vega-cache.yml` into a
+  repository, so a new user goes from install to a first attested CI build in one
+  command. The generated workflow pins every action to a full commit SHA (a moved
+  tag is the vector behind recent GitHub Actions supply-chain compromises, and a
+  SHA is immutable), requests least-privilege permissions, sets
+  `persist-credentials: false`, and never runs on `pull_request`. Flags:
+  `--attr`, `--dir`, `--force`, `--print`, `--json`. The same recipe is published
+  at `examples/vega-cache.yml`; a test asserts the two cannot drift.
+
 ## [0.8.0] - 2026-06-10
 
 ### Added
@@ -162,6 +175,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
   bodies, and stdin frames. Reviewed against the OWASP Top 10 for LLM
   Applications and the MCP security guidance.
 
-[Unreleased]: https://github.com/Ad-Astra-Computing/vega-agent/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/Ad-Astra-Computing/vega-agent/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/Ad-Astra-Computing/vega-agent/releases/tag/v0.9.0
 [0.8.0]: https://github.com/Ad-Astra-Computing/vega-agent/releases/tag/v0.8.0
 [0.2.0]: https://github.com/Ad-Astra-Computing/vega-agent/releases/tag/v0.2.0
