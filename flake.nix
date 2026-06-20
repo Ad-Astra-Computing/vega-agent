@@ -116,15 +116,22 @@
             ];
             pathsToLink = [ "/bin" "/etc" ];
           };
+          # The closure registration for everything baked into the image. The
+          # entrypoint loads this into the Nix DB at startup so the store paths
+          # are VALID with their references recorded. Without it a real (sandbox =
+          # true) build cannot mount each input's closure and the builder fails to
+          # find its interpreter (glibc), e.g. `bash: No such file or directory`.
+          builderReginfo = pkgs.closureInfo { rootPaths = [ builderRoot ]; };
           builderImage = pkgs.dockerTools.buildLayeredImage {
             name = "vega-builder";
             # No `created` (defaults to epoch) so the digest stays reproducible.
             tag = agent.version;
             contents = [ builderRoot ];
-            # /tmp and the runner's writable home, created in the image.
+            # /tmp, the runner's writable home, and the baked closure registration.
             extraCommands = ''
-              mkdir -p tmp home/runner
+              mkdir -p tmp home/runner etc/vega
               chmod 1777 tmp
+              cp ${builderReginfo}/registration etc/vega/nix-registration
             '';
             config = {
               Entrypoint = [ "/bin/vega-builder-entrypoint" ];
@@ -136,6 +143,7 @@
                 "NIX_SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
                 "RUNNER_DIST=${githubRunner}"
                 "VEGA_BUILDER_VERSION=${agent.version}"
+                "VEGA_NIX_REGINFO=/etc/vega/nix-registration"
               ];
               Labels = {
                 "org.opencontainers.image.title" = "Vega builder";

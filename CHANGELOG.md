@@ -6,6 +6,29 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+### Changed
+
+- The builder image auto-detects the Nix build sandbox (`VEGA_NIX_SANDBOX`,
+  default `auto`). At startup the entrypoint builds a throwaway derivation under
+  the real sandbox to learn whether the container can create the user namespace
+  the sandbox needs; on success it sets `sandbox = true`, otherwise it falls back
+  to `sandbox = relaxed` with a warning. `VEGA_NIX_SANDBOX=true` requires the
+  sandbox and exits if it cannot start (so a build asked to be isolated never
+  runs unsandboxed by surprise); `false` opts out. An operator-mounted
+  `/etc/nix/nix.conf` is not rewritten, but `VEGA_NIX_SANDBOX=true` still holds
+  its contract there (the container exits unless the mounted config's effective
+  `sandbox` is `true` and `sandbox-fallback` is `false`). Previously the sandbox
+  was off unless
+  `VEGA_NIX_SANDBOX=true` was set by hand. The probe and the written config set
+  `sandbox-fallback = false`, so a build that cannot be sandboxed fails rather
+  than silently running unsandboxed (without this, Nix's default fallback let the
+  sandbox "succeed" without real isolation).
+- The builder image registers its baked store closure (`nix-store --load-db`)
+  at startup, so a sandboxed build can mount each input's full closure. Without
+  it a `sandbox = true` build failed because the builder's interpreter (glibc)
+  was not in the store database and so was not mounted into the sandbox
+  (`bash: No such file or directory`).
+
 ## [0.9.0] - 2026-06-20
 
 ### Added
