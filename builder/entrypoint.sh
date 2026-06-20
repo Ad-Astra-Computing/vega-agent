@@ -68,7 +68,9 @@ probe_sandbox() {
   # (a plain --argstr path) mounts only the bash binary, and the sandboxed build
   # then fails to find its interpreter: "bash: No such file or directory". This is
   # why the closure registration (init_store) alone was not enough.
+  local bash_rel
   bash_root="/nix/store/$(printf '%s' "${bash_path#/nix/store/}" | cut -d/ -f1)"
+  bash_rel="${bash_path#"$bash_root"/}"  # the builder's path under the store root, e.g. bin/bash
   log="$(mktemp)"
   # SC2016: `$out` is a Nix build-time variable, deliberately passed literally to
   # Nix (it must NOT expand in this shell).
@@ -79,10 +81,11 @@ probe_sandbox() {
        --option max-jobs 1 \
        --option build-users-group '' \
        --argstr bashRoot "$bash_root" \
-       -E '{ bashRoot }: derivation {
+       --argstr bashRel "$bash_rel" \
+       -E '{ bashRoot, bashRel }: derivation {
              name = "vega-build-probe";
              system = builtins.currentSystem;
-             builder = "${builtins.storePath bashRoot}/bin/bash";
+             builder = "${builtins.storePath bashRoot}/${bashRel}";
              args = [ "-c" "echo ok > $out" ];
            }' \
        >"$log" 2>&1; then
