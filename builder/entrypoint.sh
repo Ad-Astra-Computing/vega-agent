@@ -59,8 +59,16 @@ read_secret() {
 # probe failed for an UNRELATED reason (a broken Nix, no network, ...), which the
 # caller must surface rather than misread as "no sandbox".
 probe_sandbox() {
-  local bash_path log
+  local bash_path bash_root log
   bash_path="$(readlink -f "$(command -v bash)")" || return 1
+  # The top-level store path of the builder, e.g.
+  # /nix/store/<hash>-bash-interactive-5.3p9. `builtins.storePath` needs this root
+  # (not the /bin/bash subpath) and attaches dependency context, so Nix mounts the
+  # builder's FULL closure (glibc, ...) into the sandbox. A context-free string
+  # (a plain --argstr path) mounts only the bash binary, and the sandboxed build
+  # then fails to find its interpreter: "bash: No such file or directory". This is
+  # why the closure registration (init_store) alone was not enough.
+  bash_root="/nix/store/$(printf '%s' "${bash_path#/nix/store/}" | cut -d/ -f1)"
   log="$(mktemp)"
   # SC2016: `$out` is a Nix build-time variable, deliberately passed literally to
   # Nix (it must NOT expand in this shell).
@@ -70,11 +78,11 @@ probe_sandbox() {
        --option sandbox-fallback false \
        --option max-jobs 1 \
        --option build-users-group '' \
-       --argstr bash "$bash_path" \
-       -E '{ bash }: derivation {
+       --argstr bashRoot "$bash_root" \
+       -E '{ bashRoot }: derivation {
              name = "vega-build-probe";
              system = builtins.currentSystem;
-             builder = bash;
+             builder = "${builtins.storePath bashRoot}/bin/bash";
              args = [ "-c" "echo ok > $out" ];
            }' \
        >"$log" 2>&1; then
