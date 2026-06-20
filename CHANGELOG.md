@@ -18,7 +18,15 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
   `/etc/nix/nix.conf` is not rewritten, but `VEGA_NIX_SANDBOX=true` still holds
   its contract there (the container exits if the mounted config's effective
   `sandbox` is not `true`). Previously the sandbox was off unless
-  `VEGA_NIX_SANDBOX=true` was set by hand.
+  `VEGA_NIX_SANDBOX=true` was set by hand. The probe and the written config set
+  `sandbox-fallback = false`, so a build that cannot be sandboxed fails rather
+  than silently running unsandboxed (without this, Nix's default fallback let the
+  sandbox "succeed" without real isolation).
+- The builder image registers its baked store closure (`nix-store --load-db`)
+  at startup, so a sandboxed build can mount each input's full closure. Without
+  it a `sandbox = true` build failed because the builder's interpreter (glibc)
+  was not in the store database and so was not mounted into the sandbox
+  (`bash: No such file or directory`).
 
 ## [0.9.0] - 2026-06-20
 

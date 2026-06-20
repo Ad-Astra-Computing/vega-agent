@@ -147,9 +147,10 @@ self-hosted runner.
    `github-runner` and the wrappers are under `bin/`.
 2. Runner refuses to run as root without `RUNNER_ALLOW_RUNASROOT=1` (the entrypoint
    sets it).
-3. `nix build` fails on missing state: the entrypoint runs `nix-store --init` and
-   writes `/etc/nix/nix.conf`; if a build still cannot find paths, the baked
-   closure may need DB registration (`nix-store --load-db`).
+3. `nix build` fails on missing state: the entrypoint runs `nix-store --init`,
+   loads the baked closure registration (`nix-store --load-db` from
+   `VEGA_NIX_REGINFO`, so a sandboxed build can mount each input's full closure)
+   and writes `/etc/nix/nix.conf`.
 4. node24: every action in the workflow must be node24-capable
    (`actions/checkout@v5+`, etc.); a node20-only action fails on this runner.
 5. Sandbox setup errors: the entrypoint auto-detects this and falls back to

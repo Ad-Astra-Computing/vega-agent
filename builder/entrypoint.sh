@@ -50,6 +50,11 @@ read_secret() {
 # do exactly what a real build would. The builder is the image's own store-path
 # bash, so the probe's closure is tiny and already present (no substitution).
 #
+# `sandbox-fallback false` is essential: with Nix's default fallback, a build
+# that CANNOT be sandboxed silently runs unsandboxed and succeeds, so the probe
+# would pass without real isolation. With fallback off, a sandbox that cannot
+# start makes the build fail, which is exactly the signal we classify.
+#
 # Returns: 0 sandbox works; 10 sandbox/userns specifically unavailable; 1 the
 # probe failed for an UNRELATED reason (a broken Nix, no network, ...), which the
 # caller must surface rather than misread as "no sandbox".
@@ -62,6 +67,7 @@ probe_sandbox() {
   # shellcheck disable=SC2016
   if nix-build --no-out-link \
        --option sandbox true \
+       --option sandbox-fallback false \
        --option max-jobs 1 \
        --option build-users-group '' \
        --argstr bash "$bash_path" \
@@ -150,6 +156,20 @@ enforce_required_sandbox() {
   return 1
 }
 
+# Initialize the single-user store (no nixbld group) and register the baked
+# closure. The registration (VEGA_NIX_REGINFO, baked into the image) records each
+# store path's references, so a SANDBOXED build can mount each input's full
+# closure; without it the sandboxed builder cannot find its interpreter (glibc)
+# and fails with "No such file or directory". Idempotent: marked once loaded.
+init_store() {
+  [ -e /nix/var/nix/db/db.sqlite ] || NIX_CONFIG='build-users-group =' nix-store --init
+  if [ -n "${VEGA_NIX_REGINFO:-}" ] && [ -e "${VEGA_NIX_REGINFO}" ] \
+     && [ ! -e /nix/var/nix/db/.vega-registered ]; then
+    NIX_CONFIG='build-users-group =' nix-store --load-db < "${VEGA_NIX_REGINFO}" \
+      && : > /nix/var/nix/db/.vega-registered
+  fi
+}
+
 # Minimal single-user Nix state for an ephemeral root container. The image ships
 # the toolchain closure; a build fetches the rest from substituters. The sandbox
 # mode is auto-detected (see resolve_sandbox): on by default when the container
@@ -157,17 +177,15 @@ enforce_required_sandbox() {
 setup_nix() {
   mkdir -p /nix/var/nix/db /nix/var/nix/gcroots /nix/var/nix/profiles \
            /nix/var/nix/temproots /nix/var/nix/userpool /etc/nix
+  # Init + register the baked closure before any probe or build needs it.
+  init_store
   # Respect an operator-mounted nix.conf: we do not rewrite it. We still enforce
   # the VEGA_NIX_SANDBOX=true contract (a `true` request must not run unsandboxed
   # because the mounted config disabled it).
   if [ -e /etc/nix/nix.conf ]; then
-    [ -e /nix/var/nix/db/db.sqlite ] || NIX_CONFIG='build-users-group =' nix-store --init
     enforce_required_sandbox || exit 1
     return 0
   fi
-  # Initialize the store first (single-user: no nixbld group) so the sandbox
-  # probe build can run before we commit the final nix.conf.
-  [ -e /nix/var/nix/db/db.sqlite ] || NIX_CONFIG='build-users-group =' nix-store --init
 
   local sandbox
   sandbox="$(resolve_sandbox)" || exit 1
@@ -175,6 +193,11 @@ setup_nix() {
   {
     echo "experimental-features = nix-command flakes"
     echo "sandbox = ${sandbox}"
+    # When the sandbox is required (auto-detected as working, or forced), do NOT
+    # let nix silently fall back to an unsandboxed build: a real isolation
+    # failure must fail the build, not quietly weaken it. `relaxed`/`false`
+    # already permit a non-isolated build, so the fallback is moot there.
+    [ "${sandbox}" = true ] && echo "sandbox-fallback = false"
     # Bound build parallelism so a build cannot peg a shared host. The HARD cap
     # is the docker --memory/--cpus on `docker run` (see README) which the OS
     # enforces; these are the softer nix-level limits. Default conservatively
