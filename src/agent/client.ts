@@ -19,6 +19,13 @@ export interface AttestBody {
    */
   attr?: string;
   /**
+   * Subflake directory for a monorepo whose flake lives in a subdirectory
+   * (`?dir=<dir>`), supplied with `attr` for the top-level output. The control
+   * plane sanitizes it and, for a canonical github build, reproduces the output as
+   * `github:<repository>/<rev>?dir=<dir>`. Absent for a root flake.
+   */
+  dir?: string;
+  /**
    * The builder opted out of publishing their continent (privacy.continent=false
    * in vega.yaml). When set, the control plane records the attestation's
    * continent as unknown rather than deriving it from the request.

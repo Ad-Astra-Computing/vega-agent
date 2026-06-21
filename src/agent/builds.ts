@@ -1,3 +1,4 @@
+import { isAbsolute, relative, resolve } from "node:path";
 import type { VegaConfig } from "./config.js";
 import { matchOutputs, matchesAnyGlob } from "./outputs.js";
 
@@ -66,21 +67,58 @@ export function installableTargetsOwnRepo(
   flakeDir: string,
   repository: string | undefined,
 ): boolean {
+  return ownRepoSubflakeDir(installable, flakeDir, repository) !== null;
+}
+
+/**
+ * Classify an installable's flake against the running repository, returning the
+ * SUBFLAKE DIRECTORY (relative to the repo root) that Vega should record so the
+ * build is reproducible:
+ *   - `""`        the repository's own ROOT flake (the CLI default `.#`, the
+ *                 checkout path, or an explicit `github:<repository>`).
+ *   - `"<sub>"`   a subdirectory flake WITHIN the checkout (`<flakeDir>/<sub>#…`)
+ *                 or an explicit `github:<repository>?dir=<sub>`. Vega reproduces
+ *                 it as `github:<repository>/<rev>?dir=<sub>` (see the edge).
+ *   - `null`      a FOREIGN flake (another repo, nixpkgs, or a path outside the
+ *                 checkout): Vega still records `github:<repository>#attr`, which
+ *                 it cannot reproduce, so the caller warns and it stays tenant tier.
+ * The returned subdir is the raw relative path; the edge sanitizes it on ingest.
+ */
+export function ownRepoSubflakeDir(
+  installable: string,
+  flakeDir: string,
+  repository: string | undefined,
+): string | null {
   const ref = (installable.split("#")[0] ?? "").replace(/\/+$/, "");
   const dir = flakeDir.replace(/\/+$/, "");
-  // Only the WORKSPACE flake qualifies as local: the CLI default `.#`, or the
-  // resolved `<flakeDir>#attr` (optionally `path:`-prefixed). A DIFFERENT local
-  // path (e.g. `/tmp/other#pkg` or `path:/tmp/other#pkg`, or a `./sub` flake) is
-  // foreign: Vega still records the attestation as `github:<repository>#attr`, so
-  // a reproducer rebuilds the repo flake and the output is unreproducible, so warn.
-  const local = ref.replace(/^path:/, "");
-  if (local === "" || local === "." || local === dir) return true;
-  if (repository) {
-    const m = /^github:([^/]+\/[^/?#]+)/.exec(ref);
-    // A `?dir=<sub>` subflake is recorded and rebuilt as the repository's ROOT
-    // flake, so its output is unreproducible even though owner/repo matches:
-    // treat it as foreign so the warning still fires.
-    if (m && m[1]!.toLowerCase() === repository.toLowerCase() && !/[?&]dir=/.test(ref)) return true;
+  // An explicit `github:<owner>/<repo>` ref: own repo (optionally a `?dir=`
+  // subflake) or a foreign repo. A foreign owner/repo never yields a dir.
+  const gm = /^github:([^/?#]+\/[^/?#]+)(?:[/?#]|$)/.exec(ref);
+  if (gm) {
+    if (repository === undefined || gm[1]!.toLowerCase() !== repository.toLowerCase()) return null;
+    const dm = /[?&]dir=([^&#]*)/.exec(ref);
+    if (dm === null) return "";
+    try {
+      return decodeURIComponent(dm[1]!);
+    } catch {
+      return null; // a malformed %-escape is not a usable subdir
+    }
   }
-  return false;
+  // A LOCAL path ref (`.`, absolute, `./`/`../` relative, or `path:`-prefixed):
+  // resolve it against the checkout root and accept it only if it stays inside.
+  const isLocalPath =
+    ref === "" || ref === "." || ref.startsWith("/") || ref.startsWith("./") || ref.startsWith("../") || ref.startsWith("path:");
+  if (isLocalPath) {
+    const local = ref.replace(/^path:/, "");
+    if (local === "" || local === ".") return "";
+    const rel = relative(dir, resolve(dir, local));
+    if (rel === "") return ""; // the checkout root itself
+    // `..` or `../…` traversal, or an absolute result, escapes the checkout. (A
+    // real in-repo child like `..foo` is NOT a traversal segment, so allow it.)
+    if (rel === ".." || rel.startsWith("../") || isAbsolute(rel)) return null;
+    return rel;
+  }
+  // Any other flake ref (a different remote: git+https, gitlab:, a tarball, ...)
+  // is recorded as `github:<repository>` and so is unreproducible.
+  return null;
 }

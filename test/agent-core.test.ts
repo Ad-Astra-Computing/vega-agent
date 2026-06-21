@@ -9,7 +9,7 @@ import { sha256NixBase32, sha256NixHashToBase64 } from "../src/nix/hash.js";
 import { buildAttestBody } from "../src/agent/narinfo.js";
 import { lockedInstallable } from "../src/agent/reproduce.js";
 import { partitionByUpstream } from "../src/agent/upstream.js";
-import { resolveBuilds, installableTargetsOwnRepo } from "../src/agent/builds.js";
+import { resolveBuilds, installableTargetsOwnRepo, ownRepoSubflakeDir } from "../src/agent/builds.js";
 import { parseVegaConfig } from "../src/agent/config.js";
 
 /** Minimal fake of fetch that records calls and returns scripted responses. */
@@ -528,20 +528,54 @@ describe("installableTargetsOwnRepo", () => {
     expect(installableTargetsOwnRepo("github:Ad-Astra-Computing/vega-cache-example#hello", "/repo", repo)).toBe(true);
     expect(installableTargetsOwnRepo("github:Ad-Astra-Computing/vega-cache-example/abc123#hello", "/repo", repo)).toBe(true);
   });
+  it("accepts the repo's own subdirectory flake (reproducible as ?dir=)", () => {
+    expect(installableTargetsOwnRepo("/repo/framework-desktop#pkg", "/repo", repo)).toBe(true);
+    expect(installableTargetsOwnRepo("path:/repo/sub#pkg", "/repo", repo)).toBe(true);
+    expect(installableTargetsOwnRepo("github:Ad-Astra-Computing/vega-cache-example?dir=sub#pkg", "/repo", repo)).toBe(true);
+  });
   it("rejects a foreign flake (unreproducible provenance)", () => {
     expect(installableTargetsOwnRepo("github:NixOS/nixpkgs/rev#figlet", "/repo", repo)).toBe(false);
     expect(installableTargetsOwnRepo("github:someone/other#x", "/repo", repo)).toBe(false);
-    // Same repo but a ?dir= subflake: provenance is the ROOT flake, so unreproducible.
-    expect(installableTargetsOwnRepo("github:Ad-Astra-Computing/vega-cache-example?dir=sub#pkg", "/repo", repo)).toBe(false);
   });
 
-  it("rejects a foreign LOCAL flake but accepts the workspace by path/path:", () => {
-    // A different local flake is still recorded as github:<repo> -> unreproducible.
+  it("rejects a foreign LOCAL flake but accepts the workspace and its subdirs", () => {
+    // A local flake OUTSIDE the checkout is recorded as github:<repo> -> unreproducible.
     expect(installableTargetsOwnRepo("/tmp/other#pkg", "/repo", repo)).toBe(false);
     expect(installableTargetsOwnRepo("path:/tmp/other#pkg", "/repo", repo)).toBe(false);
-    expect(installableTargetsOwnRepo("./sub#pkg", "/repo", repo)).toBe(false);
-    // The workspace flake itself, by absolute path or path:, still qualifies.
+    // The workspace flake itself, and a subdir within it (relative resolves against
+    // the checkout root), qualify.
     expect(installableTargetsOwnRepo("/repo#pkg", "/repo", repo)).toBe(true);
     expect(installableTargetsOwnRepo("path:/repo#pkg", "/repo", repo)).toBe(true);
+    expect(installableTargetsOwnRepo("./sub#pkg", "/repo", repo)).toBe(true);
+  });
+});
+
+describe("ownRepoSubflakeDir", () => {
+  const repo = "Ad-Astra-Computing/vega-cache-example";
+  it("returns '' for the repo root flake", () => {
+    expect(ownRepoSubflakeDir(".#hello", "/repo", repo)).toBe("");
+    expect(ownRepoSubflakeDir("/repo#hello", "/repo", repo)).toBe("");
+    expect(ownRepoSubflakeDir("path:/repo#hello", "/repo", repo)).toBe("");
+    expect(ownRepoSubflakeDir("github:Ad-Astra-Computing/vega-cache-example#hello", "/repo", repo)).toBe("");
+    expect(ownRepoSubflakeDir("github:Ad-Astra-Computing/vega-cache-example/abc123#hello", "/repo", repo)).toBe("");
+  });
+  it("returns the subdir for a subdirectory flake within the checkout", () => {
+    expect(ownRepoSubflakeDir("/repo/framework-desktop#x", "/repo", repo)).toBe("framework-desktop");
+    expect(ownRepoSubflakeDir("path:/repo/a/b#x", "/repo", repo)).toBe("a/b");
+    expect(ownRepoSubflakeDir("github:Ad-Astra-Computing/vega-cache-example?dir=sub/host#x", "/repo", repo)).toBe("sub/host");
+    // A relative ref is resolved against the checkout root (the action runs there).
+    expect(ownRepoSubflakeDir("./framework-desktop#x", "/repo", repo)).toBe("framework-desktop");
+    expect(ownRepoSubflakeDir("path:./a/b#x", "/repo", repo)).toBe("a/b");
+  });
+  it("returns null for a foreign flake or a path outside the checkout", () => {
+    expect(ownRepoSubflakeDir("github:NixOS/nixpkgs/rev#figlet", "/repo", repo)).toBeNull();
+    expect(ownRepoSubflakeDir("github:someone/other?dir=sub#x", "/repo", repo)).toBeNull();
+    expect(ownRepoSubflakeDir("/tmp/other#pkg", "/repo", repo)).toBeNull();
+    expect(ownRepoSubflakeDir("git+https://e.com/r.git#pkg", "/repo", repo)).toBeNull();
+    // Path-escape attempts collapse and are detected as outside the checkout.
+    expect(ownRepoSubflakeDir("/repo/../other#pkg", "/repo", repo)).toBeNull();
+    expect(ownRepoSubflakeDir("path:/repo/../other#pkg", "/repo", repo)).toBeNull();
+    // A malformed %-escape in a ?dir= is not a usable subdir.
+    expect(ownRepoSubflakeDir("github:Ad-Astra-Computing/vega-cache-example?dir=%E0%A4%A#x", "/repo", repo)).toBeNull();
   });
 });
