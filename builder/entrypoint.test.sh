@@ -82,6 +82,30 @@ enforce "true + sandbox=false fatal"    true  false false 1
 enforce "true + sandbox=relaxed fatal"  true  relaxed false 1
 enforce "true + both unset fatal"       true  ""    ""    1
 
+# gc_enabled: periodic store GC gate. On by default; off via VEGA_GC in
+# {false,0,off} or for an ephemeral runner.
+# gc <name> <VEGA_GC> <VEGA_RUNNER_EPHEMERAL> <want_rc> (0=enabled, 1=disabled)
+gc() {
+  local name="$1" vgc="$2" eph="$3" want_rc="$4" rc=0
+  VEGA_GC="$vgc" VEGA_RUNNER_EPHEMERAL="$eph" gc_enabled || rc=$?
+  if [ "$rc" != "$want_rc" ]; then
+    echo "FAIL: gc $name -> rc=$rc (want $want_rc)" >&2
+    fails=$((fails + 1))
+  else
+    echo "ok: gc $name"
+  fi
+}
+
+gc "default on"             ""      false 0
+gc "explicit true on"       true    false 0
+gc "false disables"         false   false 1
+gc "0 disables"             0       false 1
+gc "off disables"           off     false 1
+gc "ephemeral disables"     true    true  1
+gc "off+ephemeral disabled" false   true  1
+gc "False (case-insensitive)" False   false 1
+gc "OFF (case-insensitive)"   OFF     false 1
+
 if [ "$fails" -ne 0 ]; then
   echo "$fails test(s) failed" >&2
   exit 1

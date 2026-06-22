@@ -108,6 +108,14 @@ Notes:
   survives container *recreation*, you must `docker volume rm` it whenever you
   update the image; the safer default is no `/nix` volume, with `reuse-cache`
   substituting prior builds from your tenant.
+- A persistent runner garbage-collects its store on a schedule so `/nix` does not
+  grow without bound (it otherwise accumulates every path it ever built or
+  substituted). The entrypoint runs `nix-collect-garbage --delete-older-than 7d`
+  in the background; it takes the store GC lock and honors in-flight build
+  temproots, so it never removes a path a running build needs. Tune with
+  `VEGA_GC=false` (disable), `VEGA_GC_DELETE_OLDER_THAN` (default `7d`),
+  `VEGA_GC_INTERVAL` (default `7d`) and `VEGA_GC_INITIAL_DELAY` (default `1h`).
+  An ephemeral runner skips it (its store is fresh per job).
 - Nix's build sandbox is **auto-detected** (`VEGA_NIX_SANDBOX`, default `auto`).
   At startup the entrypoint builds a throwaway derivation under the real sandbox
   to learn whether this container can create the user namespace the sandbox
