@@ -6,6 +6,22 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+### Added
+
+- A build of a flake that lives in a repository subdirectory is now reproducible.
+  The agent records the subdirectory as the attestation's `dir`, and the
+  reproducer rebuilds it as `github:<owner>/<repo>/<rev>?dir=<dir>#<attr>`. The
+  subdirectory is only honored on a canonical github reference with an immutable
+  commit SHA, is sanitized to a relative subpath, and the reproducer rejects any
+  symlinked path component so a committed symlink cannot escape the pinned tree.
+  Previously such a build was treated as foreign and stayed at the tenant tier.
+
+### Changed
+
+- The foreign-installable warning now fires only for a flake that is genuinely
+  not the repository's own (another repository, nixpkgs, or a path outside the
+  checkout), not for the repository's own subdirectory flake.
+
 ## [0.10.0] - 2026-06-20
 
 ### Changed
