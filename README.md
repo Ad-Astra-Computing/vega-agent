@@ -103,7 +103,9 @@ steps:
     with:
       # github.workspace is the checkout root, so the build targets your repo's
       # own flake and the attestation can be reproduced. A bare `.#attr` would
-      # resolve against the action, not your repo.
+      # resolve against the action, not your repo. A flake in a subdirectory works
+      # too: `${{ github.workspace }}/sub#attr` is recorded as `?dir=sub` and
+      # reproduced from that subdirectory.
       installable: "${{ github.workspace }}#packages.x86_64-linux.default"
       control-plane: https://vega-cache.dev
 ```
