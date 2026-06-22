@@ -404,6 +404,34 @@ describe("lockedInstallable", () => {
       lockedInstallable({ flakeRef: "--store/ssh://evil", attr: "x", rev: "ddd" }),
     ).toThrow(/looks like a flag/);
   });
+
+  it("adds a subflake dir as ?dir= on a canonical github ref (rev in the path)", () => {
+    expect(
+      lockedInstallable({
+        flakeRef: "github:owner/repo",
+        attr: "nixosConfigurations.perdurabo.config.system.build.toplevel",
+        rev: "8b2b57d91dd1f4d094bb944a0a0ef65319a5663f",
+        dir: "framework-desktop",
+      }),
+    ).toBe(
+      "github:owner/repo/8b2b57d91dd1f4d094bb944a0a0ef65319a5663f?dir=framework-desktop#nixosConfigurations.perdurabo.config.system.build.toplevel",
+    );
+  });
+
+  it("refuses a subflake dir on a non-canonical ref or a mutable rev", () => {
+    expect(() =>
+      lockedInstallable({ flakeRef: "git+https://e.com/r.git", attr: "x", rev: "ddd", dir: "sub" }),
+    ).toThrow(/subflake dir is only supported on a canonical github ref/);
+    expect(() =>
+      lockedInstallable({ flakeRef: "github:owner/repo", attr: "x", rev: "main", dir: "sub" }),
+    ).toThrow(/immutable commit SHA/);
+  });
+
+  it("refuses a flake ref that already carries a fragment", () => {
+    expect(() =>
+      lockedInstallable({ flakeRef: "git+https://e.com/r.git#old", attr: "x", rev: "ddd" }),
+    ).toThrow(/fragment/);
+  });
 });
 
 describe("partitionByUpstream (skip-upstream caching)", () => {

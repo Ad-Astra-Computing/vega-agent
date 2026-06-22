@@ -9,12 +9,73 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { stat, lstat, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import type { RawPathInfo, NarArtifact } from "../src/agent/narinfo.js";
 import { storePathHash } from "../src/nix/store-path.js";
 
 const exec = promisify(execFile);
+
+/**
+ * Verify that the subflake `dir` is a real, CONTAINED subdirectory of the repo at
+ * `flakeRef`@`rev` with no symlinked path component, before this trusted
+ * reproducer builds `<flakeRef>/<rev>?dir=<dir>#<attr>`.
+ *
+ * The string sanitizer (sanitizeFlakeDir) blocks lexical traversal (`..`, etc.),
+ * but a repository can COMMIT a symlink at a `dir` component pointing outside the
+ * tree; if nix followed it, the reproducer would build from outside the pinned
+ * source. We fetch the source tree (evaluation-free, so it works even when the
+ * repo root has no flake.nix) and `lstat` each component, rejecting any symlink or
+ * non-directory, plus a realpath-containment backstop. Throws to abort the build.
+ *
+ * VERIFY ON A REAL RUNNER: depends on `nix eval` / `builtins.fetchTree` behavior.
+ */
+export async function assertSubflakeDirContained(
+  flakeRef: string,
+  rev: string,
+  dir: string,
+): Promise<void> {
+  // Require the EXACT canonical bare form and an immutable 40-hex commit SHA, so
+  // the tree fetched here is precisely the one `lockedInstallable` builds (a
+  // mutable ref or a non-canonical form could resolve to a different tree -> a
+  // check/build TOCTOU). Ingest enforces the same, this is defense in depth.
+  const m = /^github:([^/?#]+)\/([^/?#]+)$/.exec(flakeRef);
+  if (m === null) {
+    throw new Error(`refusing a subflake dir on a non-canonical github flake ref: ${flakeRef}`);
+  }
+  if (!/^[0-9a-f]{40}$/i.test(rev)) {
+    throw new Error(`refusing a subflake dir without an immutable commit SHA rev: ${rev}`);
+  }
+  const owner = m[1]!;
+  const repo = m[2]!;
+  // fetchTree of a github source pinned to `rev` is locked (pure); --raw prints the
+  // bare store path. JSON.stringify safely quotes the (already-sanitized) parts.
+  const expr = `(builtins.fetchTree { type = "github"; owner = ${JSON.stringify(owner)}; repo = ${JSON.stringify(repo)}; rev = ${JSON.stringify(rev)}; }).outPath`;
+  const { stdout } = await exec("nix", ["eval", "--raw", "--expr", expr]);
+  const src = stdout.trim();
+  if (!src.startsWith("/nix/store/")) {
+    throw new Error(`unexpected source path fetching ${owner}/${repo}@${rev}: ${src}`);
+  }
+  // Walk each component: it must exist, be a directory, and NOT be a symlink.
+  // lstat does not follow the final component, so a symlinked component is caught.
+  let cur = src;
+  for (const seg of dir.split("/")) {
+    cur = join(cur, seg);
+    const st = await lstat(cur);
+    if (st.isSymbolicLink()) {
+      throw new Error(`subflake dir component is a symlink (refusing to escape the repo): ${dir}`);
+    }
+    if (!st.isDirectory()) {
+      throw new Error(`subflake dir component is not a directory: ${dir}`);
+    }
+  }
+  // Backstop: the resolved subflake path must remain within the source tree.
+  const realSrc = await realpath(src);
+  const realDir = await realpath(join(src, dir));
+  if (realDir !== realSrc && !realDir.startsWith(realSrc + "/")) {
+    throw new Error(`subflake dir escapes the repository tree: ${dir}`);
+  }
+}
 const MAX_BUFFER = 1 << 28; // 256 MiB for large path-info closures
 
 /** Normalize any nix hash string to narinfo form `sha256:<nixbase32>`. */
