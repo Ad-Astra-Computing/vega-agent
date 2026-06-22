@@ -374,6 +374,25 @@ describe("buildAttestBody", () => {
     expect(buildAttestBody(info, nar).attr).toBeUndefined();
     expect(buildAttestBody(info, nar, "").attr).toBeUndefined();
   });
+
+  it("carries dir only alongside attr (the top output), never on a bare dependency", () => {
+    const info = {
+      path: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-x",
+      narHash: "sha256:abc",
+      narSize: 1,
+      references: [],
+      deriver: null,
+    };
+    const nar = { url: "nar/x.nar.zst", compression: "zstd", fileHash: "sha256:fff", fileSize: 1 };
+    // With a top-level attr, dir is included.
+    expect(buildAttestBody(info, nar, "subprobe", { dir: "sub" }).dir).toBe("sub");
+    // Without attr (a closure dependency), dir is dropped even if provided.
+    expect(buildAttestBody(info, nar, undefined, { dir: "sub" }).dir).toBeUndefined();
+    expect(buildAttestBody(info, nar, "", { dir: "sub" }).dir).toBeUndefined();
+    // An empty dir is omitted (root flake).
+    expect(buildAttestBody(info, nar, "subprobe", { dir: "" }).dir).toBeUndefined();
+    expect(buildAttestBody(info, nar, "subprobe").dir).toBeUndefined();
+  });
 });
 
 describe("lockedInstallable", () => {
