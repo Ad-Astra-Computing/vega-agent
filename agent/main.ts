@@ -23,7 +23,7 @@ import { narObjectExists } from "../src/agent/upstream.js";
 import { mapConcurrent } from "../src/agent/concurrency.js";
 import { tenantSubstituter } from "../src/agent/substituter.js";
 import { parseVegaConfig, type VegaConfig } from "../src/agent/config.js";
-import { resolveBuilds, installableTargetsOwnRepo } from "../src/agent/builds.js";
+import { resolveBuilds, ownRepoSubflakeDir } from "../src/agent/builds.js";
 import { scanStorePath, redactKnownSecrets } from "../src/agent/secret-scan.js";
 import { workflowWarning } from "../src/agent/gha.js";
 import { sha256NixHashToBase64 } from "../src/nix/hash.js";
@@ -79,6 +79,7 @@ async function cacheBuild(
   client: ControlPlaneClient,
   installable: string,
   attr: string,
+  dir: string | undefined,
   opts: CacheOpts,
 ): Promise<{ promoted: number; total: number }> {
   console.log(`Building ${installable} ...`);
@@ -145,7 +146,7 @@ async function cacheBuild(
     }
     const outputAttr = topPaths.has(info.path) ? attr : "";
     const result = await client.attest(
-      buildAttestBody(info, nar, outputAttr, { noContinent: opts.noContinent }),
+      buildAttestBody(info, nar, outputAttr, { noContinent: opts.noContinent, dir }),
     );
     const tag = result.publishedShared
       ? "[shared]   "
@@ -179,19 +180,20 @@ async function main(): Promise<void> {
   const builds = resolveBuilds(config, fallback, flakeDir, sys, flakeOutputs);
   if (config) console.log(`vega.yaml: building ${builds.length} declared output(s).`);
 
-  // Vega records gh-actions provenance from the OIDC repo, so a build that is not
-  // the repository's own flake is attested as github:<repo>#<attr> and cannot be
-  // reproduced (the repo has no such output). Warn loudly; it stays at tenant tier.
+  // Vega records gh-actions provenance from the OIDC repo. The repo's own flake
+  // (root, or a subdirectory flake within the checkout) is reproducible: a subdir
+  // is recorded as `github:<repo>?dir=<sub>`. A FOREIGN flake (another repo,
+  // nixpkgs, a path outside the checkout) is still recorded as `github:<repo>#attr`,
+  // which has no such output, so it cannot be reproduced. Warn only on those.
   const repo = process.env.GITHUB_REPOSITORY;
-  for (const b of builds) {
-    if (!installableTargetsOwnRepo(b.installable, flakeDir, repo)) {
-      ghaWarn(
-        `Building '${b.installable}', but Vega records this attestation as ` +
-          `github:${repo ?? "<repo>"}#${b.attr}. A reproduction worker rebuilds that, so ` +
-          `unless this repository's own flake builds '${b.attr}', the output cannot be ` +
-          `reproduced and stays at tenant tier. Build the repo's own flake (e.g. '.#${b.attr}').`,
-      );
-    }
+  const targets = builds.map((b) => ({ b, dir: ownRepoSubflakeDir(b.installable, flakeDir, repo) }));
+  for (const { b } of targets.filter((t) => t.dir === null)) {
+    ghaWarn(
+      `Building '${b.installable}', but Vega records this attestation as ` +
+        `github:${repo ?? "<repo>"}#${b.attr}. A reproduction worker rebuilds that, so ` +
+        `unless this repository's own flake builds '${b.attr}', the output cannot be ` +
+        `reproduced and stays at tenant tier. Build the repo's own flake (e.g. '.#${b.attr}').`,
+    );
   }
 
   // Capture the runner's OIDC request credential, then DROP it from the
@@ -269,8 +271,10 @@ async function main(): Promise<void> {
   let promoted = 0;
   let total = 0;
   try {
-    for (const b of builds) {
-      const r = await cacheBuild(client, b.installable, b.attr, opts);
+    for (const { b, dir } of targets) {
+      // A foreign flake (dir === null) still caches to the tenant tier, just
+      // without a reproducible subflake dir.
+      const r = await cacheBuild(client, b.installable, b.attr, dir ?? undefined, opts);
       promoted += r.promoted;
       total += r.total;
     }

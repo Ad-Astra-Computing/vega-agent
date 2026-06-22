@@ -18,9 +18,10 @@ import { fetchActionsOidcToken } from "../src/agent/oidc.js";
 import { ControlPlaneClient } from "../src/agent/client.js";
 import { buildAttestBody } from "../src/agent/narinfo.js";
 import { lockedInstallable } from "../src/agent/reproduce.js";
+import { sanitizeFlakeDir } from "../src/nix/flake-dir.js";
 import type { BuildProvenance } from "../src/trust/policy.js";
 import { sha256NixHashToBase64 } from "../src/nix/hash.js";
-import { nixBuild, pathInfoOutputs, makeNar } from "./nix.js";
+import { nixBuild, pathInfoOutputs, makeNar, assertSubflakeDirContained } from "./nix.js";
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -36,10 +37,27 @@ async function main(): Promise<void> {
     attr: requireEnv("VEGA_ATTR"),
     rev: requireEnv("VEGA_REV"),
   };
+  // Optional subflake directory. Re-sanitize here as defense in depth (the edge
+  // sanitizes on ingest): this value steers what this trusted reproducer builds,
+  // so an unexpected value (e.g. a tampered dispatch input) must be rejected, not
+  // built. An empty/absent env is a root flake.
+  const rawDir = process.env.VEGA_DIR || "";
+  if (rawDir !== "") {
+    const dir = sanitizeFlakeDir(rawDir);
+    if (dir === null) throw new Error(`refusing unsafe subflake dir: ${JSON.stringify(rawDir)}`);
+    provenance.dir = dir;
+  }
   // Optional: the output the original attester claims, for a local divergence
   // report (the authoritative comparison is server-side). Empty env = unset.
   const expectPath = process.env.VEGA_EXPECT_STORE_PATH || undefined;
   const expectNarHash = process.env.VEGA_EXPECT_NARHASH || undefined;
+
+  // Before building a subflake, verify the dir is a real, contained subdirectory
+  // at this exact rev with no symlinked component, so a committed symlink cannot
+  // steer this trusted reproducer outside the pinned source tree.
+  if (provenance.dir !== undefined) {
+    await assertSubflakeDirContained(provenance.flakeRef, provenance.rev, provenance.dir);
+  }
 
   const installable = lockedInstallable(provenance);
   const token = await fetchActionsOidcToken(

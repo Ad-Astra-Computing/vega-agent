@@ -36,12 +36,13 @@ function baseName(path: string): string {
  *
  * `attr` is the flake attribute that built this output, supplied only for the
  * top-level output the agent built (closure dependencies have no single attr).
+ * `dir` is the subflake directory, likewise only meaningful with `attr`.
  */
 export function buildAttestBody(
   info: RawPathInfo,
   nar: NarArtifact,
   attr?: string,
-  opts: { noContinent?: boolean } = {},
+  opts: { noContinent?: boolean; dir?: string } = {},
 ): AttestBody {
   const body: AttestBody = {
     storePath: info.path,
@@ -55,6 +56,11 @@ export function buildAttestBody(
   };
   if (info.deriver) body.deriver = baseName(info.deriver);
   if (attr !== undefined && attr !== "") body.attr = attr;
+  // `dir` rides with `attr` (the top-level output's provenance); never on a bare
+  // closure dependency.
+  if (attr !== undefined && attr !== "" && opts.dir !== undefined && opts.dir !== "") {
+    body.dir = opts.dir;
+  }
   if (opts.noContinent) body.noContinent = true;
   return body;
 }

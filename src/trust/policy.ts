@@ -24,6 +24,12 @@ export interface BuildProvenance {
   flakeRef: string;
   attr: string;
   rev: string;
+  /**
+   * Optional subflake directory for a monorepo whose flake lives in a
+   * subdirectory (`?dir=<dir>`). The reproducer builds
+   * `<flakeRef>/<rev>?dir=<dir>#<attr>`. Absent for a root flake.
+   */
+  dir?: string;
 }
 
 export interface AttestationRecord {

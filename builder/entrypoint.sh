@@ -42,34 +42,194 @@ read_secret() {
   printf '%s' "${!name:-}"
 }
 
+# Build a throwaway derivation under the real sandbox to learn whether THIS
+# container can actually create one. Docker blocks the sandbox's user/mount
+# namespace setup unless it is launched with userns allowed (--privileged, or
+# --security-opt seccomp=unconfined --security-opt apparmor=unconfined). The
+# image ships no `unshare`, so we probe the only authoritative way: ask Nix to
+# do exactly what a real build would. The builder is the image's own store-path
+# bash, so the probe's closure is tiny and already present (no substitution).
+#
+# `sandbox-fallback false` is essential: with Nix's default fallback, a build
+# that CANNOT be sandboxed silently runs unsandboxed and succeeds, so the probe
+# would pass without real isolation. With fallback off, a sandbox that cannot
+# start makes the build fail, which is exactly the signal we classify.
+#
+# Returns: 0 sandbox works; 10 sandbox/userns specifically unavailable; 1 the
+# probe failed for an UNRELATED reason (a broken Nix, no network, ...), which the
+# caller must surface rather than misread as "no sandbox".
+probe_sandbox() {
+  local bash_path bash_root log
+  bash_path="$(readlink -f "$(command -v bash)")" || return 1
+  # The top-level store path of the builder, e.g.
+  # /nix/store/<hash>-bash-interactive-5.3p9. `builtins.storePath` needs this root
+  # (not the /bin/bash subpath) and attaches dependency context, so Nix mounts the
+  # builder's FULL closure (glibc, ...) into the sandbox. A context-free string
+  # (a plain --argstr path) mounts only the bash binary, and the sandboxed build
+  # then fails to find its interpreter: "bash: No such file or directory". This is
+  # why the closure registration (init_store) alone was not enough.
+  local bash_rel
+  bash_root="/nix/store/$(printf '%s' "${bash_path#/nix/store/}" | cut -d/ -f1)"
+  bash_rel="${bash_path#"$bash_root"/}"  # the builder's path under the store root, e.g. bin/bash
+  log="$(mktemp)"
+  # SC2016: `$out` is a Nix build-time variable, deliberately passed literally to
+  # Nix (it must NOT expand in this shell).
+  # shellcheck disable=SC2016
+  if nix-build --no-out-link \
+       --option sandbox true \
+       --option sandbox-fallback false \
+       --option max-jobs 1 \
+       --option build-users-group '' \
+       --argstr bashRoot "$bash_root" \
+       --argstr bashRel "$bash_rel" \
+       -E '{ bashRoot, bashRel }: derivation {
+             name = "vega-build-probe";
+             system = builtins.currentSystem;
+             builder = "${builtins.storePath bashRoot}/${bashRel}";
+             args = [ "-c" "echo ok > $out" ];
+           }' \
+       >"$log" 2>&1; then
+    rm -f "$log"
+    return 0
+  fi
+  # Failed. Show why, then classify. Match only signals SPECIFIC to sandbox setup
+  # (Nix reports it under "setting up the build environment", and the cause is a
+  # namespace/unshare/clone/seccomp/apparmor error). Generic "operation not permitted"
+  # / "permission denied" are deliberately NOT matched: an unrelated Nix failure
+  # must be treated as unexpected (return 1 -> fatal), never silently downgraded
+  # to relaxed. The probe derivation is named to avoid self-matching the pattern.
+  cat "$log" >&2
+  if grep -Eqi 'setting up the build environment|namespace|unshare|CLONE_NEWUSER|cloning|clone\(|seccomp|apparmor' "$log"; then
+    rm -f "$log"
+    return 10
+  fi
+  rm -f "$log"
+  return 1
+}
+
+# Resolve the effective `sandbox` setting from VEGA_NIX_SANDBOX (default `auto`)
+# and echo it. `auto` probes and falls back to `relaxed` when no userns is
+# available; `true` probes and hard-fails if the sandbox cannot start (so a
+# build that the operator asked to isolate never runs unsandboxed by surprise);
+# `false` is the explicit opt-out. An unrelated probe failure is always fatal.
+resolve_sandbox() {
+  local rc
+  case "${VEGA_NIX_SANDBOX:-auto}" in
+    false)
+      echo false
+      ;;
+    true)
+      rc=0; probe_sandbox || rc=$?
+      if [ "$rc" -eq 0 ]; then echo true; return 0; fi
+      if [ "$rc" -eq 10 ]; then
+        echo "vega-builder: VEGA_NIX_SANDBOX=true but the Nix sandbox cannot start in this container. Launch with userns allowed: --privileged, or --security-opt seccomp=unconfined --security-opt apparmor=unconfined." >&2
+      else
+        echo "vega-builder: the Nix sandbox probe failed for an unexpected reason (see log above); refusing to start." >&2
+      fi
+      return 1
+      ;;
+    auto | *)
+      rc=0; probe_sandbox || rc=$?
+      if [ "$rc" -eq 0 ]; then echo true; return 0; fi
+      if [ "$rc" -eq 10 ]; then
+        echo "vega-builder: Nix sandbox unavailable (no userns in this container); using sandbox = relaxed. Launch with --privileged or seccomp/apparmor unconfined for full isolation, or set VEGA_NIX_SANDBOX=false to silence this." >&2
+        echo relaxed
+        return 0
+      fi
+      echo "vega-builder: the Nix sandbox probe failed for an unexpected reason (see log above); refusing to guess a sandbox mode." >&2
+      return 1
+      ;;
+  esac
+}
+
+# Echo Nix's effective value for a config setting (the value Nix itself computes
+# from the mounted nix.conf), or empty if it cannot be read.
+effective_setting() {
+  local name="$1" v
+  v="$(nix --extra-experimental-features nix-command config show "$name" 2>/dev/null)" || true
+  if [ -z "$v" ]; then
+    v="$(nix --extra-experimental-features nix-command show-config 2>/dev/null | sed -n "s/^${name} = //p" | head -n1)" || true
+  fi
+  printf '%s' "$v"
+}
+
+# When VEGA_NIX_SANDBOX=true the sandbox is REQUIRED. With an operator-mounted
+# nix.conf we do not rewrite the file, but we still hold the contract: refuse to
+# start unless the build is GUARANTEED sandboxed, i.e. effective sandbox = true
+# AND sandbox-fallback = false (otherwise a setup failure silently runs the build
+# unsandboxed). Returns non-zero (caller exits) on a violation; no-op for
+# auto/false.
+enforce_required_sandbox() {
+  [ "${VEGA_NIX_SANDBOX:-auto}" = true ] || return 0
+  local eff_sb eff_fb
+  eff_sb="$(effective_setting sandbox)"
+  eff_fb="$(effective_setting sandbox-fallback)"
+  [ "$eff_sb" = true ] && [ "$eff_fb" = false ] && return 0
+  echo "vega-builder: VEGA_NIX_SANDBOX=true but the mounted /etc/nix/nix.conf has sandbox = ${eff_sb:-<unset>}, sandbox-fallback = ${eff_fb:-<unset>}. Set sandbox = true and sandbox-fallback = false there, or unset VEGA_NIX_SANDBOX to use auto-detection." >&2
+  return 1
+}
+
+# Initialize the single-user store (no nixbld group) and register the baked
+# closure. The registration (VEGA_NIX_REGINFO, baked into the image) records each
+# store path's references, so a SANDBOXED build can mount each input's full
+# closure; without it the sandboxed builder cannot find its interpreter (glibc)
+# and fails with "No such file or directory". The marker is keyed by the
+# registration's content hash, so a persisted /nix DB from an OLDER image (whose
+# baked closure differs) is re-registered rather than skipped.
+init_store() {
+  [ -e /nix/var/nix/db/db.sqlite ] || NIX_CONFIG='build-users-group =' nix-store --init
+  if [ -n "${VEGA_NIX_REGINFO:-}" ] && [ -e "${VEGA_NIX_REGINFO}" ]; then
+    local sig marker
+    sig="$(sha256sum "${VEGA_NIX_REGINFO}" | cut -c1-32)"
+    marker="/nix/var/nix/db/.vega-registered-${sig}"
+    if [ ! -e "$marker" ]; then
+      NIX_CONFIG='build-users-group =' nix-store --load-db < "${VEGA_NIX_REGINFO}" \
+        && : > "$marker"
+    fi
+  fi
+}
+
 # Minimal single-user Nix state for an ephemeral root container. The image ships
 # the toolchain closure; a build fetches the rest from substituters. The sandbox
-# is OFF by default because Docker blocks the sandbox's mount/clone unless the
-# container runs --privileged; set VEGA_NIX_SANDBOX=true when you do run it
-# privileged for host-like build isolation.
+# mode is auto-detected (see resolve_sandbox): on by default when the container
+# can create a user namespace, `relaxed` when it cannot.
 setup_nix() {
   mkdir -p /nix/var/nix/db /nix/var/nix/gcroots /nix/var/nix/profiles \
            /nix/var/nix/temproots /nix/var/nix/userpool /etc/nix
-  # Write nix.conf BEFORE any nix command so single-user settings (no nixbld
-  # group) apply to `nix-store --init` too, not just later builds.
-  if [ ! -e /etc/nix/nix.conf ]; then
-    {
-      echo "experimental-features = nix-command flakes"
-      echo "sandbox = ${VEGA_NIX_SANDBOX:-false}"
-      # Bound build parallelism so a build cannot peg a shared host. The HARD cap
-      # is the docker --memory/--cpus on `docker run` (see README) which the OS
-      # enforces; these are the softer nix-level limits. Default conservatively
-      # (2 parallel jobs) and raise VEGA_NIX_MAX_JOBS / VEGA_NIX_CORES on a
-      # dedicated machine.
-      echo "max-jobs = ${VEGA_NIX_MAX_JOBS:-2}"
-      echo "cores = ${VEGA_NIX_CORES:-0}"
-      # Single-user nix in the container: no nixbld build users / group.
-      echo "build-users-group ="
-      echo "substituters = https://cache.nixos.org ${VEGA_EXTRA_SUBSTITUTERS:-}"
-      echo "trusted-public-keys = ${NIXOS_CACHE_KEY} ${VEGA_EXTRA_TRUSTED_PUBLIC_KEYS:-}"
-    } > /etc/nix/nix.conf
+  # Init + register the baked closure before any probe or build needs it.
+  init_store
+  # Respect an operator-mounted nix.conf: we do not rewrite it. We still enforce
+  # the VEGA_NIX_SANDBOX=true contract (a `true` request must not run unsandboxed
+  # because the mounted config disabled it).
+  if [ -e /etc/nix/nix.conf ]; then
+    enforce_required_sandbox || exit 1
+    return 0
   fi
-  [ -e /nix/var/nix/db/db.sqlite ] || nix-store --init
+
+  local sandbox
+  sandbox="$(resolve_sandbox)" || exit 1
+
+  {
+    echo "experimental-features = nix-command flakes"
+    echo "sandbox = ${sandbox}"
+    # When the sandbox is required (auto-detected as working, or forced), do NOT
+    # let nix silently fall back to an unsandboxed build: a real isolation
+    # failure must fail the build, not quietly weaken it. `relaxed`/`false`
+    # already permit a non-isolated build, so the fallback is moot there.
+    [ "${sandbox}" = true ] && echo "sandbox-fallback = false"
+    # Bound build parallelism so a build cannot peg a shared host. The HARD cap
+    # is the docker --memory/--cpus on `docker run` (see README) which the OS
+    # enforces; these are the softer nix-level limits. Default conservatively
+    # (2 parallel jobs) and raise VEGA_NIX_MAX_JOBS / VEGA_NIX_CORES on a
+    # dedicated machine.
+    echo "max-jobs = ${VEGA_NIX_MAX_JOBS:-2}"
+    echo "cores = ${VEGA_NIX_CORES:-0}"
+    # Single-user nix in the container: no nixbld build users / group.
+    echo "build-users-group ="
+    echo "substituters = https://cache.nixos.org ${VEGA_EXTRA_SUBSTITUTERS:-}"
+    echo "trusted-public-keys = ${NIXOS_CACHE_KEY} ${VEGA_EXTRA_TRUSTED_PUBLIC_KEYS:-}"
+  } > /etc/nix/nix.conf
+  echo "vega-builder: nix sandbox = ${sandbox}" >&2
 }
 
 run_runner() {
@@ -154,15 +314,23 @@ run_runner() {
   exec "$RUNNER_DIST/bin/run.sh"
 }
 
-banner
-case "${VEGA_MODE:-runner}" in
-  runner) run_runner ;;
-  donate)
-    echo "vega-builder: donate mode is Phase 2 and not implemented yet" >&2
-    exit 64
-    ;;
-  *)
-    echo "vega-builder: VEGA_MODE must be 'runner' or 'donate' (got '${VEGA_MODE:-}')" >&2
-    exit 64
-    ;;
-esac
+main() {
+  banner
+  case "${VEGA_MODE:-runner}" in
+    runner) run_runner ;;
+    donate)
+      echo "vega-builder: donate mode is Phase 2 and not implemented yet" >&2
+      exit 64
+      ;;
+    *)
+      echo "vega-builder: VEGA_MODE must be 'runner' or 'donate' (got '${VEGA_MODE:-}')" >&2
+      exit 64
+      ;;
+  esac
+}
+
+# Run main only when executed, not when sourced (the test harness sources this
+# file to exercise resolve_sandbox / probe_sandbox in isolation).
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  main "$@"
+fi
