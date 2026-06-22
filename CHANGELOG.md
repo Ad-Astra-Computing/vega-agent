@@ -6,6 +6,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-06-22
+
 ### Added
 
 - A build of a flake that lives in a repository subdirectory is now reproducible.
@@ -215,7 +217,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
   bodies, and stdin frames. Reviewed against the OWASP Top 10 for LLM
   Applications and the MCP security guidance.
 
-[Unreleased]: https://github.com/Ad-Astra-Computing/vega-agent/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/Ad-Astra-Computing/vega-agent/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/Ad-Astra-Computing/vega-agent/releases/tag/v0.11.0
 [0.10.0]: https://github.com/Ad-Astra-Computing/vega-agent/releases/tag/v0.10.0
 [0.9.0]: https://github.com/Ad-Astra-Computing/vega-agent/releases/tag/v0.9.0
 [0.8.0]: https://github.com/Ad-Astra-Computing/vega-agent/releases/tag/v0.8.0
