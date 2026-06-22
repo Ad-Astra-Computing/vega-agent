@@ -6,15 +6,18 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-06-22
+
 ### Added
 
 - The builder image garbage-collects its Nix store on a schedule, so a long-lived
   self-hosted runner's `/nix` no longer grows without bound. The entrypoint runs
   `nix-collect-garbage --delete-older-than 7d` in the background (it honors the
   store GC lock and in-flight build temproots, so it never deletes a path a
-  running build needs). Tunable via `VEGA_GC` (set `false`/`0`/`off` to disable),
-  `VEGA_GC_DELETE_OLDER_THAN` (default `7d`), `VEGA_GC_INTERVAL` (default `7d`) and
-  `VEGA_GC_INITIAL_DELAY` (default `1h`); an ephemeral runner skips it.
+  running build needs). On by default; opt out with `VEGA_GC` set to `false`, `0`,
+  `off` or `no` (case-insensitive). Tunable via `VEGA_GC_DELETE_OLDER_THAN`
+  (default `7d`), `VEGA_GC_INTERVAL` (default `7d`) and `VEGA_GC_INITIAL_DELAY`
+  (default `1h`); an ephemeral runner skips it.
 
 ## [0.11.0] - 2026-06-22
 
@@ -227,7 +230,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
   bodies, and stdin frames. Reviewed against the OWASP Top 10 for LLM
   Applications and the MCP security guidance.
 
-[Unreleased]: https://github.com/Ad-Astra-Computing/vega-agent/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/Ad-Astra-Computing/vega-agent/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/Ad-Astra-Computing/vega-agent/releases/tag/v0.12.0
 [0.11.0]: https://github.com/Ad-Astra-Computing/vega-agent/releases/tag/v0.11.0
 [0.10.0]: https://github.com/Ad-Astra-Computing/vega-agent/releases/tag/v0.10.0
 [0.9.0]: https://github.com/Ad-Astra-Computing/vega-agent/releases/tag/v0.9.0
