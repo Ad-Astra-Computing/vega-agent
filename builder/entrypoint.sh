@@ -232,6 +232,40 @@ setup_nix() {
   echo "vega-builder: nix sandbox = ${sandbox}" >&2
 }
 
+# Whether to run the periodic store GC. On by default; off via VEGA_GC in
+# {false,0,off}. Skipped for an EPHEMERAL runner, whose container (and store) is
+# fresh per job, so nothing accumulates to collect.
+gc_enabled() {
+  local v="${VEGA_GC:-true}"
+  case "${v,,}" in false | 0 | off | no) return 1 ;; esac
+  [ "${VEGA_RUNNER_EPHEMERAL:-false}" = "true" ] && return 1
+  return 0
+}
+
+# Periodically garbage-collect the Nix store so a long-lived runner's /nix does
+# not grow unbounded (a persistent runner accumulates every path it ever built or
+# substituted). Runs in the background alongside the runner; nix-collect-garbage
+# takes the store GC lock and honors in-flight build temproots, so it never
+# deletes a path a running build needs (an unrooted, older-than-threshold path is
+# the normal GC target). Tunables (sleep/nix duration suffixes): VEGA_GC=false to
+# disable, VEGA_GC_DELETE_OLDER_THAN (default 7d), VEGA_GC_INTERVAL (default 7d),
+# VEGA_GC_INITIAL_DELAY (default 1h, so a fresh container does not GC-storm).
+start_periodic_gc() {
+  gc_enabled || return 0
+  local older="${VEGA_GC_DELETE_OLDER_THAN:-7d}"
+  local interval="${VEGA_GC_INTERVAL:-7d}"
+  local delay="${VEGA_GC_INITIAL_DELAY:-1h}"
+  echo "vega-builder: periodic store GC enabled (--delete-older-than ${older}, every ${interval}, first after ${delay})" >&2
+  (
+    sleep "$delay"
+    while true; do
+      summary="$(nix-collect-garbage --delete-older-than "$older" 2>&1 | tail -n1)" || true
+      echo "vega-builder: periodic GC: ${summary}" >&2
+      sleep "$interval"
+    done
+  ) &
+}
+
 run_runner() {
   : "${GITHUB_OWNER:?set GITHUB_OWNER}"
   : "${GITHUB_REPOSITORY:?set GITHUB_REPOSITORY (name only, not owner/name)}"
@@ -310,6 +344,10 @@ run_runner() {
       --work "${RUNNER_ROOT}/_work"
     unset token
   fi
+
+  # Background store GC before handing PID 1 to the runner, so a persistent
+  # runner's /nix is trimmed on a schedule rather than growing without bound.
+  start_periodic_gc
 
   exec "$RUNNER_DIST/bin/run.sh"
 }
