@@ -39,3 +39,31 @@ export function sanitizeFlakeDir(dir: unknown): string | null {
   }
   return dir;
 }
+
+/**
+ * Sanitize the flake output attribute (`#<attr>`) carried in a build's
+ * provenance, e.g. `packages.x86_64-linux.hello`. Like the subdir it is
+ * ATTESTER-CONTROLLED and the TRUSTED reproducer later builds
+ * `github:<owner>/<repo>/<rev>?dir=<sub>#<attr>`.
+ *
+ * The value cannot break the revision pin or inject a nix flag on its own (the
+ * rev pins before the fragment, everything after the first `#` is the attrpath,
+ * and every nix invocation uses a `--` terminator). This string-level control is
+ * defense in depth: it keeps a stored or forwarded attr from carrying a second
+ * `#`/`?`/`&` fragment or query, whitespace, a shell metacharacter or a
+ * non-ASCII byte.
+ *
+ * Accepts a flake attribute path: `.`-separated segments of `[A-Za-z0-9_+-]`,
+ * with an optional trailing `^` output selector (`^*` or a comma-separated list
+ * of output names) and a length cap. Everything else is rejected. Returns the
+ * validated attr, or null if it is not a safe attribute path.
+ */
+const FLAKE_ATTR = /^[A-Za-z0-9_+-]+(?:\.[A-Za-z0-9_+-]+)*(?:\^(?:\*|[A-Za-z0-9_-]+(?:,[A-Za-z0-9_-]+)*))?$/;
+const MAX_FLAKE_ATTR_LEN = 255;
+
+export function sanitizeFlakeAttr(attr: unknown): string | null {
+  if (typeof attr !== "string") return null;
+  if (attr.length === 0 || attr.length > MAX_FLAKE_ATTR_LEN) return null;
+  if (!FLAKE_ATTR.test(attr)) return null;
+  return attr;
+}
