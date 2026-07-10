@@ -52,6 +52,25 @@ async function main(): Promise<void> {
   const expectPath = process.env.VEGA_EXPECT_STORE_PATH || undefined;
   const expectNarHash = process.env.VEGA_EXPECT_NARHASH || undefined;
 
+  // Mint the OIDC identity token and drop the minting capability from the
+  // environment BEFORE any nix invocation on attacker-chosen input. This build
+  // is UNTRUSTED (an attacker chose the flake ref) and the subflake containment
+  // check below runs `nix eval` on that repo, so the runner-identity minting
+  // endpoint must already be gone from the environment by then. Nothing the
+  // build or eval spawns can re-mint a token; the exchanged JWT lives only in
+  // `token`, and flakes evaluate in pure mode so `builtins.getEnv` cannot read
+  // it either. (Building untrusted code still warrants an ephemeral runner; see
+  // docs/external-builder.md.)
+  const token = await fetchActionsOidcToken(
+    {
+      requestUrl: process.env.ACTIONS_ID_TOKEN_REQUEST_URL,
+      requestToken: process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN,
+    },
+    audience,
+  );
+  delete process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+  delete process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+
   // Before building a subflake, verify the dir is a real, contained subdirectory
   // at this exact rev with no symlinked component, so a committed symlink cannot
   // steer this trusted reproducer outside the pinned source tree.
@@ -60,21 +79,6 @@ async function main(): Promise<void> {
   }
 
   const installable = lockedInstallable(provenance);
-  const token = await fetchActionsOidcToken(
-    {
-      requestUrl: process.env.ACTIONS_ID_TOKEN_REQUEST_URL,
-      requestToken: process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN,
-    },
-    audience,
-  );
-  // Critical: this build is UNTRUSTED (an attacker chose the flake ref). Drop the
-  // OIDC minting capability from the environment before building so nothing the
-  // build spawns can re-mint a runner-identity token. The exchanged JWT lives
-  // only in `token`; flakes also evaluate in pure mode, so `builtins.getEnv`
-  // cannot read it either. (Building untrusted code still warrants an ephemeral
-  // runner; see docs/external-builder.md.)
-  delete process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
-  delete process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
   const client = new ControlPlaneClient(controlPlane, token);
 
   console.log(`Reproducing ${installable} ...`);

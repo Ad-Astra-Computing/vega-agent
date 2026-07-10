@@ -246,11 +246,44 @@ function dumpCompressed(path: string, file: string): Promise<void> {
     const out = createWriteStream(file);
     dump.stdout.pipe(zstd.stdin);
     zstd.stdout.pipe(out);
-    const fail = (e: unknown) => reject(e instanceof Error ? e : new Error(String(e)));
+
+    // Resolve only once the file is fully written AND both children exited
+    // cleanly. A non-zero exit of `nix store dump-path` or `zstd` mid-stream
+    // would otherwise leave a truncated NAR that still gets hashed and uploaded.
+    let settled = false;
+    const fail = (e: unknown) => {
+      if (settled) return;
+      settled = true;
+      reject(e instanceof Error ? e : new Error(String(e)));
+    };
+    let fileDone = false;
+    let dumpDone = false;
+    let zstdDone = false;
+    const maybeResolve = () => {
+      if (!settled && fileDone && dumpDone && zstdDone) {
+        settled = true;
+        resolve();
+      }
+    };
+    const onExit =
+      (name: string, mark: () => void) =>
+      (code: number | null, signal: NodeJS.Signals | null) => {
+        if (code !== 0) {
+          fail(new Error(`${name} exited ${code === null ? `on signal ${signal}` : `with code ${code}`}`));
+          return;
+        }
+        mark();
+        maybeResolve();
+      };
     dump.on("error", fail);
     zstd.on("error", fail);
     out.on("error", fail);
-    out.on("finish", resolve);
+    dump.on("close", onExit("nix store dump-path", () => (dumpDone = true)));
+    zstd.on("close", onExit("zstd", () => (zstdDone = true)));
+    out.on("finish", () => {
+      fileDone = true;
+      maybeResolve();
+    });
   });
 }
 

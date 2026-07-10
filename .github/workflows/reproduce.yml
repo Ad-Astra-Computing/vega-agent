@@ -19,6 +19,10 @@ on:
       rev:
         description: "Locked commit revision to build at"
         required: true
+      dir:
+        description: "Subflake directory (?dir=), for a monorepo flake in a subdirectory (optional)"
+        required: false
+        default: ""
       expect_store_path:
         description: "Expected output store path (optional, for a divergence report)"
         required: false
@@ -38,6 +42,7 @@ on:
       flake_ref: { required: true, type: string }
       attr: { required: true, type: string }
       rev: { required: true, type: string }
+      dir: { required: false, type: string, default: "" }
       expect_store_path: { required: false, type: string, default: "" }
       expect_narhash: { required: false, type: string, default: "" }
       runner: { required: false, type: string, default: "ubuntu-latest" }
@@ -49,7 +54,7 @@ permissions:
 # Serialize duplicate reproductions of the same target instead of queueing many
 # identical builds; do not cancel an in-flight one.
 concurrency:
-  group: reproduce-${{ inputs.flake_ref }}-${{ inputs.attr }}-${{ inputs.rev }}-${{ inputs.runner }}
+  group: reproduce-${{ inputs.flake_ref }}-${{ inputs.dir }}-${{ inputs.attr }}-${{ inputs.rev }}-${{ inputs.runner }}
   cancel-in-progress: false
 
 jobs:
@@ -62,9 +67,17 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
         with:
+          # Pin the Nix release the installer fetches, so this signing-gate lane
+          # cannot be shifted by a change to the installer's default version.
+          source-tag: v3.21.0
           extra-conf: |
             experimental-features = nix-command flakes
             sandbox = true
+            # A build that cannot be sandboxed must fail, not run unsandboxed.
+            # Nix's default sandbox-fallback would silently drop isolation if
+            # sandbox setup failed, and this reproducer builds attacker-chosen
+            # flake refs whose byte agreement gates the master signing key.
+            sandbox-fallback = false
       - name: Set up Node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -79,6 +92,7 @@ jobs:
           VEGA_FLAKE_REF: ${{ inputs.flake_ref }}
           VEGA_ATTR: ${{ inputs.attr }}
           VEGA_REV: ${{ inputs.rev }}
+          VEGA_DIR: ${{ inputs.dir }}
           VEGA_EXPECT_STORE_PATH: ${{ inputs.expect_store_path }}
           VEGA_EXPECT_NARHASH: ${{ inputs.expect_narhash }}
         run: node_modules/.bin/tsx agent/reproduce.ts
