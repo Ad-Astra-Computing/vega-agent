@@ -191,11 +191,26 @@ export function decodeFrame(line: string): { req: Rpc } | { errorResponse: objec
 export async function runStdio(ctx: ToolContext): Promise<void> {
   process.stdin.setEncoding("utf8");
   let buf = "";
+  let discarding = false; // dropping the tail of an over-long, not-yet-delimited frame
   for await (const chunk of process.stdin as AsyncIterable<string>) {
     buf += chunk;
-    // Drop a runaway frame that never delimits, so memory stays bounded.
+    // Finish discarding a runaway frame: drop everything up to AND INCLUDING its
+    // terminating newline, then resume. Otherwise the frame's tail would be parsed
+    // as a fresh frame and emit spurious parse errors.
+    if (discarding) {
+      const end = buf.indexOf("\n");
+      if (end < 0) {
+        buf = ""; // no delimiter yet: keep discarding, hold no bytes
+        continue;
+      }
+      buf = buf.slice(end + 1);
+      discarding = false;
+    }
+    // Enter discard mode on a frame that exceeds the cap without a delimiter, so a
+    // runaway frame cannot exhaust memory.
     if (buf.length > MAX_FRAME && buf.indexOf("\n") < 0) {
       buf = "";
+      discarding = true;
       continue;
     }
     let nl: number;

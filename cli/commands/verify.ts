@@ -7,7 +7,8 @@ import { parseNarInfo } from "../../src/nix/narinfo.js";
 import { checkNarHash } from "../nar-check.js";
 import type { NixPublicKey } from "../../src/nix/types.js";
 import { trustedKeys, pickTrustedKey } from "../keys.js";
-import { verifyBuild, fullyVerified, type Fetcher, type VerifyResult } from "../verify-core.js";
+import { verifyBuild, fullyVerified, withRetry, type Fetcher, type VerifyResult } from "../verify-core.js";
+import { boundedFetcher } from "../mcp/runtime.js";
 
 const SHARED_KEY_NAME = "vega-cache-1";
 
@@ -189,7 +190,10 @@ export function registerVerify(program: Command): void {
         const sigNames = narInfo.sigs.map((s) => s.slice(0, s.indexOf(":")).trim()).filter(Boolean);
         const publicKey = await resolveKey(cacheUrl, sigNames, opts.publicKey);
 
-        const fetcher: Fetcher = (path) => fetch(`${cacheUrl}${path}`);
+        // Same hardened fetcher the MCP path uses: per-request timeout, a size
+        // bound against a hostile giant body, and retry on a transient 5xx so one
+        // blip mid-log-scan (up to thousands of entries) does not abort verify.
+        const fetcher: Fetcher = withRetry(boundedFetcher(cacheUrl, 4 * 1024 * 1024));
         const result: VerifyResult = await verifyBuild({
           fetcher,
           info: narInfo,

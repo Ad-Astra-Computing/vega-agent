@@ -276,6 +276,15 @@ export interface ReproduceVerdict {
   /** The validated store-path hash queried. */
   target: string;
   verdict: "allow" | "warn" | "deny";
+  /**
+   * Trust tier of the evidence behind `verdict`. Unlike vega_verify / vega_risk /
+   * vega_assess_change (which re-check a signature, the signed tree head, RFC 9162
+   * inclusion and the NAR hash), this verdict maps the pinned cache's self-reported
+   * `/api/status` with no cryptographic check, so it is only as trustworthy as the
+   * origin. Always "origin-asserted"; a consumer should weight it below the
+   * crypto-grounded tools' verdicts.
+   */
+  evidence: "origin-asserted";
   reproduction: { status: ReproStatus; agreeCount: number; diverged: boolean; inSharedCache: boolean };
   reasonCodes: string[];
   nextActions: string[];
@@ -315,6 +324,7 @@ export function assessReproduction(
   return {
     target: hash,
     verdict,
+    evidence: "origin-asserted",
     reproduction: { status: s.status, agreeCount: s.agreeCount, diverged, inSharedCache: s.inSharedCache },
     reasonCodes: [`reproduce.${s.status}`],
     nextActions,
