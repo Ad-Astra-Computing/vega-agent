@@ -227,6 +227,8 @@ describe("vega_reproduce", () => {
     expect(r.verdict).toBe("allow");
     expect(r.nextActions).toEqual([]);
     expect(r.reasonCodes).toEqual(["reproduce.reproducible"]);
+    // Marked origin-asserted so a consumer weights it below the crypto-grounded tools.
+    expect(r.evidence).toBe("origin-asserted");
   });
 
   it("denies a diverged build and flags non-reproducibility", () => {

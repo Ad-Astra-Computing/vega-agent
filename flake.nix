@@ -23,7 +23,7 @@
           nodejs = pkgs.nodejs_24;
           agent = pkgs.buildNpmPackage (finalAttrs: {
             pname = "vega-agent";
-            version = "0.12.0";
+            version = "0.13.0";
             src = ./.;
             inherit nodejs;
             npmDeps = pkgs.importNpmLock { npmRoot = finalAttrs.src; };
@@ -144,6 +144,10 @@
                 "RUNNER_DIST=${githubRunner}"
                 "VEGA_BUILDER_VERSION=${agent.version}"
                 "VEGA_NIX_REGINFO=/etc/vega/nix-registration"
+                # The buildEnv holding the whole baked closure. The entrypoint
+                # registers a Nix GC root for it on every boot so the in-container
+                # periodic GC cannot delete the paths the container needs to boot.
+                "VEGA_BUILDER_ROOT=${builderRoot}"
               ];
               Labels = {
                 "org.opencontainers.image.title" = "Vega builder";

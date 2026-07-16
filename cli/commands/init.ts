@@ -13,7 +13,7 @@ export const DEFAULT_ATTR = "packages.x86_64-linux.default";
 // the docs recipe; cli/commands/init.test.ts asserts the example file stays equal
 // to renderWorkflow(DEFAULT_ATTR), so these cannot drift apart silently.
 const CHECKOUT = "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"; // v7.0.0
-const AGENT = "Ad-Astra-Computing/vega-agent/agent@b7757ab80d86a1c18710836f4c38dfc127944eaa"; // v0.8.0
+const AGENT = "Ad-Astra-Computing/vega-agent/agent@2170753a7f63d07f1dc53ab24f97585ccece9a7c"; // v0.12.0
 
 /**
  * The canonical CI recipe with the build attribute substituted. Pure: the caller
@@ -57,7 +57,7 @@ jobs:
         with:
           persist-credentials: false # no git push; do not leave the token in .git/config
       - name: Build and publish to Vega
-        uses: ${AGENT} # v0.8.0
+        uses: ${AGENT} # v0.12.0
         with:
           # github.workspace is the checkout root, so the attestation's provenance
           # matches the repo and the output can be reproduced. Change the attribute

@@ -61,6 +61,21 @@ jobs:
   reproduce:
     runs-on: ${{ inputs.runner }}
     steps:
+      - name: Constrain runner
+        # workflow_call cannot use a `choice` input like workflow_dispatch, so a
+        # caller could pass an arbitrary `runner` label and steer this signing-gate
+        # reproduction onto operator-chosen hardware (e.g. a self-hosted runner),
+        # weakening the "fresh, independent, ephemeral runner" assumption the trust
+        # model rests on. Fail closed unless the label is a known GitHub-hosted
+        # ephemeral runner. The input is passed via env, not inlined into the
+        # script, so it cannot inject shell.
+        env:
+          RUNNER_INPUT: ${{ inputs.runner }}
+        run: |
+          case "$RUNNER_INPUT" in
+            ubuntu-latest|ubuntu-24.04|ubuntu-22.04|macos-latest|macos-15|macos-14|macos-13) ;;
+            *) echo "refusing to reproduce on non-allowlisted runner '$RUNNER_INPUT'" >&2; exit 1 ;;
+          esac
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false # no git push; do not leave the token in .git/config

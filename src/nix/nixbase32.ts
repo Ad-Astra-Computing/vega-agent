@@ -35,6 +35,12 @@ export function encodeNixBase32(bytes: Uint8Array): string {
 
 export function decodeNixBase32(s: string): Uint8Array {
   const bytesLen = Math.floor((s.length * 5) / 8);
+  // Reject lengths that are not a valid encoding of any byte count. Without this,
+  // an impossible length (e.g. a single char) floors to a short bytesLen and the
+  // decode silently returns truncated bytes instead of failing.
+  if (encodedLen(bytesLen) !== s.length) {
+    throw new Error(`invalid nixbase32 length: ${s.length}`);
+  }
   const bytes = new Uint8Array(bytesLen);
   for (let n = 0; n < s.length; n++) {
     const code = s.charCodeAt(s.length - 1 - n);

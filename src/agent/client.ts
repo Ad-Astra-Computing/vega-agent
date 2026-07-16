@@ -210,6 +210,9 @@ export class ControlPlaneClient {
       }
       if (res !== undefined) {
         if (res.ok) return res;
+        // Not returned to the caller: drain the body so undici frees the
+        // connection instead of pinning the keep-alive pool until GC.
+        void res.body?.cancel();
         if (!RETRYABLE_STATUS.has(res.status)) throw new HttpError(res.status, `${label} failed: ${res.status}`);
         lastErr = new Error(`${label} failed: ${res.status}`);
         if (attempt < this.retry.attempts) await this.backoff(attempt, res.headers.get("retry-after"));
@@ -245,11 +248,13 @@ export class ControlPlaneClient {
    * `sha256Base64` must equal the value the presigned URL was signed with (see
    * {@link uploadUrl}); R2 rejects the PUT if the sent bytes disagree. */
   async putNar(presignedUrl: string, body: BodyInit, sha256Base64: string): Promise<void> {
-    await this.fetchWithRetry(
+    const res = await this.fetchWithRetry(
       presignedUrl,
       { method: "PUT", body, headers: { "x-amz-checksum-sha256": sha256Base64 } },
       "nar upload",
     );
+    // The PUT response body is unused; drain it so the connection is released.
+    void res.body?.cancel();
   }
 
   /**

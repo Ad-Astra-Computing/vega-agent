@@ -197,6 +197,17 @@ describe("verifyBuild", () => {
     const r = await verifyBuild({ fetcher, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1", maxScan: 1 });
     expect(r.transparency.found).toBe(false);
     expect(r.transparency.scanned).toBe(1);
-    expect(r.transparency.note).toMatch(/first 1 of/);
+    expect(r.transparency.note).toMatch(/most recent 1 of/);
+  });
+
+  it("finds a recently promoted leaf even when the log is larger than maxScan (newest-first)", async () => {
+    // The promotion leaf is at index 2 of 4; scanning newest-first with a cap of
+    // 2 reaches indexes 3 then 2, so it is found. An oldest-first scan with the
+    // same cap would stop at indexes 0,1 and wrongly report the build absent.
+    const { fetcher, pub, info } = scenario();
+    const r = await verifyBuild({ fetcher, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1", maxScan: 2 });
+    expect(r.transparency.found).toBe(true);
+    expect(r.transparency.index).toBe(2);
+    expect(r.transparency.scanned).toBe(2);
   });
 });
