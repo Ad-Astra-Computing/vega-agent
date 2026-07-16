@@ -13,6 +13,7 @@ import { stat, lstat, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import type { RawPathInfo, NarArtifact } from "../src/agent/narinfo.js";
 import { storePathHash } from "../src/nix/store-path.js";
+import { encodeNixBase32 } from "../src/nix/nixbase32.js";
 
 const exec = promisify(execFile);
 
@@ -78,10 +79,22 @@ export async function assertSubflakeDirContained(
 }
 const MAX_BUFFER = 1 << 28; // 256 MiB for large path-info closures
 
-/** Normalize any nix hash string to narinfo form `sha256:<nixbase32>`. */
+/** Normalize any nix hash string to narinfo form `sha256:<nixbase32>`.
+ *
+ * Modern `nix path-info --json` emits SRI (`sha256-<base64>`), so this is called
+ * for effectively every path in the closure. Convert in-process: shelling out to
+ * `nix hash convert` per path spawned one child per closure entry (thousands on a
+ * system closure, run concurrently), risking EMFILE after the build. The `nix`
+ * fallback remains only for an unrecognized format. */
 async function toNarinfoHash(hash: string): Promise<string> {
   if (hash.startsWith("sha256:")) return hash; // already nixbase32-form
-  // SRI (`sha256-<base64>`) or other — let nix convert it.
+  if (hash.startsWith("sha256-")) {
+    // SRI: base64 of the 32 raw digest bytes -> nixbase32, no subprocess.
+    const raw = Buffer.from(hash.slice("sha256-".length), "base64");
+    if (raw.length !== 32) throw new Error(`unexpected sha256 SRI digest length: ${raw.length}`);
+    return `sha256:${encodeNixBase32(new Uint8Array(raw))}`;
+  }
+  // Unrecognized format — let nix convert it.
   const { stdout } = await exec("nix", [
     "hash",
     "convert",
