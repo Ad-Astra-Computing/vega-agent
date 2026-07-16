@@ -170,6 +170,18 @@ async function main(): Promise<void> {
   const controlPlane = requireEnv("VEGA_URL");
   const audience = process.env.VEGA_AUDIENCE || controlPlane;
 
+  // Capture the runner's OIDC request credential and DROP it from the environment
+  // up front, BEFORE any nix invocation (currentSystem / flake show below shell
+  // out to nix on the checked-out repo). The credential lives only in this
+  // closure; the provider re-mints a fresh JWT on demand, so a long build never
+  // leaves an expired token at push. Dropping it before the first nix call, not
+  // just before the build, means no nix subprocess ever inherits the minting
+  // endpoint (mirrors the reproducer's ordering).
+  const requestUrl = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+  const requestToken = process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+  delete process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+  delete process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+
   // vega.yaml lives in the checked-out repo; GITHUB_WORKSPACE is its root.
   const flakeDir = process.env.GITHUB_WORKSPACE || process.cwd();
   const config = await readVegaConfig(flakeDir);
@@ -196,14 +208,9 @@ async function main(): Promise<void> {
     );
   }
 
-  // Capture the runner's OIDC request credential, then DROP it from the
-  // environment before shelling out to nix, so nothing a build spawns can mint a
-  // token. The credential lives only in this closure; the provider re-mints a
-  // fresh JWT on demand, so a long build never leaves an expired token at push.
-  const requestUrl = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
-  const requestToken = process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
-  delete process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
-  delete process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+  // The OIDC request credential was captured and dropped from the environment at
+  // the top of main(), before any nix invocation. Build the provider from the
+  // captured closure values.
   const provider = new OidcTokenProvider(() =>
     fetchActionsOidcToken({ requestUrl, requestToken }, audience),
   );
