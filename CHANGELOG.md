@@ -6,6 +6,48 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-16
+
+### Fixed
+
+- `vega verify`, and the MCP `vega_risk` and `vega_assess_change` tools, scanned
+  the transparency log oldest-first. Once the log grew past the scan cap a
+  recently promoted build was reported as absent and denied. The scan now runs
+  newest-first, so a valid build is found regardless of the log's size.
+- A NAR download that failed mid-stream raised an unhandled error that terminated
+  the process, including the long-lived `vega mcp` server. The decompression now
+  surfaces the failure as a normal error, reported as "not checked" rather than a
+  false hash mismatch.
+- A reproduction of a long build minted a single OIDC token up front and then
+  failed at upload with a 401 once it expired. The reproducer now re-mints the
+  token on demand, matching the build agent.
+- `vega verify --no-nar` no longer states that the bytes match when the NAR check
+  was skipped.
+- `vega dashboard` now prints the sign-in URL.
+- `vega init` scaffolds the current agent action pin instead of a stale one.
+
+### Changed
+
+- `vega verify` fetches now apply a timeout, bound the response size and retry a
+  transient failure, matching the MCP path.
+- `vega_reproduce` reports its evidence tier as origin-asserted, distinguishing it
+  from the signature-grounded `vega_verify`, `vega_risk` and `vega_assess_change`.
+- The agent derives path-info hashes in process instead of running `nix hash
+  convert` once per closure path, so a large closure no longer risks exhausting
+  file descriptors.
+
+### Security
+
+- The reusable reproduce workflow rejects a runner label that is not a known
+  GitHub-hosted runner, so a caller cannot steer a signing-gate reproduction onto
+  other hardware.
+- The reproducer validates the flake attribute it is asked to build, and the cache
+  agent removes the OIDC minting credential from the environment before evaluating
+  any flake.
+- The builder image registers a Nix garbage-collection root for its own runtime
+  closure, so the in-container store GC can no longer delete the entrypoint and
+  leave the container unable to start.
+
 ## [0.12.0] - 2026-06-22
 
 ### Added
