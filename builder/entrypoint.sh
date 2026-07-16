@@ -189,6 +189,31 @@ init_store() {
   fi
 }
 
+# Register a persistent GC root for the builder's OWN runtime closure, so the
+# in-container periodic nix-collect-garbage (run_gc) can never delete a path the
+# container needs to boot. /nix is a named volume; nothing rooted the baked
+# closure, so the GC eventually removed the entrypoint's store path, leaving
+# /bin/vega-builder-entrypoint a dangling symlink and the container exiting 127
+# (and unrecoverable under Docker's restart policy). Runs every boot, so an
+# upgraded image roots its own (new) closure rather than depending on the seeded
+# one. VEGA_BUILDER_ROOT (the buildEnv baked into the image) transitively
+# references the entrypoint, nix and the runner, so rooting it protects the whole
+# boot closure; the entrypoint and runner are rooted directly too as a fallback.
+protect_boot_closure() {
+  mkdir -p /nix/var/nix/gcroots
+  if [ -n "${VEGA_BUILDER_ROOT:-}" ] && [ -e "${VEGA_BUILDER_ROOT}" ]; then
+    ln -sfn "${VEGA_BUILDER_ROOT}" /nix/var/nix/gcroots/vega-builder-root
+  fi
+  local self
+  self="$(readlink -f "$0" 2>/dev/null || true)"
+  case "$self" in
+    /nix/store/*) ln -sfn "$self" /nix/var/nix/gcroots/vega-builder-entrypoint ;;
+  esac
+  if [ -n "${RUNNER_DIST:-}" ] && [ -e "${RUNNER_DIST}" ]; then
+    ln -sfn "${RUNNER_DIST}" /nix/var/nix/gcroots/vega-builder-runner
+  fi
+}
+
 # Minimal single-user Nix state for an ephemeral root container. The image ships
 # the toolchain closure; a build fetches the rest from substituters. The sandbox
 # mode is auto-detected (see resolve_sandbox): on by default when the container
@@ -198,6 +223,8 @@ setup_nix() {
            /nix/var/nix/temproots /nix/var/nix/userpool /etc/nix
   # Init + register the baked closure before any probe or build needs it.
   init_store
+  # Root the boot closure so the periodic GC cannot brick the container.
+  protect_boot_closure
   # Respect an operator-mounted nix.conf: we do not rewrite it. We still enforce
   # the VEGA_NIX_SANDBOX=true contract (a `true` request must not run unsandboxed
   # because the mounted config disabled it).
