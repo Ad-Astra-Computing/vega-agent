@@ -48,7 +48,7 @@ export function registerDashboard(program: Command): void {
         info(url);
         return;
       }
-      star(`Opening your dashboard...\n  ${url}`);
+      info(star(`Opening your dashboard...\n  ${url}`));
       openInBrowser(url);
     });
 }

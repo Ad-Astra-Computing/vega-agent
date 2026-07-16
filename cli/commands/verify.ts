@@ -242,7 +242,11 @@ export function registerVerify(program: Command): void {
 
         if (t.note && sig.scope !== "shared") info(`\n  ${pc.gray(t.note)}`);
         if (verified) {
-          success("Verified: signed, in the public log, and the bytes match.");
+          success(
+            nar !== null
+              ? "Verified: signed, in the public log, and the bytes match."
+              : "Verified: signed and in the public log (NAR bytes not checked: --no-nar).",
+          );
         } else if (tenantOk) {
           // Tenant-scope verification: signed by this cache's own tenant key and
           // the bytes match. This is a tenant/self check, NOT independent
