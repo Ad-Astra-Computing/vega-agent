@@ -94,7 +94,7 @@ async function toNarinfoHash(hash: string): Promise<string> {
     if (raw.length !== 32) throw new Error(`unexpected sha256 SRI digest length: ${raw.length}`);
     return `sha256:${encodeNixBase32(new Uint8Array(raw))}`;
   }
-  // Unrecognized format — let nix convert it.
+  // Unrecognized format: let nix convert it.
   const { stdout } = await exec("nix", [
     "hash",
     "convert",

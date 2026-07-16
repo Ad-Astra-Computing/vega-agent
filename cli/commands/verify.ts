@@ -191,8 +191,9 @@ export function registerVerify(program: Command): void {
         const publicKey = await resolveKey(cacheUrl, sigNames, opts.publicKey);
 
         // Same hardened fetcher the MCP path uses: per-request timeout, a size
-        // bound against a hostile giant body, and retry on a transient 5xx so one
-        // blip mid-log-scan (up to thousands of entries) does not abort verify.
+        // bound against a hostile giant body, and retry on a transient 5xx so a
+        // single failed request mid-log-scan (up to thousands of entries) does not
+        // abort verify.
         const fetcher: Fetcher = withRetry(boundedFetcher(cacheUrl, 4 * 1024 * 1024));
         const result: VerifyResult = await verifyBuild({
           fetcher,
