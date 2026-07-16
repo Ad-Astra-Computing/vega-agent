@@ -1,5 +1,5 @@
 import { createZstdDecompress } from "node:zlib";
-import { Readable } from "node:stream";
+import { Readable, compose } from "node:stream";
 import { verifyNarHash } from "../src/nix/verify.js";
 import type { NarInfo } from "../src/nix/types.js";
 
@@ -32,13 +32,25 @@ export async function checkNarHash(
   if (!res.ok || res.body === null) return { ok: false, checked: false, detail: `NAR fetch failed (HTTP ${res.status})` };
   let stream: ReadableStream<Uint8Array>;
   if (info.compression === "zstd") {
+    // `compose`, not `.pipe()`: a mid-stream error on the body (a dropped
+    // connection, or the caller's fetch timeout firing after headers) or in the
+    // decompressor propagates to the composed stream. With `.pipe()` it would
+    // surface as an unhandled 'error' event and crash the process, which is fatal
+    // for the long-lived `vega mcp` server. The catch below turns it into a
+    // "not checked" transport result, never a false mismatch.
     const compressed = Readable.fromWeb(res.body as Parameters<typeof Readable.fromWeb>[0]);
-    stream = Readable.toWeb(compressed.pipe(createZstdDecompress())) as ReadableStream<Uint8Array>;
+    stream = Readable.toWeb(compose(compressed, createZstdDecompress())) as ReadableStream<Uint8Array>;
   } else {
     stream = res.body;
   }
-  const r = await verifyNarHash(info.narHash, stream);
-  return r.ok
-    ? { ok: true, checked: true, detail: r.actual }
-    : { ok: false, checked: true, detail: `signed ${r.expected}, content ${r.actual}` };
+  try {
+    const r = await verifyNarHash(info.narHash, stream);
+    return r.ok
+      ? { ok: true, checked: true, detail: r.actual }
+      : { ok: false, checked: true, detail: `signed ${r.expected}, content ${r.actual}` };
+  } catch (e) {
+    // A transport/decompression failure means the byte check could not be
+    // performed, not that the hash disagreed: report `checked: false`.
+    return { ok: false, checked: false, detail: `NAR stream error: ${e instanceof Error ? e.message : String(e)}` };
+  }
 }

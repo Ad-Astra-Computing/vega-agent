@@ -15,10 +15,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fetchActionsOidcToken } from "../src/agent/oidc.js";
+import { OidcTokenProvider } from "../src/agent/token-provider.js";
 import { ControlPlaneClient } from "../src/agent/client.js";
 import { buildAttestBody } from "../src/agent/narinfo.js";
 import { lockedInstallable } from "../src/agent/reproduce.js";
-import { sanitizeFlakeDir } from "../src/nix/flake-dir.js";
+import { sanitizeFlakeDir, sanitizeFlakeAttr } from "../src/nix/flake-dir.js";
 import type { BuildProvenance } from "../src/trust/policy.js";
 import { sha256NixHashToBase64 } from "../src/nix/hash.js";
 import { nixBuild, pathInfoOutputs, makeNar, assertSubflakeDirContained } from "./nix.js";
@@ -32,9 +33,17 @@ function requireEnv(name: string): string {
 async function main(): Promise<void> {
   const controlPlane = requireEnv("VEGA_URL");
   const audience = process.env.VEGA_AUDIENCE || controlPlane;
+  // Sanitize the flake attribute before it steers what this trusted reproducer
+  // builds (`...#<attr>`). Like the subflake dir, VEGA_ATTR is attester-supplied
+  // via the dispatch inputs, so a value that is not a plain flake attribute path
+  // is rejected, not built. Defense in depth: the attr sits after the `#` and
+  // every nix call uses `--`, but the guard must actually run on the input.
+  const rawAttr = requireEnv("VEGA_ATTR");
+  const attr = sanitizeFlakeAttr(rawAttr);
+  if (attr === null) throw new Error(`refusing unsafe flake attr: ${JSON.stringify(rawAttr)}`);
   const provenance: BuildProvenance = {
     flakeRef: requireEnv("VEGA_FLAKE_REF"),
-    attr: requireEnv("VEGA_ATTR"),
+    attr,
     rev: requireEnv("VEGA_REV"),
   };
   // Optional subflake directory. Re-sanitize here as defense in depth (the edge
@@ -57,19 +66,27 @@ async function main(): Promise<void> {
   // is UNTRUSTED (an attacker chose the flake ref) and the subflake containment
   // check below runs `nix eval` on that repo, so the runner-identity minting
   // endpoint must already be gone from the environment by then. Nothing the
-  // build or eval spawns can re-mint a token; the exchanged JWT lives only in
-  // `token`, and flakes evaluate in pure mode so `builtins.getEnv` cannot read
-  // it either. (Building untrusted code still warrants an ephemeral runner; see
+  // build or eval spawns can re-mint a token; the request credential lives only
+  // in this closure and the exchanged JWT never re-enters the environment, and
+  // flakes evaluate in pure mode so `builtins.getEnv` cannot read it either.
+  // (Building untrusted code still warrants an ephemeral runner; see
   // docs/external-builder.md.)
-  const token = await fetchActionsOidcToken(
-    {
-      requestUrl: process.env.ACTIONS_ID_TOKEN_REQUEST_URL,
-      requestToken: process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN,
-    },
-    audience,
-  );
+  //
+  // Capture the request credential into a closure, then drop it from the
+  // environment; the provider re-mints a fresh JWT on demand. A reproduction is
+  // precisely the long-build lane, so a single up-front token would expire
+  // during `nix build` and 401 at upload/attest after the whole rebuild. This
+  // mirrors agent/main.ts.
+  const requestUrl = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+  const requestToken = process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
   delete process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
   delete process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+  const provider = new OidcTokenProvider(() =>
+    fetchActionsOidcToken({ requestUrl, requestToken }, audience),
+  );
+  // Mint once up front to fail fast if `id-token: write` is missing, rather than
+  // only after a long build. The provider re-mints when the token nears expiry.
+  await provider.get();
 
   // Before building a subflake, verify the dir is a real, contained subdirectory
   // at this exact rev with no symlinked component, so a committed symlink cannot
@@ -79,7 +96,7 @@ async function main(): Promise<void> {
   }
 
   const installable = lockedInstallable(provenance);
-  const client = new ControlPlaneClient(controlPlane, token);
+  const client = new ControlPlaneClient(controlPlane, (force) => provider.get(force));
 
   console.log(`Reproducing ${installable} ...`);
   await nixBuild(installable);

@@ -9,7 +9,7 @@
 // logic is the tested src/nix/verify.ts.
 
 import { createZstdDecompress } from "node:zlib";
-import { Readable } from "node:stream";
+import { Readable, compose } from "node:stream";
 import { parseNarInfo } from "../src/nix/narinfo.js";
 import { verifyNarHash } from "../src/nix/verify.js";
 
@@ -31,10 +31,14 @@ async function main(): Promise<void> {
     throw new Error(`NAR fetch failed: ${narRes.status}`);
   }
 
-  // compressed web stream -> node stream -> zstd decompress -> web stream
+  // compressed web stream -> node stream -> zstd decompress -> web stream.
+  // `compose` (not `.pipe()`) propagates a mid-stream body/decompressor error to
+  // the composed stream so it rejects `verifyNarHash` instead of raising an
+  // unhandled 'error' event that crashes the process.
   const compressed = Readable.fromWeb(narRes.body as Parameters<typeof Readable.fromWeb>[0]);
-  const decompressed = compressed.pipe(createZstdDecompress());
-  const uncompressed = Readable.toWeb(decompressed) as ReadableStream<Uint8Array>;
+  const uncompressed = Readable.toWeb(
+    compose(compressed, createZstdDecompress()),
+  ) as ReadableStream<Uint8Array>;
 
   const result = await verifyNarHash(info.narHash, uncompressed);
   if (result.ok) {

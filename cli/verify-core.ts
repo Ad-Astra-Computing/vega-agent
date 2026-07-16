@@ -254,15 +254,20 @@ export async function verifyBuild(opts: VerifyOptions): Promise<VerifyResult> {
   result.transparency.sthVerified = verifySth(publicKey, sth);
 
   // 3. Locate the promotion leaf for this exact build by scanning the log. The
-  // scan is bounded by an explicit cap or MAX_SCAN_DEFAULT, never by the cache's
-  // self-reported size alone (a hostile cache could claim a huge size).
+  // log is append-only (index 0 is the oldest entry), so scan NEWEST-first: a
+  // build's promotion leaf is appended at the end, and once the log outgrows the
+  // scan cap an oldest-first walk would never reach recent promotions and would
+  // wrongly report a valid build as absent. The scan is bounded by an explicit
+  // cap or MAX_SCAN_DEFAULT, never by the cache's self-reported size alone (a
+  // hostile cache could claim a huge size).
   const size = Number.isFinite(sth.size) && sth.size > 0 ? Math.floor(sth.size) : 0;
   const cap = opts.maxScan !== undefined && opts.maxScan > 0 ? Math.floor(opts.maxScan) : MAX_SCAN_DEFAULT;
   const limit = Math.min(cap, size);
   let index: number | null = null;
   let entryData: string | null = null;
-  for (let i = 0; i < limit; i++) {
-    result.transparency.scanned = i + 1;
+  for (let n = 0; n < limit; n++) {
+    const i = size - 1 - n; // newest entry first
+    result.transparency.scanned = n + 1;
     const entry = (await getJson(fetcher, `/log/entry/${i}`)) as { index: number; data: string };
     const leaf = parseLeaf(entry.data);
     if (leaf && leafBindsNarInfo(leaf, info)) {
@@ -274,7 +279,7 @@ export async function verifyBuild(opts: VerifyOptions): Promise<VerifyResult> {
   if (index === null || entryData === null) {
     result.transparency.note =
       limit < sth.size
-        ? `no matching promotion leaf in the first ${limit} of ${sth.size} entries`
+        ? `no matching promotion leaf in the most recent ${limit} of ${sth.size} entries`
         : `no promotion leaf for this build in the log (${sth.size} entries)`;
     return result;
   }
