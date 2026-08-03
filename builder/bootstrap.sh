@@ -25,8 +25,12 @@ real="/bin/vega-builder-entrypoint"
 # any labeled diagnosis. Only [ , echo and exec are ash builtins.
 bb="/bin/busybox"
 
-# test -e follows symlinks: false for a dangling link.
+# test -e follows symlinks: false for a dangling link. The line is the fast
+# path's positive attestation: without it a healthy boot and an inert shim
+# look identical in the log, and a mechanism observable only when it fires
+# cannot be trusted from the outside.
 if [ -e "$real" ]; then
+  echo "vega-builder: boot shim: store complete, direct handoff" >&2 || true
   exec "$real" "$@"
 fi
 
@@ -35,7 +39,7 @@ if [ ! -d /nix-seed/store ]; then
   exit 64
 fi
 
-echo "vega-builder: /nix does not contain this image's store (a persistent volume from an older image is mounted); seeding the baked store copy" >&2
+echo "vega-builder: /nix does not contain this image's store (a persistent volume from an older image is mounted); seeding the baked store copy" >&2 || true
 failed=0
 "$bb" mkdir -p /nix/store || failed=1
 # Copy per store path, not one recursive copy of the seed root: busybox cp -n
