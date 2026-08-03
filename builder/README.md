@@ -51,17 +51,17 @@ mint it with `gh` (reuses your existing login, nothing to create):
 ```
 TOKEN_FILE=$(mktemp)   # mktemp creates it mode 0600
 gh api --method POST \
-  repos/jasonodoom/nixos-configs/actions/runners/registration-token --jq .token \
+  repos/<owner>/<repo>/actions/runners/registration-token --jq .token \
   > "$TOKEN_FILE"
 chmod 0400 "$TOKEN_FILE"
 
 cid=$(docker create --restart=unless-stopped --name vega-runner \
   --memory=12g --memory-swap=12g --cpus=4 \
   -e VEGA_MODE=runner \
-  -e GITHUB_OWNER=jasonodoom \
-  -e GITHUB_REPOSITORY=nixos-configs \
+  -e GITHUB_OWNER=<owner> \
+  -e GITHUB_REPOSITORY=<repo> \
   -e GITHUB_RUNNER_TOKEN_FILE=/home/runner/.runner-token \
-  -e GITHUB_RUNNER_LABELS=self-hosted,vega-perdurabo \
+  -e GITHUB_RUNNER_LABELS=self-hosted,vega-<host> \
   "$DIGEST")
 docker cp "$TOKEN_FILE" "$cid:/home/runner/.runner-token"
 rm -f "$TOKEN_FILE"   # host copy gone; the entrypoint deletes the in-container
@@ -108,6 +108,19 @@ Notes:
   survives container *recreation*, you must `docker volume rm` it whenever you
   update the image; the safer default is no `/nix` volume, with `reuse-cache`
   substituting prior builds from your tenant.
+
+  If you run with a `/nix` volume anyway: the entrypoint re-registers the baked
+  closure in the Nix database on every boot (`nix-store --load-db` from the
+  image's registration), so store paths copied into the volume from the image
+  (Docker's empty-volume seeding, or a manual reseed after an image update)
+  become valid, GC-safe paths at the next start. A boot preflight then verifies
+  the runner's own closure is present and registered and refuses to start
+  otherwise: a runner with a broken runtime would otherwise stay registered and
+  keep accepting jobs it cannot execute, failing each one at GitHub's
+  ten-minute no-communication timeout, which is worse than being offline
+  (queued jobs fail instead of waiting). The periodic GC has the same backstop:
+  if the runner's runtime ever disappears from the store, the container stops
+  instead of limping.
 - A persistent runner garbage-collects its store on a schedule so `/nix` does not
   grow without bound (it otherwise accumulates every path it ever built or
   substituted). The entrypoint runs `nix-collect-garbage --delete-older-than 7d`
@@ -136,18 +149,30 @@ Notes:
   operator-mounted `/etc/nix/nix.conf` is not rewritten (no probe); with
   `VEGA_NIX_SANDBOX=true` the contract still holds, so the container exits if
   the mounted config's effective `sandbox` is not `true`.
-- To pull heavy dependencies from a trusted upstream cache instead of building
-  them, pass `-e VEGA_EXTRA_SUBSTITUTERS=...` and
-  `-e VEGA_EXTRA_TRUSTED_PUBLIC_KEYS=...`.
+- The generated `/etc/nix/nix.conf` substitutes from `https://cache.nixos.org`
+  and `https://vega-cache.dev` (with both public keys trusted), so the runner
+  can reuse outputs it previously published to Vega instead of rebuilding them.
+  To pull from additional caches (an upstream cache, your repo's cachix cache),
+  pass `-e VEGA_EXTRA_SUBSTITUTERS=...` and
+  `-e VEGA_EXTRA_TRUSTED_PUBLIC_KEYS=...` (space-separated lists). Example for
+  a repo with its own cachix cache:
+
+  ```
+  -e VEGA_EXTRA_SUBSTITUTERS=https://<your-cache>.cachix.org \
+  -e VEGA_EXTRA_TRUSTED_PUBLIC_KEYS=<your-cache>.cachix.org-1:<public key> \
+  ```
+
+  Extra entries only ever add substitution sources: a key admits only paths
+  signed by it, so an unavailable or wrong cache is a miss, not a trust change.
 - The bundled runner has auto-update disabled (`--disableupdate`); rebuild and
   re-pull the image to update the runner version.
 
 ## Point the workflow at it
 
-In `nixos-configs/.github/workflows/vega-cache.yml`, change perdurabo's matrix
-entry from `os: ubuntu-latest` to `runs-on: [self-hosted, vega-perdurabo]` (label
-match). Keep the workflow push-only: never let a public fork PR target a
-self-hosted runner.
+In your repo's workflow, change the job (or its matrix entry) from
+`runs-on: ubuntu-latest` to `runs-on: [self-hosted, vega-<host>]` so the label
+set matches `GITHUB_RUNNER_LABELS`. Keep the workflow push-only: never let a
+public fork PR target a self-hosted runner.
 
 ## What to watch (likely failure order)
 
@@ -156,9 +181,10 @@ self-hosted runner.
 2. Runner refuses to run as root without `RUNNER_ALLOW_RUNASROOT=1` (the entrypoint
    sets it).
 3. `nix build` fails on missing state: the entrypoint runs `nix-store --init`,
-   loads the baked closure registration (`nix-store --load-db` from
-   `VEGA_NIX_REGINFO`, so a sandboxed build can mount each input's full closure)
-   and writes `/etc/nix/nix.conf`.
+   loads the baked closure registration on every boot (`nix-store --load-db`
+   from `VEGA_NIX_REGINFO`, so a sandboxed build can mount each input's full
+   closure and the baked paths are valid, GC-safe store paths) and writes
+   `/etc/nix/nix.conf`.
 4. node24: every action in the workflow must be node24-capable
    (`actions/checkout@v5+`, etc.); a node20-only action fails on this runner.
 5. Sandbox setup errors: the entrypoint auto-detects this and falls back to
