@@ -13,6 +13,18 @@ set -euo pipefail
 
 VERSION="${VEGA_BUILDER_VERSION:-dev}"
 NIXOS_CACHE_KEY="cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
+# The Vega cache itself is a default substituter: a builder that publishes to
+# Vega should also substitute from it, or the box that builds our own closures
+# recompiles its own prior outputs from source. trusted-public-keys only admits
+# paths signed by the key, so a cache miss is a miss, never a trust widening.
+# Deployment-specific caches (e.g. a repo's cachix cache) belong in
+# VEGA_EXTRA_SUBSTITUTERS / VEGA_EXTRA_TRUSTED_PUBLIC_KEYS, not baked here.
+VEGA_CACHE_URL="https://vega-cache.dev"
+VEGA_CACHE_PUBKEY="vega-cache-1:cPagS1g69NQGwlBCyTTeKav/NhlN8a7ixuj2uLOkHrQ="
+# Nix state lives here. A plain variable (not an env knob): the test harness
+# reassigns it after sourcing, and an environment override would desync the
+# script's gcroots and db checks from the state directory Nix actually uses.
+NIX_STATE="/nix/var/nix"
 
 banner() {
   # On a TTY only, and never when VEGA_NO_BANNER is set, so machine-readable
@@ -173,19 +185,22 @@ enforce_required_sandbox() {
 # closure. The registration (VEGA_NIX_REGINFO, baked into the image) records each
 # store path's references, so a SANDBOXED build can mount each input's full
 # closure; without it the sandboxed builder cannot find its interpreter (glibc)
-# and fails with "No such file or directory". The marker is keyed by the
-# registration's content hash, so a persisted /nix DB from an OLDER image (whose
-# baked closure differs) is re-registered rather than skipped.
+# and fails with "No such file or directory".
+#
+# The load runs on EVERY boot, unconditionally. An earlier version skipped it
+# behind a marker file keyed by the registration's content hash, which broke the
+# persistent-/nix-volume recovery path: after a GC deleted the baked paths,
+# copying them back out of the image restored the FILES but not their database
+# entries, and the surviving marker meant the entries were never re-created. An
+# unregistered path is not a valid store path, so the next GC deleted the copies
+# again and a gcroot pointing at one was skipped as an invalid root. load-db is
+# a single cheap sqlite transaction over the baked closure and is idempotent, so
+# re-running it every boot always converges the database to cover the closure,
+# whatever state the volume arrived in.
 init_store() {
-  [ -e /nix/var/nix/db/db.sqlite ] || NIX_CONFIG='build-users-group =' nix-store --init
+  [ -e "${NIX_STATE}/db/db.sqlite" ] || NIX_CONFIG='build-users-group =' nix-store --init
   if [ -n "${VEGA_NIX_REGINFO:-}" ] && [ -e "${VEGA_NIX_REGINFO}" ]; then
-    local sig marker
-    sig="$(sha256sum "${VEGA_NIX_REGINFO}" | cut -c1-32)"
-    marker="/nix/var/nix/db/.vega-registered-${sig}"
-    if [ ! -e "$marker" ]; then
-      NIX_CONFIG='build-users-group =' nix-store --load-db < "${VEGA_NIX_REGINFO}" \
-        && : > "$marker"
-    fi
+    NIX_CONFIG='build-users-group =' nix-store --load-db < "${VEGA_NIX_REGINFO}"
   fi
 }
 
@@ -200,18 +215,90 @@ init_store() {
 # references the entrypoint, nix and the runner, so rooting it protects the whole
 # boot closure; the entrypoint and runner are rooted directly too as a fallback.
 protect_boot_closure() {
-  mkdir -p /nix/var/nix/gcroots
+  mkdir -p "${NIX_STATE}/gcroots"
   if [ -n "${VEGA_BUILDER_ROOT:-}" ] && [ -e "${VEGA_BUILDER_ROOT}" ]; then
-    ln -sfn "${VEGA_BUILDER_ROOT}" /nix/var/nix/gcroots/vega-builder-root
+    ln -sfn "${VEGA_BUILDER_ROOT}" "${NIX_STATE}/gcroots/vega-builder-root"
   fi
   local self
   self="$(readlink -f "$0" 2>/dev/null || true)"
   case "$self" in
-    /nix/store/*) ln -sfn "$self" /nix/var/nix/gcroots/vega-builder-entrypoint ;;
+    /nix/store/*) ln -sfn "$self" "${NIX_STATE}/gcroots/vega-builder-entrypoint" ;;
   esac
   if [ -n "${RUNNER_DIST:-}" ] && [ -e "${RUNNER_DIST}" ]; then
-    ln -sfn "${RUNNER_DIST}" /nix/var/nix/gcroots/vega-builder-runner
+    ln -sfn "${RUNNER_DIST}" "${NIX_STATE}/gcroots/vega-builder-runner"
   fi
+}
+
+# Refuse to hand control to the runner unless the container can actually execute
+# a job. A gcroot only holds when its target is a VALID (database-registered)
+# store path; an invalid root is skipped and its target garbage-collected. The
+# observed failure of a broken boot closure is silent and worse than being
+# offline: Runner.Listener keeps running on its own deleted-but-open files, so
+# the runner stays registered and keeps ACCEPTING jobs, while Runner.Worker can
+# no longer spawn and every job dies at GitHub's ten-minute no-communication
+# timeout. Failing here keeps the runner offline instead, so queued jobs wait.
+# Checks that each root exists on disk, that Nix considers it valid AND that
+# every path in its closure is actually present (load-db registers database
+# rows without touching files, so after a PARTIAL reseed of a persistent volume
+# the roots can be "valid" while a closure member such as glibc is a ghost);
+# init_store's unconditional load-db should make validity always hold, so a
+# failure here means the /nix volume is missing the image's paths (recreate the
+# volume, or copy the image's /nix/store into it and restart).
+preflight_boot_closure() {
+  local p ok=0 err missing
+  for p in "${VEGA_BUILDER_ROOT:-}" "${RUNNER_DIST:-}"; do
+    [ -n "$p" ] || continue
+    if [ ! -e "$p" ]; then
+      echo "vega-builder: preflight: ${p} is missing from /nix/store" >&2
+      ok=1
+      continue
+    fi
+    if ! err="$(nix-store --check-validity "$p" 2>&1)"; then
+      echo "vega-builder: preflight: ${p} is not a valid registered store path: ${err}" >&2
+      ok=1
+      continue
+    fi
+    missing="$(nix-store -qR "$p" 2>/dev/null \
+      | while read -r q; do [ -e "$q" ] || echo "$q"; done | head -n 5)"
+    if [ -n "$missing" ]; then
+      echo "vega-builder: preflight: closure of ${p} has registered but absent paths (first few):" >&2
+      echo "$missing" >&2
+      ok=1
+    fi
+  done
+  if [ -n "${RUNNER_DIST:-}" ] && [ ! -e "${RUNNER_DIST}/bin/run.sh" ]; then
+    echo "vega-builder: preflight: ${RUNNER_DIST}/bin/run.sh is missing" >&2
+    ok=1
+  fi
+  if [ "$ok" -ne 0 ]; then
+    echo "vega-builder: preflight failed; refusing to start the runner (a broken runner accepts jobs it cannot execute). If /nix is a persistent volume, recreate it or reseed it from the image and restart." >&2
+    return 1
+  fi
+  return 0
+}
+
+# Emit the generated nix.conf for the given sandbox mode. Split out of
+# setup_nix so the test harness can assert the contents without a container.
+nix_conf_contents() {
+  local sandbox="$1"
+  echo "experimental-features = nix-command flakes"
+  echo "sandbox = ${sandbox}"
+  # When the sandbox is required (auto-detected as working, or forced), do NOT
+  # let nix silently fall back to an unsandboxed build: a real isolation
+  # failure must fail the build, not quietly weaken it. `relaxed`/`false`
+  # already permit a non-isolated build, so the fallback is moot there.
+  [ "${sandbox}" = true ] && echo "sandbox-fallback = false"
+  # Bound build parallelism so a build cannot peg a shared host. The HARD cap
+  # is the docker --memory/--cpus on `docker run` (see README) which the OS
+  # enforces; these are the softer nix-level limits. Default conservatively
+  # (2 parallel jobs) and raise VEGA_NIX_MAX_JOBS / VEGA_NIX_CORES on a
+  # dedicated machine.
+  echo "max-jobs = ${VEGA_NIX_MAX_JOBS:-2}"
+  echo "cores = ${VEGA_NIX_CORES:-0}"
+  # Single-user nix in the container: no nixbld build users / group.
+  echo "build-users-group ="
+  echo "substituters = https://cache.nixos.org ${VEGA_CACHE_URL} ${VEGA_EXTRA_SUBSTITUTERS:-}"
+  echo "trusted-public-keys = ${NIXOS_CACHE_KEY} ${VEGA_CACHE_PUBKEY} ${VEGA_EXTRA_TRUSTED_PUBLIC_KEYS:-}"
 }
 
 # Minimal single-user Nix state for an ephemeral root container. The image ships
@@ -219,8 +306,8 @@ protect_boot_closure() {
 # mode is auto-detected (see resolve_sandbox): on by default when the container
 # can create a user namespace, `relaxed` when it cannot.
 setup_nix() {
-  mkdir -p /nix/var/nix/db /nix/var/nix/gcroots /nix/var/nix/profiles \
-           /nix/var/nix/temproots /nix/var/nix/userpool /etc/nix
+  mkdir -p "${NIX_STATE}/db" "${NIX_STATE}/gcroots" "${NIX_STATE}/profiles" \
+           "${NIX_STATE}/temproots" "${NIX_STATE}/userpool" /etc/nix
   # Init + register the baked closure before any probe or build needs it.
   init_store
   # Root the boot closure so the periodic GC cannot brick the container.
@@ -230,33 +317,20 @@ setup_nix() {
   # because the mounted config disabled it).
   if [ -e /etc/nix/nix.conf ]; then
     enforce_required_sandbox || exit 1
-    return 0
+  else
+    local sandbox
+    sandbox="$(resolve_sandbox)" || exit 1
+    nix_conf_contents "${sandbox}" > /etc/nix/nix.conf
+    echo "vega-builder: nix sandbox = ${sandbox}" >&2
   fi
+  # Never register a runner whose own runtime cannot execute a job.
+  preflight_boot_closure || exit 1
+}
 
-  local sandbox
-  sandbox="$(resolve_sandbox)" || exit 1
-
-  {
-    echo "experimental-features = nix-command flakes"
-    echo "sandbox = ${sandbox}"
-    # When the sandbox is required (auto-detected as working, or forced), do NOT
-    # let nix silently fall back to an unsandboxed build: a real isolation
-    # failure must fail the build, not quietly weaken it. `relaxed`/`false`
-    # already permit a non-isolated build, so the fallback is moot there.
-    [ "${sandbox}" = true ] && echo "sandbox-fallback = false"
-    # Bound build parallelism so a build cannot peg a shared host. The HARD cap
-    # is the docker --memory/--cpus on `docker run` (see README) which the OS
-    # enforces; these are the softer nix-level limits. Default conservatively
-    # (2 parallel jobs) and raise VEGA_NIX_MAX_JOBS / VEGA_NIX_CORES on a
-    # dedicated machine.
-    echo "max-jobs = ${VEGA_NIX_MAX_JOBS:-2}"
-    echo "cores = ${VEGA_NIX_CORES:-0}"
-    # Single-user nix in the container: no nixbld build users / group.
-    echo "build-users-group ="
-    echo "substituters = https://cache.nixos.org ${VEGA_EXTRA_SUBSTITUTERS:-}"
-    echo "trusted-public-keys = ${NIXOS_CACHE_KEY} ${VEGA_EXTRA_TRUSTED_PUBLIC_KEYS:-}"
-  } > /etc/nix/nix.conf
-  echo "vega-builder: nix sandbox = ${sandbox}" >&2
+# The GC backstop's trigger: the runner's own runtime is gone from the store.
+# Split out so the test harness can pin the condition.
+runner_runtime_missing() {
+  [ -n "${RUNNER_DIST:-}" ] && [ ! -e "${RUNNER_DIST}/bin/run.sh" ]
 }
 
 # Whether to run the periodic store GC. On by default; off via VEGA_GC in
@@ -288,6 +362,24 @@ start_periodic_gc() {
     while true; do
       summary="$(nix-collect-garbage --delete-older-than "$older" 2>&1 | tail -n1)" || true
       echo "vega-builder: periodic GC: ${summary}" >&2
+      # Backstop against the silent-brick mode: if a GC ever removes the
+      # runner's own runtime (it cannot once the boot closure is registered and
+      # rooted, but a corrupted database or an operator wiping /nix can), the
+      # already-running Runner.Listener would keep accepting jobs on its
+      # deleted-but-open files and every job would die at GitHub's ten-minute
+      # no-communication timeout. Stop the runner instead: offline means queued
+      # jobs wait, and the restarted container fails the boot preflight loudly.
+      # Signal -1 (every process in the namespace except this subshell and
+      # PID 1), NOT PID 1 directly: the exec'd runner installs no TERM handler
+      # on PID 1, and the kernel discards handler-less signals sent to a PID
+      # namespace's init from inside, so `kill 1` succeeds while stopping
+      # nothing. Killing the runner's process tree makes PID 1's run.sh see its
+      # child die and exit; docker's restart then hits the boot preflight.
+      if runner_runtime_missing; then
+        echo "vega-builder: FATAL: the runner's own runtime (${RUNNER_DIST}) is gone from the store; stopping the runner so jobs queue instead of timing out" >&2
+        kill -TERM -- -1 2>/dev/null || true
+        exit 1
+      fi
       sleep "$interval"
     done
   ) &
