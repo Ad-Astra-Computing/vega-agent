@@ -122,8 +122,11 @@ async function main(): Promise<void> {
       await client.uploadNar(nar.url, nar.fileHash, nar.file, checksum);
       const result = await client.attest(buildAttestBody(info, nar, provenance.attr));
       if (result.publishedShared) agreed++;
+      // The parenthetical is the shared-tier decision reason, not an upload
+      // status (same convention as the attester's per-path lines).
       const tag = result.publishedShared ? "[shared]" : "[pending]";
-      console.log(`${tag} ${info.path} (${result.decision.shared.reason})`);
+      const reason = result.decision.shared.reason;
+      console.log(`${tag} ${info.path} (${result.publishedShared ? reason : `shared tier: ${reason}`})`);
     }
   } finally {
     await rm(work, { recursive: true, force: true });

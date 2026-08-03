@@ -160,12 +160,17 @@ async function cacheBuild(
       buildAttestBody(info, nar, outputAttr, { noContinent: opts.noContinent, dir }),
     );
     watchdog.done(info.path);
-    const tag = result.publishedShared
-      ? "[shared]   "
+    // The parenthetical is the SHARED-TIER decision reason, not an upload
+    // status: a [tenant] line is a successful publish to the tenant tier.
+    // Say so explicitly; a bare "(insufficient)" reads as a rejection and has
+    // been reported as one.
+    const reason = result.decision.shared.reason;
+    const line = result.publishedShared
+      ? `[shared]    ${info.path} (${reason})`
       : result.publishedTenant
-        ? "[tenant]   "
-        : "[pending]  ";
-    console.log(`${tag} ${info.path} (${result.decision.shared.reason})`);
+        ? `[tenant]    ${info.path} (published; shared tier: ${reason})`
+        : `[pending]   ${info.path} (shared tier: ${reason})`;
+    console.log(line);
     return result.publishedShared;
     // The timer is cleared on failure too: unref'd, it cannot hold the process,
     // but it would keep warning about stale entries during teardown.
