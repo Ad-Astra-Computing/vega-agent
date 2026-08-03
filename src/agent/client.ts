@@ -1,4 +1,5 @@
 import { openAsBlob } from "node:fs";
+import { envSeconds } from "./env.js";
 import type { PromotionDecision } from "../trust/policy.js";
 
 /** Attest request body — the narinfo fields the runner claims for an output. */
@@ -75,6 +76,10 @@ export interface RetryOptions {
   sleep: (ms: number) => Promise<void>;
   /** Injectable jitter in [0,1); fixed in tests for determinism. */
   jitter: () => number;
+  /** Per-attempt deadline for control-plane requests, ms. */
+  requestTimeoutMs: number;
+  /** Per-attempt deadline for the NAR PUT, ms (multi-GB uploads are slow). */
+  uploadTimeoutMs: number;
 }
 
 // 429 and 5xx are transient: the same request can succeed on a retry. 408 is a
@@ -114,12 +119,22 @@ function presignLapsed(url: string, now: number): boolean {
   return expiry !== null && now >= expiry - PRESIGN_EXPIRY_MARGIN_MS;
 }
 
+// Every attempt runs under a deadline. Without one, a connection that stalls
+// (a PUT wedged mid-body, a response that never arrives) hangs its pipeline
+// worker FOREVER: undici's header/body timers do not cover a stalled request
+// upload, so nothing ever fires. Observed in production as an upload step that
+// went silent mid-closure until the job's 90-minute cap killed it, with no
+// error and no retry. A deadline turns the stall into a retryable failure.
+// The NAR PUT gets its own, much larger budget: multi-GB uploads on a slow
+// link are legitimately slow, and aborting one too early would loop forever.
 const DEFAULT_RETRY: RetryOptions = {
   attempts: 5,
   baseDelayMs: 500,
   maxDelayMs: 30_000,
   sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
   jitter: Math.random,
+  requestTimeoutMs: envSeconds("VEGA_HTTP_TIMEOUT_SECONDS", 120) * 1000,
+  uploadTimeoutMs: envSeconds("VEGA_UPLOAD_TIMEOUT_SECONDS", 1800) * 1000,
 };
 
 export class ControlPlaneClient {
@@ -152,19 +167,24 @@ export class ControlPlaneClient {
    * is a real auth failure and propagates. `init.headers` must not already carry
    * an authorization header (this owns it).
    */
-  private async authedFetch(url: string, init: RequestInit, label: string): Promise<Response> {
+  private async authedFetch<T = Response>(
+    url: string,
+    init: RequestInit,
+    label: string,
+    consume?: (res: Response) => Promise<T>,
+  ): Promise<T> {
     const withAuth = async (force: boolean): Promise<RequestInit> => ({
       ...init,
       headers: { ...init.headers, ...(await this.authHeaders(force)) },
     });
     try {
-      return await this.fetchWithRetry(url, await withAuth(false), label);
+      return await this.fetchWithRetry(url, await withAuth(false), label, undefined, consume);
     } catch (e) {
       if (e instanceof HttpError && e.status === 401) {
         // Recover with a fresh token, but as a SINGLE attempt: re-entering the
         // full retry loop here could run a second whole retry budget on transient
         // failures. The 401 path is a one-shot re-auth, not another retry budget.
-        return await this.fetchOnce(url, await withAuth(true), label);
+        return await this.fetchOnce(url, await withAuth(true), label, consume);
       }
       throw e;
     }
@@ -172,10 +192,33 @@ export class ControlPlaneClient {
 
   /** One request, no retry budget, throwing the same status-only {@link HttpError}
    * as {@link fetchWithRetry} on a non-2xx. Used for the single forced 401 retry. */
-  private async fetchOnce(url: string, init: RequestInit, label: string): Promise<Response> {
-    const res = await this.fetchImpl(url, init);
-    if (!res.ok) throw new HttpError(res.status, `${label} failed: ${res.status}`);
-    return res;
+  private async fetchOnce<T = Response>(
+    url: string,
+    init: RequestInit,
+    label: string,
+    consume?: (res: Response) => Promise<T>,
+  ): Promise<T> {
+    try {
+      const res = await this.fetchImpl(url, this.withDeadline(init, this.retry.requestTimeoutMs));
+      if (!res.ok) throw new HttpError(res.status, `${label} failed: ${res.status}`);
+      return consume === undefined ? (res as unknown as T) : await consume(res);
+    } catch (e) {
+      throw this.labelTimeout(e, label, this.retry.requestTimeoutMs);
+    }
+  }
+
+  /** The init with a fresh per-attempt abort deadline attached. A new signal per
+   * attempt, not one shared across the retry loop: a shared signal would count
+   * backoff sleeps against the budget and abort every later attempt at once. */
+  private withDeadline(init: RequestInit, timeoutMs: number): RequestInit {
+    return { ...init, signal: AbortSignal.timeout(timeoutMs) };
+  }
+
+  /** A deadline abort relabeled with the request it killed; other errors pass. */
+  private labelTimeout(e: unknown, label: string, timeoutMs: number): unknown {
+    return e instanceof DOMException && (e.name === "TimeoutError" || e.name === "AbortError")
+      ? new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s`)
+      : e;
   }
 
   /** Backoff before the next attempt: honor Retry-After, else exponential with
@@ -199,17 +242,39 @@ export class ControlPlaneClient {
    * replayable across attempts (a string, Buffer, or file-backed Blob, all of
    * which can be re-read), which every caller satisfies.
    */
-  private async fetchWithRetry(url: string, init: RequestInit, label: string): Promise<Response> {
+  private async fetchWithRetry<T = Response>(
+    url: string,
+    init: RequestInit,
+    label: string,
+    timeoutMs = this.retry.requestTimeoutMs,
+    consume?: (res: Response) => Promise<T>,
+  ): Promise<T> {
     let lastErr: unknown;
     for (let attempt = 1; attempt <= this.retry.attempts; attempt++) {
       let res: Response | undefined;
       try {
-        res = await this.fetchImpl(url, init);
+        res = await this.fetchImpl(url, this.withDeadline(init, timeoutMs));
       } catch (e) {
-        lastErr = e; // network-level failure: retry if budget remains
+        // Network-level failure OR the per-attempt deadline: retry if budget
+        // remains. Label a deadline abort explicitly, so an exhausted budget
+        // reports "timed out", not an opaque AbortError.
+        lastErr = this.labelTimeout(e, label, timeoutMs);
       }
       if (res !== undefined) {
-        if (res.ok) return res;
+        if (res.ok) {
+          if (consume === undefined) return res as unknown as T;
+          // Consume the body INSIDE the retry loop: the per-attempt signal
+          // also governs the body read, so a server that sends headers and
+          // then wedges mid-body aborts here and must count as a retryable
+          // attempt failure, not escape unlabeled to the caller.
+          try {
+            return await consume(res);
+          } catch (e) {
+            lastErr = this.labelTimeout(e, label, timeoutMs);
+            if (attempt < this.retry.attempts) await this.backoff(attempt, null);
+            continue;
+          }
+        }
         // Not returned to the caller: drain the body so undici frees the
         // connection instead of pinning the keep-alive pool until GC.
         void res.body?.cancel();
@@ -229,7 +294,7 @@ export class ControlPlaneClient {
    * a Worker re-hash (which 503s on multi-GB NARs). The companion {@link putNar}
    * must send the matching `x-amz-checksum-sha256` header. */
   async uploadUrl(narUrl: string, fileHash: string): Promise<string> {
-    const res = await this.authedFetch(
+    const { url } = await this.authedFetch(
       `${this.baseUrl}/api/cache/upload-url`,
       {
         method: "POST",
@@ -237,8 +302,8 @@ export class ControlPlaneClient {
         body: JSON.stringify({ narUrl, fileHash }),
       },
       "upload-url",
+      (res) => res.json() as Promise<{ url: string }>,
     );
-    const { url } = (await res.json()) as { url: string };
     return url;
   }
 
@@ -247,11 +312,17 @@ export class ControlPlaneClient {
    * buffered in memory; the Blob is re-readable, so the retry path still works.
    * `sha256Base64` must equal the value the presigned URL was signed with (see
    * {@link uploadUrl}); R2 rejects the PUT if the sent bytes disagree. */
-  async putNar(presignedUrl: string, body: BodyInit, sha256Base64: string): Promise<void> {
+  async putNar(
+    presignedUrl: string,
+    body: BodyInit,
+    sha256Base64: string,
+    timeoutMs = this.retry.uploadTimeoutMs,
+  ): Promise<void> {
     const res = await this.fetchWithRetry(
       presignedUrl,
       { method: "PUT", body, headers: { "x-amz-checksum-sha256": sha256Base64 } },
       "nar upload",
+      timeoutMs,
     );
     // The PUT response body is unused; drain it so the connection is released.
     void res.body?.cancel();
@@ -267,19 +338,26 @@ export class ControlPlaneClient {
    */
   async uploadNar(narUrl: string, fileHash: string, file: string, sha256Base64: string): Promise<void> {
     const url = await this.uploadUrl(narUrl, fileHash);
+    // The deadline is a TOTAL-duration bound (fetch exposes no upload progress
+    // to key an inactivity timer on), so it must scale with the payload: a
+    // fixed budget would deterministically abort a slow-but-progressing
+    // multi-GB PUT on every attempt. Assume at least 1 MiB/s and never go
+    // below the configured floor.
+    const blob = await openAsBlob(file);
+    const timeoutMs = Math.max(this.retry.uploadTimeoutMs, (blob.size / (1 << 20)) * 1000);
     try {
-      await this.putNar(url, await openAsBlob(file), sha256Base64);
+      await this.putNar(url, blob, sha256Base64, timeoutMs);
       return;
     } catch (e) {
       if (!(e instanceof HttpError) || e.status !== 403 || !presignLapsed(url, Date.now())) throw e;
     }
     const fresh = await this.uploadUrl(narUrl, fileHash);
-    await this.putNar(fresh, await openAsBlob(file), sha256Base64);
+    await this.putNar(fresh, await openAsBlob(file), sha256Base64, timeoutMs);
   }
 
   /** Submit an attestation; returns the promotion decision. */
   async attest(body: AttestBody): Promise<AttestResult> {
-    const res = await this.authedFetch(
+    return await this.authedFetch(
       `${this.baseUrl}/api/cache/attest`,
       {
         method: "POST",
@@ -287,8 +365,8 @@ export class ControlPlaneClient {
         body: JSON.stringify(body),
       },
       "attest",
+      (res) => res.json() as Promise<AttestResult>,
     );
-    return (await res.json()) as AttestResult;
   }
 
   /**
@@ -300,7 +378,7 @@ export class ControlPlaneClient {
   async push(body: AttestBody): Promise<PushResult> {
     // Status only: never echo the response body of an authenticated request
     // (a hostile/buggy server could reflect the credential header into it).
-    const res = await this.authedFetch(
+    return await this.authedFetch(
       `${this.baseUrl}/api/cache/push`,
       {
         method: "POST",
@@ -308,8 +386,8 @@ export class ControlPlaneClient {
         body: JSON.stringify(body),
       },
       "push",
+      (res) => res.json() as Promise<PushResult>,
     );
-    return (await res.json()) as PushResult;
   }
 }
 
