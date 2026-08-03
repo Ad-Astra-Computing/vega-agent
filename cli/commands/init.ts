@@ -13,7 +13,7 @@ export const DEFAULT_ATTR = "packages.x86_64-linux.default";
 // the docs recipe; cli/commands/init.test.ts asserts the example file stays equal
 // to renderWorkflow(DEFAULT_ATTR), so these cannot drift apart silently.
 const CHECKOUT = "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"; // v7.0.0
-const AGENT = "Ad-Astra-Computing/vega-agent/agent@2170753a7f63d07f1dc53ab24f97585ccece9a7c"; // v0.12.0
+const AGENT = "Ad-Astra-Computing/vega-agent/agent@fc8e1ddd9d5ff16f245603368b06b675cad06783"; // v0.15.0
 
 /**
  * The canonical CI recipe with the build attribute substituted. Pure: the caller
@@ -57,7 +57,11 @@ jobs:
         with:
           persist-credentials: false # no git push; do not leave the token in .git/config
       - name: Build and publish to Vega
-        uses: ${AGENT} # v0.12.0
+        # A per-step cap in addition to the job cap: a build or publish that
+        # stalls then fails fast and legibly here, instead of idling against
+        # GitHub's 6-hour default looking identical to a slow build.
+        timeout-minutes: 45
+        uses: ${AGENT} # v0.15.0
         with:
           # github.workspace is the checkout root, so the attestation's provenance
           # matches the repo and the output can be reproduced. Change the attribute
@@ -65,6 +69,23 @@ jobs:
           installable: "\${{ github.workspace }}#${attr}"
           control-plane: https://vega-cache.dev
           skip-upstream: "true" # upload only paths cache.nixos.org does not already serve
+          # If your closure has dependencies that no public cache serves (a
+          # private or team Cachix, an overlay-built package), list those caches
+          # here. Omitting them means nix builds such dependencies FROM SOURCE
+          # on this 2-core hosted runner, which for a large package exhausts the
+          # runner before it finishes ("The runner has received a shutdown
+          # signal" or a lost-communication kill, often with no logs uploaded).
+          # A trusted public key only admits paths signed by it, so listing a
+          # cache is a substitution source, never a trust widening.
+          # extra-substituters: "https://<your-cache>.cachix.org"
+          # extra-trusted-public-keys: "<your-cache>.cachix.org-1:<public key>"
+
+# Note for self-hosted builder operators (ghcr.io/ad-astra-computing/vega-builder):
+# when you update the image, a persistent /nix volume self-heals from v0.15.0
+# onward; a heal logs "seeding the baked store copy", and images newer than
+# v0.15.0 also attest a healthy boot with "store complete, direct handoff".
+# Upgrading TO v0.14.0 or older instead needs a manual additive seed first; see
+# the builder README.
 `;
 }
 
