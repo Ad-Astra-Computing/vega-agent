@@ -29,6 +29,7 @@ import { workflowWarning } from "../src/agent/gha.js";
 import { sha256NixHashToBase64 } from "../src/nix/hash.js";
 import { nixBuild, pathInfoClosure, pathInfoOutputs, makeNar, currentSystem, flakeShow } from "./nix.js";
 import { flattenFlakeShow } from "../src/agent/outputs.js";
+import { StallWatchdog } from "../src/agent/stall-watchdog.js";
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -125,12 +126,21 @@ async function cacheBuild(
   // by default since each task compresses a NAR and holds open upload/attest work.
   let resumed = 0;
   const concurrency = Number(process.env.VEGA_UPLOAD_CONCURRENCY) || 4;
+  // Watchdog: when nothing completes for the window (default 5 min), print what
+  // each worker is doing and for how long. The workers share chokepoints (the
+  // network, the nix daemon, the token mint), so a wedge silences all of them
+  // at once; this makes the job log name the stuck stage.
+  const stallWarnS = Number(process.env.VEGA_STALL_WARN_SECONDS) || 300;
+  const watchdog = new StallWatchdog(stallWarnS * 1000);
+  const watchdogTimer = watchdog.start(60_000);
   const shared = await mapConcurrent(paths, concurrency, async (info) => {
+    watchdog.stage(info.path, "compress");
     const nar = await makeNar(info.path, opts.work);
     // Resume: if a prior run of THIS build already uploaded this exact compressed
     // NAR (content-addressed key), skip only the redundant PUT. We still always
     // attest the locally built output below, so resuming never suppresses a
     // path's evidence (which would be unsound for the shared-tier attester).
+    watchdog.stage(info.path, "upload");
     const alreadyUploaded =
       opts.resumeUrl !== undefined && (await narObjectExists(opts.resumeUrl, nar.url));
     if (alreadyUploaded) {
@@ -144,10 +154,12 @@ async function cacheBuild(
       const checksum = sha256NixHashToBase64(nar.fileHash);
       await client.uploadNar(nar.url, nar.fileHash, nar.file, checksum);
     }
+    watchdog.stage(info.path, "attest");
     const outputAttr = topPaths.has(info.path) ? attr : "";
     const result = await client.attest(
       buildAttestBody(info, nar, outputAttr, { noContinent: opts.noContinent, dir }),
     );
+    watchdog.done(info.path);
     const tag = result.publishedShared
       ? "[shared]   "
       : result.publishedTenant
@@ -155,7 +167,9 @@ async function cacheBuild(
         : "[pending]  ";
     console.log(`${tag} ${info.path} (${result.decision.shared.reason})`);
     return result.publishedShared;
-  });
+    // The timer is cleared on failure too: unref'd, it cannot hold the process,
+    // but it would keep warning about stale entries during teardown.
+  }).finally(() => clearInterval(watchdogTimer));
   if (resumed > 0) {
     console.log(`Resumed: ${resumed} NAR(s) already uploaded by a prior run; re-attested without re-uploading.`);
   }
@@ -252,7 +266,9 @@ async function main(): Promise<void> {
   if (repository && reuseCache) {
     try {
       const { url, keyUrl } = tenantSubstituter(controlPlane, repository);
-      const res = await fetch(keyUrl);
+      // Deadline: this runs at startup, before the pipeline watchdog exists;
+      // best-effort must mean a bounded wait, not a possible silent hang.
+      const res = await fetch(keyUrl, { signal: AbortSignal.timeout(15_000) });
       if (res.ok) {
         const { publicKey } = (await res.json()) as { publicKey?: string };
         if (typeof publicKey === "string" && publicKey !== "") {

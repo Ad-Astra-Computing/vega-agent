@@ -39,6 +39,16 @@ describe("fetchActionsOidcToken", () => {
     expect(url.searchParams.get("audience")).toBe("https://api.vega.io");
   });
 
+  it("aborts a stalled token mint at its deadline instead of hanging every worker", async () => {
+    const fn = ((_: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((_res, rej) => {
+        init?.signal?.addEventListener("abort", () => rej(init.signal!.reason));
+      })) as unknown as typeof fetch;
+    await expect(
+      fetchActionsOidcToken({ requestUrl: "https://token.svc/x", requestToken: "t" }, "aud", fn, 20),
+    ).rejects.toThrow();
+  });
+
   it("throws when the Actions OIDC env vars are missing", async () => {
     const { fn } = fakeFetch(() => new Response("{}"));
     await expect(
@@ -274,6 +284,93 @@ describe("ControlPlaneClient", () => {
       fileSize: 1, narHash: "sha256:bbb", narSize: 2, references: [],
     })).rejects.toThrow(/403/);
     expect(calls.length).toBe(1); // no retry on 403
+  });
+
+  describe("per-attempt deadlines", () => {
+    // A fetch that never settles on its own: it resolves or rejects ONLY via
+    // the per-attempt abort signal, modeling a connection stalled mid-request
+    // (which undici's own timers do not cover).
+    const hangingFetch = (behavior?: (n: number, init?: RequestInit) => Response | undefined) => {
+      let n = 0;
+      const fn = ((_: RequestInfo | URL, init?: RequestInit) => {
+        n += 1;
+        const scripted = behavior?.(n, init);
+        if (scripted !== undefined) return Promise.resolve(scripted);
+        return new Promise<Response>((_res, rej) => {
+          init?.signal?.addEventListener("abort", () => rej(init.signal!.reason));
+        });
+      }) as unknown as typeof fetch;
+      return { fn, count: () => n };
+    };
+
+    it("aborts a stalled request at the deadline and reports a timeout after exhausting retries", async () => {
+      const { fn, count } = hangingFetch();
+      const client = new ControlPlaneClient(base, "jwt", fn, {
+        ...fastRetry,
+        attempts: 2,
+        requestTimeoutMs: 20,
+      });
+      await expect(client.uploadUrl("nar/abc.nar.zst", "sha256:x")).rejects.toThrow(/timed out after/);
+      expect(count()).toBe(2); // each attempt was started and then aborted
+    });
+
+    it("a stalled attempt is retried and a later attempt can succeed", async () => {
+      const { fn, count } = hangingFetch((n) =>
+        n >= 2 ? new Response(JSON.stringify({ url: "https://r2/put?sig=x" })) : undefined,
+      );
+      const client = new ControlPlaneClient(base, "jwt", fn, {
+        ...fastRetry,
+        requestTimeoutMs: 20,
+      });
+      expect(await client.uploadUrl("nar/abc.nar.zst", "sha256:x")).toBe("https://r2/put?sig=x");
+      expect(count()).toBe(2);
+    });
+
+    it("a response that wedges mid-body (headers ok, body never arrives) is retried too", async () => {
+      let n = 0;
+      const fn = ((_: RequestInfo | URL, init?: RequestInit) => {
+        n += 1;
+        if (n >= 2) return Promise.resolve(new Response(JSON.stringify({ url: "https://r2/put?sig=x" })));
+        // Headers arrive fine; the body stream produces nothing until the
+        // per-attempt signal aborts it (real undici ties the two the same way).
+        const body = new ReadableStream({
+          start(c) {
+            init?.signal?.addEventListener("abort", () => c.error(init.signal!.reason));
+          },
+        });
+        return Promise.resolve(new Response(body));
+      }) as unknown as typeof fetch;
+      const client = new ControlPlaneClient(base, "jwt", fn, {
+        ...fastRetry,
+        requestTimeoutMs: 20,
+      });
+      expect(await client.uploadUrl("nar/abc.nar.zst", "sha256:x")).toBe("https://r2/put?sig=x");
+      expect(n).toBe(2);
+    });
+
+    it("the NAR PUT runs under the larger upload deadline, not the request deadline", async () => {
+      // Responds after 50ms of its own accord; aborts if the signal fires first.
+      const fn = ((_: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((res, rej) => {
+          const t = setTimeout(() => res(new Response(null, { status: 200 })), 50);
+          init?.signal?.addEventListener("abort", () => {
+            clearTimeout(t);
+            rej(init.signal!.reason);
+          });
+        })) as unknown as typeof fetch;
+      const client = new ControlPlaneClient(base, "jwt", fn, {
+        ...fastRetry,
+        attempts: 1,
+        requestTimeoutMs: 10,
+        uploadTimeoutMs: 5_000,
+      });
+      // The control-plane request path aborts at 10ms...
+      await expect(client.attest({} as never)).rejects.toThrow(/timed out/);
+      // ...while the NAR PUT survives its 50ms server because its budget is larger.
+      await expect(
+        client.putNar("https://r2/put?sig=x", new Uint8Array([1]), "Zm9vYmFyYmF6"),
+      ).resolves.toBeUndefined();
+    });
   });
 
   it("re-mints and retries once when a 401 means the token expired mid-run", async () => {

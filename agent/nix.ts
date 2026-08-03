@@ -13,6 +13,7 @@ import { stat, lstat, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import type { RawPathInfo, NarArtifact } from "../src/agent/narinfo.js";
 import { storePathHash } from "../src/nix/store-path.js";
+import { envSeconds } from "../src/agent/env.js";
 import { encodeNixBase32 } from "../src/nix/nixbase32.js";
 
 const exec = promisify(execFile);
@@ -264,9 +265,11 @@ function dumpCompressed(path: string, file: string): Promise<void> {
     // cleanly. A non-zero exit of `nix store dump-path` or `zstd` mid-stream
     // would otherwise leave a truncated NAR that still gets hashed and uploaded.
     let settled = false;
+    let stallTimer: NodeJS.Timeout | undefined;
     const fail = (e: unknown) => {
       if (settled) return;
       settled = true;
+      clearTimeout(stallTimer);
       reject(e instanceof Error ? e : new Error(String(e)));
     };
     let fileDone = false;
@@ -275,6 +278,7 @@ function dumpCompressed(path: string, file: string): Promise<void> {
     const maybeResolve = () => {
       if (!settled && fileDone && dumpDone && zstdDone) {
         settled = true;
+        clearTimeout(stallTimer);
         resolve();
       }
     };
@@ -297,6 +301,32 @@ function dumpCompressed(path: string, file: string): Promise<void> {
       fileDone = true;
       maybeResolve();
     });
+
+    // Inactivity watchdog: a wedged nix daemon leaves both children alive but
+    // silent, hanging this promise (and its pipeline worker) forever with no
+    // output. Keyed on inactivity, not total duration, so a legitimately huge
+    // path that keeps producing bytes is never killed. On a stall, kill both
+    // children and reject with a labeled error. The timer is cleared on every
+    // settle path (fail and maybeResolve) and unref'd, so it can neither fire
+    // after settling nor hold the event loop open for a caller that got its
+    // rejection some other way (e.g. both spawns failing).
+    const stallMs = envSeconds("VEGA_NAR_STALL_SECONDS", 600) * 1000;
+    const armStall = () => {
+      clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => {
+        fail(new Error(`nix store dump-path produced no data for ${Math.round(stallMs / 1000)}s (path ${path})`));
+        dump.kill("SIGKILL");
+        zstd.kill("SIGKILL");
+      }, stallMs);
+      stallTimer.unref();
+    };
+    armStall();
+    // Both producers re-arm: after dump-path finishes, zstd may still be
+    // draining its buffer, and its output is then the liveness signal. The
+    // write stream's flush to disk after zstd closes is covered too: the timer
+    // only stops once maybeResolve or fail settles the promise.
+    dump.stdout.on("data", armStall);
+    zstd.stdout.on("data", armStall);
   });
 }
 

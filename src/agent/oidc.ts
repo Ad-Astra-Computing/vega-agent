@@ -13,6 +13,7 @@ export async function fetchActionsOidcToken(
   env: ActionsOidcEnv,
   audience: string,
   fetchImpl: typeof fetch = fetch,
+  timeoutMs = 60_000,
 ): Promise<string> {
   if (!env.requestUrl || !env.requestToken) {
     throw new Error(
@@ -21,8 +22,12 @@ export async function fetchActionsOidcToken(
   }
   const url = new URL(env.requestUrl);
   url.searchParams.set("audience", audience);
+  // Deadline: the token service is shared across every pipeline worker (the
+  // provider caches one mint at a time), so a mint that hangs would stall ALL
+  // of them at once with no output. Better a loud failure than a silent wedge.
   const res = await fetchImpl(url, {
     headers: { authorization: `Bearer ${env.requestToken}` },
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
     throw new Error(`OIDC token request failed: ${res.status}`);
