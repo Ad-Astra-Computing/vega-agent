@@ -127,14 +127,31 @@
             # No `created` (defaults to epoch) so the digest stays reproducible.
             tag = agent.version;
             contents = [ builderRoot ];
-            # /tmp, the runner's writable home, and the baked closure registration.
+            # /tmp, the runner's writable home, the baked closure registration,
+            # the boot shim and the store seed. The shim and its busybox
+            # interpreter are REAL FILES under /bin, not symlinks into
+            # /nix/store: a persistent /nix volume from an older image masks
+            # the image's store (Docker seeds a volume only when it is empty),
+            # which used to leave the entrypoint symlink dangling and kill the
+            # container at exec on every image update. The shim detects that
+            # and seeds /nix-seed/store (a duplicate of the baked closure,
+            # living outside /nix precisely so the volume cannot mask it) into
+            # the volume, making image updates self-healing. The seed roughly
+            # doubles the image; the fast path (no volume, or an already
+            # seeded one) never touches it.
             extraCommands = ''
-              mkdir -p tmp home/runner etc/vega
+              mkdir -p tmp home/runner etc/vega bin nix-seed/store
               chmod 1777 tmp
               cp ${builderReginfo}/registration etc/vega/nix-registration
+              cp ${pkgs.pkgsStatic.busybox}/bin/busybox bin/busybox
+              cp ${./builder/bootstrap.sh} bin/vega-bootstrap
+              chmod 755 bin/busybox bin/vega-bootstrap
+              while read -r p; do
+                cp -a "$p" nix-seed/store/
+              done < ${builderReginfo}/store-paths
             '';
             config = {
-              Entrypoint = [ "/bin/vega-builder-entrypoint" ];
+              Entrypoint = [ "/bin/vega-bootstrap" ];
               Env = [
                 "PATH=/bin"
                 "HOME=/home/runner"

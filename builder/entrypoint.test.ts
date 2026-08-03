@@ -12,4 +12,16 @@ describe("builder entrypoint", () => {
     const out = execFileSync("bash", [script], { encoding: "utf8" });
     expect(out).toContain("all entrypoint sandbox tests passed");
   });
+
+  it("boot shim: fast path, volume self-seed and fail-loud cases (bash)", () => {
+    const script = fileURLToPath(new URL("./bootstrap.test.sh", import.meta.url));
+    // Capture stderr too: the suite reports a skipped busybox pass there, and
+    // in CI a skip must FAIL (the busybox pass is the regression lock for the
+    // defect class that once shipped broken while GNU-tool tests stayed green).
+    const out = execFileSync("bash", [script], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    expect(out).toContain("all bootstrap tests passed");
+    if (process.env.CI) {
+      expect(out).toContain("ok(busybox):");
+    }
+  });
 });

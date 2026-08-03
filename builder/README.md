@@ -123,16 +123,23 @@ Notes:
   update or reseed it additively as described below; the safer default is no
   `/nix` volume, with `reuse-cache` substituting prior builds from your tenant.
 
-  If you run with a `/nix` volume anyway: the entrypoint re-registers the baked
-  closure in the Nix database on every boot (`nix-store --load-db` from the
-  image's registration), so store paths copied into the volume from the image
-  (Docker's empty-volume seeding, or a manual reseed after an image update)
-  become valid, GC-safe paths at the next start. On every **image update** you
-  must seed the new image's store into the volume BEFORE starting the new
-  container: Docker only seeds an empty volume, so the old store masks the new
-  image's `/nix` and the container dies at exec with `stat
-  /bin/vega-builder-entrypoint: no such file or directory`. Additive seed, then
-  recreate:
+  If you run with a `/nix` volume anyway: **image updates self-heal**. The
+  image boots through a shim (`/bin/vega-bootstrap`, a real file on a static
+  busybox, so it runs even when the volume masks the image's store). When the
+  volume lacks this image's store paths (Docker only seeds an empty volume, so
+  after an update the old store masks the new image's `/nix` and the
+  entrypoint symlink dangles), the shim seeds the baked store copy
+  (`/nix-seed/store`, shipped outside `/nix` precisely so the volume cannot
+  mask it) into the volume additively, never overwriting existing paths, the
+  database or gcroots, and then hands off. The entrypoint re-registers the
+  baked closure in the Nix database on every boot (`nix-store --load-db`), so
+  the seeded paths become valid, GC-safe store paths. The seed roughly doubles
+  the image; the fast path (no volume, or an already seeded one) never touches
+  it.
+
+  Upgrading a volume deployment from an image OLDER than the shim (v0.14.0 or
+  earlier as the NEW image) still needs the manual additive seed before the
+  first start:
 
   ```
   docker run --rm --entrypoint /bin/sh -v <nix-volume>:/vol "$DIGEST" \
