@@ -78,11 +78,18 @@ plant() {
 suite() {
   local runner="$1"
 
-  # Fast path: entrypoint resolves; the seed must not even be read.
+  # Fast path: entrypoint resolves; the seed must not even be read, and the
+  # boot must positively attest which path it took (a healthy boot and an
+  # inert shim must not look identical in the log).
   setup "$runner"
   plant "$tmp/nix/store/real-entrypoint"
   ln -s "$tmp/nix/store/real-entrypoint" "$tmp/bin/vega-builder-entrypoint"
   : > "$tmp/nix-seed/store/sentinel"
+  err="$(run_shim "$runner" 2>&1 >/dev/null)"
+  case "$err" in
+    *"store complete, direct handoff"*) echo "ok($runner): fast path attests itself" ;;
+    *) echo "FAIL($runner): fast path printed no attestation line (stderr: '$err')" >&2; fails=$((fails + 1)) ;;
+  esac
   check "$runner" "resolving entrypoint execs directly" 0 "entrypoint ran: one two"
   if [ -e "$tmp/nix/store/sentinel" ]; then
     echo "FAIL($runner): fast path copied the seed" >&2; fails=$((fails + 1))
@@ -113,7 +120,15 @@ suite() {
   mkdir -p "$tmp/nix-seed/store/bbb-existing"
   printf 'seed copy\n' > "$tmp/nix-seed/store/bbb-existing/marker"
   ln -s "$tmp/nix/store/aaa-entry/bin/run" "$tmp/bin/vega-builder-entrypoint"
-  run_shim "$runner" >/dev/null 2>&1
+  err="$(run_shim "$runner" 2>&1 >/dev/null)"
+  case "$err" in
+    *"seeding the baked store copy"*)
+      case "$err" in
+        *"direct handoff"*) echo "FAIL($runner): heal path also printed the fast-path line" >&2; fails=$((fails + 1)) ;;
+        *) echo "ok($runner): heal path attests seeding, not direct handoff" ;;
+      esac ;;
+    *) echo "FAIL($runner): heal path printed no seeding line (stderr: '$err')" >&2; fails=$((fails + 1)) ;;
+  esac
   if [ "$(cat "$tmp/nix/store/bbb-existing/marker")" = "volume copy" ]; then
     echo "ok($runner): seeding never overwrites existing volume paths"
   else
