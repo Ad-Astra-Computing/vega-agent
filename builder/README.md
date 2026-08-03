@@ -93,11 +93,25 @@ Notes:
   `docker restart`) reuses the saved registration in the container's writable
   layer and needs **no** new token, so it never crash-loops on the consumed
   one-shot token. Only *recreating* the container (e.g. updating the image) starts
-  a fresh layer and re-registers, which needs a fresh token. Set a stable, unique
-  `GITHUB_RUNNER_NAME` (defaults to `vega-<repo>`); on a recreate `--replace`
-  reclaims the same-named registration so you do not accumulate stale offline
-  runners. Remove a runner explicitly with `gh api --method DELETE
-  repos/<o>/<r>/actions/runners/<id>`.
+  a fresh layer and re-registers. With the supervisor-minted
+  `GITHUB_RUNNER_TOKEN` flow that means minting a fresh token for the recreate;
+  with the `GITHUB_PAT` fallback the entrypoint mints its own token and
+  re-registers unattended ("Successfully replaced the runner"), so no manual
+  token step is needed. Set a stable, unique `GITHUB_RUNNER_NAME` (defaults to
+  `vega-<repo>`); on a recreate `--replace` reclaims the same-named registration
+  so you do not accumulate stale offline runners. Remove a runner explicitly
+  with `gh api --method DELETE repos/<o>/<r>/actions/runners/<id>`.
+- **Recreating for an image update: carry only YOUR env across.** Pass the
+  operator-set variables to the new container (`GITHUB_OWNER`,
+  `GITHUB_REPOSITORY`, `GITHUB_RUNNER_NAME`, `GITHUB_RUNNER_LABELS`,
+  `VEGA_MODE`, `VEGA_NIX_SANDBOX`, your token or PAT and any other `VEGA_`
+  tuning you set) and let the new image supply its own `VEGA_BUILDER_ROOT`,
+  `VEGA_NIX_REGINFO`, `RUNNER_DIST`, `PATH`, `HOME`, `USER`, `SSL_CERT_FILE`,
+  `NIX_SSL_CERT_FILE` and `VEGA_BUILDER_VERSION`. Cloning the old container's
+  whole environment pins those to the previous release: a stale
+  `VEGA_BUILDER_ROOT` or `VEGA_NIX_REGINFO` roots and registers the OLD
+  closure, which silently keeps the runner executing the old image's store
+  paths after the upgrade.
 - The Nix store persists across restarts in the container's own layer, so a
   long-lived runner does not re-fetch. Do **not** mount a named volume over
   `/nix` (`-v vega-nix:/nix`): the image bakes its toolchain into `/nix/store`,
@@ -105,22 +119,36 @@ Notes:
   seeds a named volume from the image only when the volume is empty, so a new
   image's store paths are never added to an existing volume, leaving the runner's
   baked entrypoint and tools as dangling symlinks. If you want a store that
-  survives container *recreation*, you must `docker volume rm` it whenever you
-  update the image; the safer default is no `/nix` volume, with `reuse-cache`
-  substituting prior builds from your tenant.
+  survives container *recreation*, either `docker volume rm` it on each image
+  update or reseed it additively as described below; the safer default is no
+  `/nix` volume, with `reuse-cache` substituting prior builds from your tenant.
 
   If you run with a `/nix` volume anyway: the entrypoint re-registers the baked
   closure in the Nix database on every boot (`nix-store --load-db` from the
   image's registration), so store paths copied into the volume from the image
   (Docker's empty-volume seeding, or a manual reseed after an image update)
-  become valid, GC-safe paths at the next start. A boot preflight then verifies
-  the runner's own closure is present and registered and refuses to start
-  otherwise: a runner with a broken runtime would otherwise stay registered and
-  keep accepting jobs it cannot execute, failing each one at GitHub's
-  ten-minute no-communication timeout, which is worse than being offline
-  (queued jobs fail instead of waiting). The periodic GC has the same backstop:
-  if the runner's runtime ever disappears from the store, the container stops
-  instead of limping.
+  become valid, GC-safe paths at the next start. On every **image update** you
+  must seed the new image's store into the volume BEFORE starting the new
+  container: Docker only seeds an empty volume, so the old store masks the new
+  image's `/nix` and the container dies at exec with `stat
+  /bin/vega-builder-entrypoint: no such file or directory`. Additive seed, then
+  recreate:
+
+  ```
+  docker run --rm --entrypoint /bin/sh -v <nix-volume>:/vol "$DIGEST" \
+    -c 'cp -an /nix/store/. /vol/store/'
+  ```
+
+  Only `/nix/store` needs seeding: the image ships no `/nix/var` (the
+  entrypoint creates the Nix state and loads the closure registration itself),
+  so the next boot registers the seeded paths in the database. The boot
+  preflight then verifies the runner's own closure is present and registered
+  and refuses to start otherwise: a runner with a broken runtime would
+  otherwise stay registered and keep accepting jobs it cannot execute, failing
+  each one at GitHub's ten-minute no-communication timeout, which is worse than
+  being offline (queued jobs fail instead of waiting). The periodic GC has the
+  same backstop: if the runner's runtime ever disappears from the store, the
+  container stops instead of limping.
 - A persistent runner garbage-collects its store on a schedule so `/nix` does not
   grow without bound (it otherwise accumulates every path it ever built or
   substituted). The entrypoint runs `nix-collect-garbage --delete-older-than 7d`
