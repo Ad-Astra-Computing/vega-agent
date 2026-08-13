@@ -10,6 +10,7 @@ import { brandIntro } from "./ui.js";
 import { VERSION } from "./version.js";
 import { registerLogin } from "./commands/login.js";
 import { registerLogout } from "./commands/logout.js";
+import { registerReport } from "./commands/report.js";
 import { registerWhoami } from "./commands/whoami.js";
 import { registerView } from "./commands/view.js";
 import { registerDashboard } from "./commands/dashboard.js";
@@ -49,6 +50,7 @@ program
 
 registerLogin(program);
 registerLogout(program);
+registerReport(program);
 registerWhoami(program);
 registerView(program);
 registerDashboard(program);

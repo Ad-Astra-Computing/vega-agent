@@ -370,6 +370,36 @@ export class ControlPlaneClient {
   }
 
   /**
+   * Report that this dispatched reproduction failed.
+   *
+   * A reproduction that succeeds says so by attesting. One that fails used to
+   * say nothing at all, so the control plane could not tell a candidate that
+   * cannot be built from one nobody has tried yet, and kept dispatching it on a
+   * cooldown for ever. `unresolvable` is for provenance that cannot name the
+   * output, which no amount of retrying fixes.
+   *
+   * Best-effort by design: the job has already failed, and failing to report the
+   * failure must not change that outcome or mask the original error.
+   */
+  async reportReproFailure(hash: string, reason: ReproFailure): Promise<boolean> {
+    try {
+      await this.authedFetch(
+        `${this.baseUrl}/api/repro/dispatch-failed`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ hash, reason }),
+        },
+        "report reproduction failure",
+        async () => undefined,
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Owner local push (`vega push`): publish an uploaded NAR into the owner's
    * own namespace. The bearer here is an owner credential, not an OIDC token.
    * Unlike `attest`, this produces no shared-tier evidence; the server derives
@@ -390,6 +420,9 @@ export class ControlPlaneClient {
     );
   }
 }
+
+/** Why a dispatched reproduction did not produce an attestation. */
+export type ReproFailure = "unresolvable" | "build-failed";
 
 /** The push endpoint's response: the owner namespace the NAR landed in. */
 export interface PushResult {

@@ -262,7 +262,11 @@ export async function riskTool(
   return isError(v) ? v : assessRisk(v.result, v.narOk, v.narChecked);
 }
 
-const REPRO_STATUSES = ["reproducible", "diverged", "uncorroborated", "mirrored", "unknown"] as const;
+/** The verdicts the control plane answers with (edge `Verdict` in status.ts).
+ * Exported because more than one command needs it, and a second copy is how the
+ * two drift: an earlier one here listed a verdict the server never sends and
+ * omitted the one that matters most. */
+export const REPRO_STATUSES = ["reproducible", "diverged", "uncorroborated", "mirrored", "unknown"] as const;
 type ReproStatus = (typeof REPRO_STATUSES)[number];
 const REPRO_VERDICT: Record<ReproStatus, "allow" | "warn" | "deny"> = {
   reproducible: "allow",

@@ -23,7 +23,7 @@
           nodejs = pkgs.nodejs_24;
           agent = pkgs.buildNpmPackage (finalAttrs: {
             pname = "vega-agent";
-            version = "0.15.0";
+            version = "0.16.0";
             src = ./.;
             inherit nodejs;
             npmDeps = pkgs.importNpmLock { npmRoot = finalAttrs.src; };
@@ -47,15 +47,21 @@
                 bin="vega-''${pair%%:*}"
                 script="agent/''${pair##*:}.ts"
                 makeWrapper ${nodejs}/bin/node "$out/bin/$bin" \
-                  --add-flags "--import tsx $out/lib/vega-agent/$script" \
-                  --chdir "$out/lib/vega-agent" \
+                  --add-flags "--import file://$out/lib/vega-agent/node_modules/tsx/dist/loader.mjs" \
+                  --add-flags "$out/lib/vega-agent/$script" \
                   --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.zstd ]}
               done
 
               # The user-facing `vega` CLI.
+              # The loader is named by absolute path and the wrapper does NOT change
+              # directory. `--import tsx` resolves against the working directory,
+              # which is why this used to chdir into the store, and that broke every
+              # command that means "here": `vega push` with no argument built the
+              # store's own lib directory, `vega init` wrote into a read-only path,
+              # and `gate` and `diff` resolved relative installables against it.
               makeWrapper ${nodejs}/bin/node "$out/bin/vega" \
-                --add-flags "--import tsx $out/lib/vega-agent/cli/main.ts" \
-                --chdir "$out/lib/vega-agent" \
+                --add-flags "--import file://$out/lib/vega-agent/node_modules/tsx/dist/loader.mjs" \
+                --add-flags "$out/lib/vega-agent/cli/main.ts" \
                 --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.zstd ]}
               runHook postInstall
             '';
