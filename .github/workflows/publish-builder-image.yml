@@ -98,7 +98,21 @@ jobs:
       - name: Push
         id: push
         run: |
-          docker push "${{ steps.ref.outputs.image }}:${{ steps.ref.outputs.version }}-${{ matrix.arch }}"
+          # Retried because GHCR loses the blob-upload race when both
+          # architecture legs push overlapping blobs to the repository at the
+          # same time: the v0.16.0 run failed its amd64 push with "unknown
+          # blob" on the final manifest PUT while the arm64 leg was mid-push.
+          # The push is idempotent (content-addressed blobs, one tag), so a
+          # retry re-uploads whatever the registry admits to missing.
+          tries=3
+          for attempt in $(seq "$tries"); do
+            if docker push "${{ steps.ref.outputs.image }}:${{ steps.ref.outputs.version }}-${{ matrix.arch }}"; then
+              break
+            fi
+            test "$attempt" -lt "$tries" || { echo "push failed ${tries} times" >&2; exit 1; }
+            echo "push attempt ${attempt} failed; retrying" >&2
+            sleep $((attempt * 10))
+          done
           # Capture the immutable digest so cosign signs the content, not a tag.
           digest=$(docker inspect --format '{{ index .RepoDigests 0 }}' \
             "${{ steps.ref.outputs.image }}:${{ steps.ref.outputs.version }}-${{ matrix.arch }}")
