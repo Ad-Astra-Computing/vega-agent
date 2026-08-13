@@ -21,7 +21,7 @@ import { buildAttestBody } from "../src/agent/narinfo.js";
 import { planUploads } from "../src/agent/upload-plan.js";
 import { narObjectExists } from "../src/agent/upstream.js";
 import { mapConcurrent } from "../src/agent/concurrency.js";
-import { tenantSubstituter } from "../src/agent/substituter.js";
+import { tenantSubstituter, hostConfigBlock } from "../src/agent/substituter.js";
 import { parseVegaConfig, type VegaConfig } from "../src/agent/config.js";
 import { resolveBuilds, ownRepoSubflakeDir } from "../src/agent/builds.js";
 import { scanStorePath, redactKnownSecrets } from "../src/agent/secret-scan.js";
@@ -311,6 +311,27 @@ async function main(): Promise<void> {
   }
 
   console.log(`Done. ${promoted}/${total} published to the shared cache.`);
+
+  // Print the exact nix.conf lines a host needs to consume these builds. The
+  // agent has known them all along (the tenant key endpoint), but they were
+  // never surfaced where someone configuring a host would look, and the bare
+  // control-plane URL passes Nix's /nix-cache-info probe while serving none of
+  // the tenant paths. Best-effort: a failed key fetch must not fail the build.
+  if (repository) {
+    try {
+      const { url, keyUrl } = tenantSubstituter(controlPlane, repository);
+      const res = await fetch(keyUrl, { signal: AbortSignal.timeout(15_000) });
+      if (res.ok) {
+        const { publicKey } = (await res.json()) as { publicKey?: string };
+        if (typeof publicKey === "string" && publicKey !== "") {
+          console.log("");
+          for (const line of hostConfigBlock(controlPlane, url, publicKey)) console.log(line);
+        }
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
 }
 
 main().catch((e: unknown) => {

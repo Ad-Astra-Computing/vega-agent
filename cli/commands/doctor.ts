@@ -5,6 +5,7 @@ import pc from "picocolors";
 import { loadCredentialMaybe, DEFAULT_CONTROL_PLANE } from "../context.js";
 import { star, info, jsonEvent } from "../ui.js";
 import { VERSION, AGENT_REPO, compareVersions } from "../version.js";
+import { findSubstituterMismatch } from "../../src/agent/substituter.js";
 
 const exec = promisify(execFile);
 
@@ -80,6 +81,34 @@ export async function runChecks(): Promise<Check[]> {
         ? { name: "control plane", level: "ok", detail: url }
         : { name: "control plane", level: "fail", detail: `unreachable: ${url}` },
     );
+
+    // A tenant key trusted while no substituter can serve its paths. The bare
+    // control-plane URL answers /nix-cache-info with 200 (it is the shared-tier
+    // cache), so Nix accepts it and then silently misses every tenant path: a
+    // deployment ran that way for ten days, rebuilding its full closure on
+    // every CI run. Nothing at build time distinguishes it from a cold cache,
+    // so doctor is the place that can.
+    if (nix !== null) {
+      const subs = await onPath("nix", ["config", "show", "substituters"]);
+      const keys = await onPath("nix", ["config", "show", "trusted-public-keys"]);
+      if (subs !== null && keys !== null) {
+        const mismatch = findSubstituterMismatch(
+          subs.split(/\s+/).filter(Boolean),
+          keys.split(/\s+/).filter(Boolean),
+          url,
+        );
+        checks.push(
+          mismatch === null
+            ? { name: "substituter", level: "ok", detail: "tenant keys and substituters agree" }
+            : {
+                name: "substituter",
+                level: "warn",
+                detail: mismatch,
+                fix: "add the extra-substituters line the agent prints after a push (the /tenant/<owner>/<repo> URL)",
+              },
+        );
+      }
+    }
 
     // Explicit, on-demand staleness check (never a startup phone-home): compare
     // the running version to the latest published agent release. A network
