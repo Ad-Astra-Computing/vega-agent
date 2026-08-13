@@ -1,8 +1,24 @@
-# vega-agent
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/vega-logo-dark.svg">
+    <img src=".github/assets/vega-logo-light.svg" alt="The Vega star" width="88" height="88">
+  </picture>
 
-The client side of Vega, a reproducible-build Nix binary cache. This repository
-holds the agent that builds a flake and attests its outputs, and the reproducer
-that rebuilds someone else's derivation to corroborate it.
+  <h1>vega-agent</h1>
+
+  <p><strong>Reproducible. Provable. Independent.</strong><br>
+  The client side of Vega, a reproducible-build Nix binary cache.</p>
+
+  <p>
+    <a href="https://github.com/Ad-Astra-Computing/vega-agent/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/Ad-Astra-Computing/vega-agent?color=2a3a8a"></a>
+    <a href="https://github.com/Ad-Astra-Computing/vega-agent/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Ad-Astra-Computing/vega-agent/actions/workflows/ci.yml/badge.svg"></a>
+    <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-BSD--3--Clause-2a3a8a"></a>
+    <a href="https://docs.vega-cache.dev"><img alt="Docs" src="https://img.shields.io/badge/docs-vega--cache.dev-2a3a8a"></a>
+  </p>
+</div>
+
+This repository holds the agent that builds a flake and attests its outputs, and
+the reproducer that rebuilds someone else's derivation to corroborate it.
 
 Vega signs a build into its shared cache only after independent builders rebuild
 the same derivation and produce the same output, and it records every
@@ -10,6 +26,15 @@ attestation in a public, append-only transparency log. The control plane that
 enforces that is separate; it is documented at https://docs.vega-cache.dev. This
 repository is public on purpose: the code that builds and attests should be
 auditable by anyone who relies on the result.
+
+- [The `vega` CLI](#the-vega-cli)
+- [Layout](#layout)
+- [Attesting your own builds](#attesting-your-own-builds)
+- [Reproducing another build](#reproducing-another-build)
+- [Security](#security)
+- [Run with Nix](#run-with-nix)
+- [Development](#development)
+- [License](#license)
 
 ## The `vega` CLI
 
@@ -25,7 +50,7 @@ nix profile install github:Ad-Astra-Computing/vega-agent#vega   # or install it
 Or add it to your flake, pinned to a release tag for repeatable builds:
 
 ```nix
-inputs.vega.url = "github:Ad-Astra-Computing/vega-agent/v0.8.0";
+inputs.vega.url = "github:Ad-Astra-Computing/vega-agent/v0.16.0";
 # optional, to share this flake's nixpkgs:
 #   inputs.vega.inputs.nixpkgs.follows = "nixpkgs";
 ```
@@ -77,8 +102,9 @@ change-level `assess_change` gate to coding agents over the Model Context
 Protocol, so an agent can check a dependency before installing it.
 
 Full command set: `init`, `login`, `logout`, `whoami`, `status`, `doctor`,
-`push`, `verify`, `diff`, `gate`, `assess`, `mcp`, `trust` (`add`/`remove`/`list`),
-`view`; run `vega <command> --help` for details.
+`report`, `push`, `verify`, `diff`, `gate`, `assess`, `mcp`, `trust`
+(`add`/`remove`/`list`), `view`, `dashboard`; run `vega <command> --help` for
+details.
 The GitHub token from `login` is used once and never stored; only a short-lived
 Vega credential is kept (`~/.config/vega/credential`, mode 0600), and the control
 plane is required to be https.
