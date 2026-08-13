@@ -5,7 +5,7 @@ import pc from "picocolors";
 import { loadCredentialMaybe, DEFAULT_CONTROL_PLANE } from "../context.js";
 import { star, info, jsonEvent } from "../ui.js";
 import { VERSION, AGENT_REPO, compareVersions } from "../version.js";
-import { findSubstituterMismatch } from "../../src/agent/substituter.js";
+import { findSubstituterMismatch, tenantKeyNames } from "../../src/agent/substituter.js";
 
 const exec = promisify(execFile);
 
@@ -99,7 +99,16 @@ export async function runChecks(): Promise<Check[]> {
         );
         checks.push(
           mismatch === null
-            ? { name: "substituter", level: "ok", detail: "tenant keys and substituters agree" }
+            ? {
+                name: "substituter",
+                level: "ok",
+                // Claim only what was checked: "agree" when tenant keys exist
+                // and are servable, otherwise just that none are configured.
+                detail:
+                  tenantKeyNames(keys.split(/\s+/).filter(Boolean)).length > 0
+                    ? "tenant keys and substituters agree"
+                    : "no tenant keys in the nix config",
+              }
             : {
                 name: "substituter",
                 level: "warn",

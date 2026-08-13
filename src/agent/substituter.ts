@@ -55,15 +55,39 @@ export function findSubstituterMismatch(
   controlPlane: string,
 ): string | null {
   const base = controlPlane.replace(/\/$/, "");
-  const tenantKeyNames = trustedKeys
-    .map((k) => k.split(":")[0] ?? "")
-    .filter((n) => n.startsWith("vega-") && n !== "vega-cache-1" && !n.startsWith("vega-view-"));
-  if (tenantKeyNames.length === 0) return null;
+  const names0 = tenantKeyNames(trustedKeys);
+  if (names0.length === 0) return null;
   const norm = substituters.map((s) => s.replace(/\/$/, ""));
   if (norm.some((s) => s.startsWith(`${base}/tenant/`) || s.startsWith(`${base}/u/`))) return null;
-  const names = tenantKeyNames.join(", ");
+  const names = names0.join(", ");
   return norm.includes(base)
     ? `${names} is trusted but the substituter is the bare ${base}, which serves only the shared tier; ` +
         `tenant builds are under ${base}/tenant/<owner>/<repo>`
     : `${names} is trusted but no ${base}/tenant/ substituter is configured`;
+}
+
+/**
+ * Shape-check a Nix public key (`<name>:<base64>`) before printing it.
+ *
+ * The value comes from the control plane, which is named by a stored
+ * credential, and it is printed to a terminal and pasted into host configs. A
+ * tampered credential file or a hostile server must not be able to smuggle
+ * newlines or terminal escapes into that output; report.ts holds the same
+ * line for verdicts.
+ */
+export function isNixPublicKey(s: string): boolean {
+  return /^[A-Za-z0-9._-]+:[A-Za-z0-9+/]+=*$/.test(s);
+}
+
+/** Shape-check a server-relative substituter path (e.g. `/tenant/o/r`). */
+export function isSubstituterPath(s: string): boolean {
+  return /^\/[A-Za-z0-9._:/-]+$/.test(s);
+}
+
+/** The names of the Vega TENANT keys among nix.conf trusted keys: `vega-*`
+ * minus the shared-tier key and per-consumer view keys. */
+export function tenantKeyNames(trustedKeys: string[]): string[] {
+  return trustedKeys
+    .map((k) => k.split(":")[0] ?? "")
+    .filter((n) => n.startsWith("vega-") && n !== "vega-cache-1" && !n.startsWith("vega-view-"));
 }

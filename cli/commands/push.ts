@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pc from "picocolors";
 import { ControlPlaneClient, type PushResult } from "../../src/agent/client.js";
-import { hostConfigBlock } from "../../src/agent/substituter.js";
+import { hostConfigBlock, isNixPublicKey, isSubstituterPath } from "../../src/agent/substituter.js";
 import { buildAttestBody } from "../../src/agent/narinfo.js";
 import { partitionByUpstream } from "../../src/agent/upstream.js";
 import { mapConcurrent } from "../../src/agent/concurrency.js";
@@ -108,13 +108,18 @@ export function registerPush(program: Command): void {
           // control-plane URL passes Nix's /nix-cache-info probe (it is the
           // shared-tier cache) while serving none of them, a mistake that once
           // cost a deployment ten days of full rebuilds. Best-effort.
-          if (last !== undefined && last.substituter !== "") {
+          // Both server-supplied values are shape-checked before use: the
+          // substituter must be a plain server-relative path (an absolute URL
+          // would concatenate into garbage and could name another host), and
+          // the key must be `name:base64` so nothing printable-hostile reaches
+          // the terminal or a pasted host config.
+          if (last !== undefined && isSubstituterPath(last.substituter)) {
             try {
               const base = cred.url.replace(/\/$/, "");
               const res = await fetch(`${base}${last.substituter}/key`, { signal: AbortSignal.timeout(5000) });
               if (res.ok) {
                 const { publicKey } = (await res.json()) as { publicKey?: string };
-                if (typeof publicKey === "string" && publicKey !== "") {
+                if (typeof publicKey === "string" && isNixPublicKey(publicKey)) {
                   info("");
                   for (const line of hostConfigBlock(cred.url, last.substituter, publicKey)) info(pc.gray(line));
                 }

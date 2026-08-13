@@ -21,7 +21,7 @@ import { buildAttestBody } from "../src/agent/narinfo.js";
 import { planUploads } from "../src/agent/upload-plan.js";
 import { narObjectExists } from "../src/agent/upstream.js";
 import { mapConcurrent } from "../src/agent/concurrency.js";
-import { tenantSubstituter, hostConfigBlock } from "../src/agent/substituter.js";
+import { tenantSubstituter, hostConfigBlock, isNixPublicKey } from "../src/agent/substituter.js";
 import { parseVegaConfig, type VegaConfig } from "../src/agent/config.js";
 import { resolveBuilds, ownRepoSubflakeDir } from "../src/agent/builds.js";
 import { scanStorePath, redactKnownSecrets } from "../src/agent/secret-scan.js";
@@ -323,7 +323,9 @@ async function main(): Promise<void> {
       const res = await fetch(keyUrl, { signal: AbortSignal.timeout(15_000) });
       if (res.ok) {
         const { publicKey } = (await res.json()) as { publicKey?: string };
-        if (typeof publicKey === "string" && publicKey !== "") {
+        // Shape-checked before printing: this string ends up pasted into host
+        // configs, so a hostile response must not carry escapes or extra lines.
+        if (typeof publicKey === "string" && isNixPublicKey(publicKey)) {
           console.log("");
           for (const line of hostConfigBlock(controlPlane, url, publicKey)) console.log(line);
         }
