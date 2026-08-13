@@ -10,10 +10,13 @@ This is Phase 1 (runner mode).
 
 ## Pull from GHCR
 
-The image is published per release and signed with cosign (keyless, via the
-release workflow's OIDC identity). Pull it, resolve it to an immutable digest,
-verify that digest, and run the digest, so what you run is exactly what you
-verified (a tag like `:latest` can move between verify and run):
+The image is published per release for `x86_64-linux` and `aarch64-linux` as a
+manifest list, each architecture built natively and signed with cosign (keyless,
+via the release workflow's OIDC identity) along with the list itself, so
+`docker pull` selects the right image on x86 and ARM hosts alike. Pull it,
+resolve it to an immutable digest, verify that digest, and run the digest, so
+what you run is exactly what you verified (a tag like `:latest` can move
+between verify and run):
 
 ```
 docker pull ghcr.io/ad-astra-computing/vega-builder:latest
