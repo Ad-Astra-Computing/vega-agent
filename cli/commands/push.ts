@@ -3,7 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pc from "picocolors";
-import { ControlPlaneClient } from "../../src/agent/client.js";
+import { ControlPlaneClient, type PushResult } from "../../src/agent/client.js";
+import { hostConfigBlock } from "../../src/agent/substituter.js";
 import { buildAttestBody } from "../../src/agent/narinfo.js";
 import { partitionByUpstream } from "../../src/agent/upstream.js";
 import { mapConcurrent } from "../../src/agent/concurrency.js";
@@ -45,6 +46,7 @@ export function registerPush(program: Command): void {
         const work = await mkdtemp(join(tmpdir(), "vega-push-"));
         const ns = `owner:${cred.userId ?? "?"}`;
         let pushed = 0;
+        let last: PushResult | undefined;
 
         try {
           for (const installable of targets) {
@@ -89,7 +91,7 @@ export function registerPush(program: Command): void {
               const nar = await makeNar(p.path, work);
               const checksum = sha256NixHashToBase64(nar.fileHash);
               await client.uploadNar(nar.url, nar.fileHash, nar.file, checksum);
-              await client.push(buildAttestBody(p, nar));
+              last = await client.push(buildAttestBody(p, nar));
               tick(nar.fileSize, p.path);
             });
             if (isTTY && !opts.json && paths.length > 0) process.stdout.write("\n");
@@ -102,6 +104,25 @@ export function registerPush(program: Command): void {
         if (!opts.json) {
           success(`Pushed ${pushed} path(s) to ${pc.bold(ns)}.`);
           info(pc.gray(`Consumers who trust you (vega trust add ${cred.login}) get them via their view.`));
+          // The exact lines a host needs to consume these paths. The bare
+          // control-plane URL passes Nix's /nix-cache-info probe (it is the
+          // shared-tier cache) while serving none of them, a mistake that once
+          // cost a deployment ten days of full rebuilds. Best-effort.
+          if (last !== undefined && last.substituter !== "") {
+            try {
+              const base = cred.url.replace(/\/$/, "");
+              const res = await fetch(`${base}${last.substituter}/key`, { signal: AbortSignal.timeout(5000) });
+              if (res.ok) {
+                const { publicKey } = (await res.json()) as { publicKey?: string };
+                if (typeof publicKey === "string" && publicKey !== "") {
+                  info("");
+                  for (const line of hostConfigBlock(cred.url, last.substituter, publicKey)) info(pc.gray(line));
+                }
+              }
+            } catch {
+              /* best-effort */
+            }
+          }
         }
       },
     );

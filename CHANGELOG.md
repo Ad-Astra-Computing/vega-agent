@@ -6,6 +6,19 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+### Added
+
+- After a successful publish, the CI agent and `vega push` print the exact
+  `extra-substituters` and `extra-trusted-public-keys` lines a host needs to
+  consume the tenant's builds. The bare control-plane URL answers Nix's
+  `/nix-cache-info` probe with 200 (it is the shared-tier cache) while serving
+  no tenant path, so a substituter pointed at the root was indistinguishable
+  from a cold cache; one deployment rebuilt its full closure on every CI run
+  for ten days before anyone could tell.
+- `vega doctor` and `vega report` warn when the local nix configuration trusts
+  a Vega tenant key but no `/tenant/` or `/u/` substituter can serve its paths,
+  which is the exact shape of that misconfiguration.
+
 ## [0.16.0] - 2026-08-13
 
 ### Added
