@@ -182,6 +182,39 @@ export function nixBuild(
   });
 }
 
+
+/**
+ * Ask the evaluator whether the installable resolves at all, and return what it
+ * said on failure.
+ *
+ * `nixBuild` streams its stderr straight to the console so build logs are
+ * visible, and rejects with a fixed string. That is right for the build and
+ * useless for telling apart "this cannot be built" from "this attribute does
+ * not exist", which the control plane treats very differently: the second
+ * retires the candidate for everyone at once.
+ *
+ * So on failure we ask again, cheaply, with the output captured. Evaluation
+ * already happened during the build, so this exposes nothing new, and it is
+ * bounded in time and size. The answer comes from the evaluator rather than
+ * from anything the build printed, which is what keeps a flake from talking its
+ * way into a retirement by echoing nix's wording.
+ *
+ * Returns the captured stderr, or an empty string when the attribute does
+ * resolve.
+ */
+export async function evalOutputPathError(installable: string): Promise<string> {
+  try {
+    await exec("nix", ["eval", "--raw", "--no-write-lock-file", "--", `${installable}.outPath`], {
+      timeout: 120_000,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    return "";
+  } catch (e) {
+    const stderr = (e as { stderr?: unknown }).stderr;
+    return typeof stderr === "string" ? stderr : e instanceof Error ? e.message : String(e);
+  }
+}
+
 /** `nix path-info --json --recursive` over the closure of an installable. */
 export async function pathInfoClosure(installable: string): Promise<RawPathInfo[]> {
   return pathInfo(installable, true);

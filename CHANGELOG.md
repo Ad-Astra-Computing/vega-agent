@@ -6,6 +6,44 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-08-13
+
+### Added
+
+- `vega report` composes a problem report and prints a prefilled GitHub issue
+  URL. It carries what makes a report answerable, the agent version, the
+  platform, the control plane, the credential's state and the doctor checks, and
+  never the enrolled login, the environment, any config file or logs. `--hash`
+  adds an output and its public verdict, `--error` quotes text you pass. Nothing
+  is sent by the command: it ends at a URL you open, read and edit.
+- A dispatched reproduction that fails now reports the failure to the control
+  plane, so a candidate whose provenance cannot name its output is retired
+  rather than re-dispatched on a cooldown for ever. Inert until the reproducer
+  workflow passes the candidate hash.
+- The builder boot shim attests the fast path as well as the healing one, so
+  both routes leave a record.
+- The builder image is published for `aarch64-linux` as well as `x86_64-linux`,
+  as a manifest list, so a donor on ARM hardware has an image to run. Each
+  architecture builds natively and is signed, and the list is assembled from
+  those signed digests and signed itself.
+
+### Changed
+
+- `vega doctor`'s checks moved into one function that `vega report` also calls,
+  so the two cannot disagree about the state of a machine.
+- The publish output names each path unambiguously, and the substituter and
+  timeout guidance in the scaffolded config matches what the action reads.
+
+### Fixed
+
+- `vega doctor` and `vega report` no longer hang on an unreachable control
+  plane: the reachability probe has a deadline, which matters most when the
+  control plane is the thing being reported.
+- The flake wrapper changed directory into the Nix store, so `vega push`, `vega
+  init`, `vega gate` and `vega diff` resolved paths against the store rather
+  than where you ran them. Present since 0.13.0 for anyone installing with `nix
+  run` or `nix profile`.
+
 ## [0.13.0] - 2026-07-16
 
 ### Fixed
@@ -272,7 +310,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
   bodies, and stdin frames. Reviewed against the OWASP Top 10 for LLM
   Applications and the MCP security guidance.
 
-[Unreleased]: https://github.com/Ad-Astra-Computing/vega-agent/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/Ad-Astra-Computing/vega-agent/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/Ad-Astra-Computing/vega-agent/releases/tag/v0.16.0
 [0.12.0]: https://github.com/Ad-Astra-Computing/vega-agent/releases/tag/v0.12.0
 [0.11.0]: https://github.com/Ad-Astra-Computing/vega-agent/releases/tag/v0.11.0
 [0.10.0]: https://github.com/Ad-Astra-Computing/vega-agent/releases/tag/v0.10.0

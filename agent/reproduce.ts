@@ -16,13 +16,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fetchActionsOidcToken } from "../src/agent/oidc.js";
 import { OidcTokenProvider } from "../src/agent/token-provider.js";
+import { unresolvableProvenance } from "../src/agent/repro-failure.js";
 import { ControlPlaneClient } from "../src/agent/client.js";
 import { buildAttestBody } from "../src/agent/narinfo.js";
 import { lockedInstallable } from "../src/agent/reproduce.js";
 import { sanitizeFlakeDir, sanitizeFlakeAttr } from "../src/nix/flake-dir.js";
 import type { BuildProvenance } from "../src/trust/policy.js";
 import { sha256NixHashToBase64 } from "../src/nix/hash.js";
-import { nixBuild, pathInfoOutputs, makeNar, assertSubflakeDirContained } from "./nix.js";
+import { nixBuild, pathInfoOutputs, makeNar, assertSubflakeDirContained, evalOutputPathError } from "./nix.js";
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -99,8 +100,32 @@ async function main(): Promise<void> {
   const client = new ControlPlaneClient(controlPlane, (force) => provider.get(force));
 
   console.log(`Reproducing ${installable} ...`);
-  await nixBuild(installable);
-  const outputs = await pathInfoOutputs(installable);
+  // The candidate this job is for, so a failure can be recorded against it. The
+  // dispatcher supplies it; a hand-run reproduction has none, and then a failure
+  // is simply not reported rather than reported against the wrong thing.
+  const candidateHash = (process.env.VEGA_HASH ?? "").trim();
+  let outputs;
+  try {
+    await nixBuild(installable);
+    outputs = await pathInfoOutputs(installable);
+  } catch (e) {
+    // Tell the control plane WHY, because the two answers mean different things
+    // to the queue. Provenance that cannot name the output will never resolve,
+    // however many times it is dispatched; a build that fell over might pass on
+    // the next attempt.
+    const message = e instanceof Error ? e.message : String(e);
+    if (candidateHash !== "") {
+      // Ask the evaluator directly. The build's own failure message is a fixed
+      // string, because its stderr goes to the console where the logs belong, so
+      // it cannot tell "this attribute does not exist" from "this did not
+      // build", and those two mean different things to the queue.
+      const probe = await evalOutputPathError(installable).catch(() => "");
+      const reason = unresolvableProvenance(probe) ? "unresolvable" : "build-failed";
+      const sent = await client.reportReproFailure(candidateHash, reason);
+      console.log(`Reported ${reason} for ${candidateHash}${sent ? "" : " (report failed to send)"}`);
+    }
+    throw e;
+  }
 
   const work = await mkdtemp(join(tmpdir(), "vega-reproduce-"));
   let agreed = 0;

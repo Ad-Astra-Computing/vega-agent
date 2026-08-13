@@ -17,7 +17,18 @@ permissions:
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    # One job per architecture, each building natively. A donor's machine is as
+    # likely to be ARM as x86 now, and an image published for one of them leaves
+    # the other with nothing to run. Cross-building under emulation would be
+    # slower and would put qemu in the path of a signed artifact.
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     # Defense in depth: a release event always carries its tag ref, but require
     # a tag ref explicitly so only a tagged release is ever signed and published.
     if: startsWith(github.ref, 'refs/tags/')
@@ -48,12 +59,18 @@ jobs:
 
       - name: Load and tag
         id: ref
+        # Context values reach the shell through env, not template interpolation
+        # into the script body, so a value with shell metacharacters is data
+        # rather than code.
+        env:
+          OWNER: ${{ github.repository_owner }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           # The version is taken from the image Nix actually built (its loaded
           # tag is buildLayeredImage's `tag = agent.version`), so the GHCR tag can
           # never disagree with the built artifact even if other version strings
           # drift. GHCR requires a lowercase path; the org is mixed-case.
-          owner=$(printf '%s' "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          owner=$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')
           image="ghcr.io/${owner}/vega-builder"
           loaded=$(docker load < result | sed -n 's/^Loaded image: //p' | head -1)
           test -n "$loaded" # fail loudly if the load output format changed
@@ -61,27 +78,101 @@ jobs:
           # The built image version must match the release tag, so a release can
           # never publish/sign a stale version or move :latest to the wrong image
           # (e.g. tagging v0.3.0 while flake.nix still says 0.2.0).
-          test "${{ github.ref_name }}" = "v${version}" \
-            || { echo "release tag ${{ github.ref_name }} != image v${version}; bump flake.nix" >&2; exit 1; }
-          docker tag "$loaded" "${image}:${version}"
-          docker tag "$loaded" "${image}:latest"
+          test "$RELEASE_TAG" = "v${version}" \
+            || { echo "release tag $RELEASE_TAG != image v${version}; bump flake.nix" >&2; exit 1; }
+          # Per-architecture tags. The plain version and :latest are the
+          # manifest list, assembled once both architectures are pushed, so a
+          # puller gets the image for their own platform.
+          docker tag "$loaded" "${image}:${version}-${{ matrix.arch }}"
           echo "image=${image}" >> "$GITHUB_OUTPUT"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
         run: |
-          printf '%s' "${{ secrets.GITHUB_TOKEN }}" \
-            | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          printf '%s' "$GHCR_TOKEN" \
+            | docker login ghcr.io -u "$GHCR_USER" --password-stdin
 
       - name: Push
         id: push
         run: |
-          docker push "${{ steps.ref.outputs.image }}:${{ steps.ref.outputs.version }}"
-          docker push "${{ steps.ref.outputs.image }}:latest"
+          docker push "${{ steps.ref.outputs.image }}:${{ steps.ref.outputs.version }}-${{ matrix.arch }}"
           # Capture the immutable digest so cosign signs the content, not a tag.
           digest=$(docker inspect --format '{{ index .RepoDigests 0 }}' \
-            "${{ steps.ref.outputs.image }}:${{ steps.ref.outputs.version }}")
+            "${{ steps.ref.outputs.image }}:${{ steps.ref.outputs.version }}-${{ matrix.arch }}")
           echo "ref=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Sign (keyless)
+        # Each architecture's own image is signed as well as the manifest list
+        # below, so a puller that resolves to one platform can verify the exact
+        # bytes it received.
         run: cosign sign --yes "${{ steps.push.outputs.ref }}"
+
+      - name: Record the signed digest
+        # Carried to the manifest job as the digest that was just signed, rather
+        # than letting that job resolve the arch TAG again. A tag can be moved by
+        # anyone who can write to the registry, and the window between these jobs
+        # includes an approval gate, so assembling the list from tags could put
+        # unsigned children under a signed index.
+        run: |
+          mkdir -p digests
+          printf '%s' "${{ steps.push.outputs.ref }}" > "digests/${{ matrix.arch }}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digest-${{ matrix.arch }}
+          path: digests/${{ matrix.arch }}
+          retention-days: 1
+
+  manifest:
+    needs: publish
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    environment: ghcr-publish
+    steps:
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" \
+            | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: digest-*
+          merge-multiple: true
+          path: digests
+      - name: Assemble and sign the manifest list
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          owner=$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')
+          image="ghcr.io/${owner}/vega-builder"
+          version="${GITHUB_REF_NAME#v}"
+          # The digests each leg signed, not the tags pointing at them. Each
+          # file must be a full image@sha256 ref on its own: validating the
+          # pair as one string would let one good ref mask a truncated other.
+          # The image prefix is compared literally, not as a regex.
+          for arch in amd64 arm64; do
+            ref=$(cat "digests/${arch}")
+            hex="${ref#"${image}@sha256:"}"
+            if test "$hex" = "$ref" || ! printf '%s' "$hex" | grep -qE '^[0-9a-f]{64}$'; then
+              echo "digests/${arch} is not an ${image}@sha256 ref" >&2; exit 1
+            fi
+          done
+          amd64=$(cat digests/amd64)
+          arm64=$(cat digests/arm64)
+          for tag in "$version" latest; do
+            docker buildx imagetools create --tag "${image}:${tag}" "$amd64" "$arm64"
+          done
+          # Sign the list by digest, so the signature covers the index a puller
+          # resolves rather than a tag that can move. Both tags are assembled
+          # from the same sources, so they name one index; resolve each anyway
+          # and sign every distinct digest, so a divergence cannot leave the
+          # index behind either tag unsigned.
+          digest=$(docker buildx imagetools inspect --format '{{ .Manifest.Digest }}' "${image}:${version}")
+          latest=$(docker buildx imagetools inspect --format '{{ .Manifest.Digest }}' "${image}:latest")
+          cosign sign --yes "${image}@${digest}"
+          test "$latest" = "$digest" || cosign sign --yes "${image}@${latest}"

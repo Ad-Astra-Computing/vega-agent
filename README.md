@@ -49,7 +49,16 @@ vega view                   # print the nix.conf substituter + keys for your vie
 vega trust add github:alice # trust a builder (scoped --package/--flake/--org, revocable)
 vega status                 # auth + connectivity
 vega doctor                 # diagnose nix / zstd / auth, and check for a newer release
+vega report                 # compose a problem report and open a prefilled GitHub issue
 ```
+
+`vega report` gathers what makes a report answerable, the same checks `vega
+doctor` runs plus the agent version, the platform and the control plane, prints
+the whole thing, and ends at a prefilled GitHub issue URL. Nothing is sent by the
+command: you open the link, read it and edit it. It never includes the enrolled
+login, your environment, any config file or logs, because that text is headed for
+a public tracker and a build log can carry a presigned URL or a token fragment.
+Add `--hash` for an output and its verdict, and `--error` to quote text yourself.
 
 `vega verify` checks the cache's signature against a key you already trust, the
 signed tree head, the build's RFC 9162 inclusion proof, and re-derives the NAR
