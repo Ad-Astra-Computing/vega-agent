@@ -99,6 +99,19 @@ describe("ControlPlaneClient", () => {
     expect(calls[0]!.headers.get("x-amz-checksum-sha256")).toBe(checksum);
   });
 
+  it("does not crash on a fractional upload deadline from a multi-GB NAR", async () => {
+    // The upload deadline scales with payload as (bytes / MiB) * 1000, a float for
+    // any NAR that is not a whole number of mebibytes. AbortSignal.timeout throws
+    // ERR_OUT_OF_RANGE ("delay ... must be an integer") on a fraction, so a large
+    // closure crashed the publish at the very end, after the build and most paths
+    // had already succeeded. 1859098.7529754639 is a value seen in production.
+    const { fn } = fakeFetch(() => new Response(null, { status: 200 }));
+    const client = new ControlPlaneClient(base, "jwt", fn);
+    await expect(
+      client.putNar("https://r2/put?sig=x", new Uint8Array([1, 2, 3]), "Zm9vYmFyYmF6", 1859098.7529754639),
+    ).resolves.toBeUndefined();
+  });
+
   it("streams a file-backed Blob and re-reads it on retry (replayable, no full-buffer)", async () => {
     const file = join(tmpdir(), `vega-nar-${Math.random().toString(36).slice(2)}.bin`);
     const bytes = new Uint8Array([10, 20, 30, 40, 50]);

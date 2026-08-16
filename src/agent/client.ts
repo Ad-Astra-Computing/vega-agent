@@ -211,7 +211,15 @@ export class ControlPlaneClient {
    * attempt, not one shared across the retry loop: a shared signal would count
    * backoff sleeps against the budget and abort every later attempt at once. */
   private withDeadline(init: RequestInit, timeoutMs: number): RequestInit {
-    return { ...init, signal: AbortSignal.timeout(timeoutMs) };
+    // AbortSignal.timeout requires integer milliseconds and throws ERR_OUT_OF_RANGE
+    // on a fraction. The upload deadline scales with payload size
+    // ((bytes / MiB) * 1000), which is a float for any NAR that is not a whole
+    // number of mebibytes, so a large NAR (a ~1.9 GB closure) crashed the publish
+    // at the end with "delay ... must be an integer" after the build and most of
+    // the paths had already succeeded. Round up: the deadline only ever needs to
+    // be at least this long, and this is the single point every deadline flows
+    // through.
+    return { ...init, signal: AbortSignal.timeout(Math.ceil(timeoutMs)) };
   }
 
   /** A deadline abort relabeled with the request it killed; other errors pass. */
