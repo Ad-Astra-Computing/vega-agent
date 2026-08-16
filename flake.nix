@@ -3,8 +3,19 @@
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
+  # The GitHub Actions runner is pinned SEPARATELY from the rest of the toolchain,
+  # because GitHub deprecates old runner versions SERVER-SIDE on its own schedule:
+  # a deprecated runner is refused before it can self-update, and every deployed
+  # builder bricks at once (the store-baked runner cannot update in place). The
+  # main pin lagged at github-runner 2.334.0, which GitHub deprecated, taking the
+  # whole fleet offline. Advancing only this input re-floats the runner without
+  # rebuilding the rest of the image on a fresh nixpkgs. This is the one knob to
+  # bump when GitHub deprecates a runner: move it to a rev whose github-runner is
+  # current (`nix eval --raw --impure --expr '(import (builtins.getFlake "github:NixOS/nixpkgs/<rev>") {}).github-runner.version'`).
+  inputs.nixpkgs-runner.url = "github:NixOS/nixpkgs/8be7bd0c83f12e2e3bbba07c9044d6fed9e66f7f";
+
   outputs =
-    { self, nixpkgs }:
+    { self, nixpkgs, nixpkgs-runner }:
     let
       systems = [
         "x86_64-linux"
@@ -23,7 +34,7 @@
           nodejs = pkgs.nodejs_24;
           agent = pkgs.buildNpmPackage (finalAttrs: {
             pname = "vega-agent";
-            version = "0.17.0";
+            version = "0.17.1";
             src = ./.;
             inherit nodejs;
             npmDeps = pkgs.importNpmLock { npmRoot = finalAttrs.src; };
@@ -82,7 +93,9 @@
           # the cached repo's workflow must be node24-capable (actions/checkout@v5+,
           # etc.). Bound once so the image contents and RUNNER_DIST are the SAME
           # derivation (otherwise the default node20 runner sneaks back in).
-          githubRunner = pkgs.github-runner.override { nodeRuntimes = [ "node24" ]; };
+          # Taken from nixpkgs-runner (a separately advanceable pin), NOT the main
+          # nixpkgs, so a server-side runner deprecation is a one-input bump.
+          githubRunner = nixpkgs-runner.legacyPackages.${system}.github-runner.override { nodeRuntimes = [ "node24" ]; };
           entrypoint = pkgs.writeShellApplication {
             name = "vega-builder-entrypoint";
             runtimeInputs = [
