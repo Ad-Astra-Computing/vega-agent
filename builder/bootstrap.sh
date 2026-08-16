@@ -6,8 +6,9 @@
 # an image update the old store masks the new one and every /bin symlink into
 # it dangles; see the README's volume notes).
 #
-# Fast path: the real entrypoint resolves, so /nix is the image's own store or
-# an already-seeded volume. Exec it directly; no copying, no overhead.
+# Fast path: the whole baked closure is present, so /nix is the image's own
+# store or an already-seeded volume. Exec the entrypoint directly; no copying,
+# no overhead.
 #
 # Heal path: the entrypoint symlink dangles. Seed the baked store copy
 # (/nix-seed/store, a duplicate of the image's /nix/store living OUTSIDE /nix
@@ -29,7 +30,19 @@ bb="/bin/busybox"
 # path's positive attestation: without it a healthy boot and an inert shim
 # look identical in the log, and a mechanism observable only when it fires
 # cannot be trusted from the outside.
-if [ -e "$real" ]; then
+#
+# The check is the whole closure, not just the entrypoint. A release can change
+# a store path the entrypoint does NOT depend on (this one bumps the runner off
+# a separate pin while the entrypoint stays byte-identical), and then an old
+# volume still resolves the entrypoint while the new runner is absent. An
+# entrypoint-only fast path would hand off to a store missing the new runner and
+# the preflight would refuse to boot: a silent re-brick on the very upgrade meant
+# to fix one. VEGA_BUILDER_ROOT is the buildEnv over the ENTIRE baked closure, so
+# its path changes whenever anything in the image does; requiring it (and the
+# runner explicitly) present means any changed path forces the additive reseed
+# below. Defaulting an unset var to a nonexistent path just routes to the safe
+# seed path rather than trusting an incomplete store.
+if [ -e "$real" ] && [ -e "${VEGA_BUILDER_ROOT:-/nonexistent}" ] && [ -e "${RUNNER_DIST:-/nonexistent}" ]; then
   echo "vega-builder: boot shim: store complete, direct handoff" >&2 || true
   exec "$real" "$@"
 fi

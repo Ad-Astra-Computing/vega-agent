@@ -31,6 +31,14 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
   bump and a patch release rather than a full toolchain move. GitHub sets that
   schedule, not us, so the runner pin is kept current independently of the rest of
   the image.
+- The boot shim reseeds a persistent `/nix` volume whenever the baked closure
+  changed, not only when the entrypoint symlink dangles. A release that changes a
+  store path the entrypoint does not depend on (this one bumps the runner while the
+  entrypoint is byte-identical) left an older volume resolving the entrypoint but
+  missing the new runner, so the shim handed off and the preflight then refused to
+  boot: the upgrade re-bricked on a volume deployment. The fast path now also
+  requires the closure root and the runner present, so any changed path triggers
+  the additive reseed and a volume deployment self-heals on pull like a fresh one.
 
 ## [0.17.0] - 2026-08-13
 
