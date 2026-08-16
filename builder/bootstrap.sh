@@ -71,12 +71,19 @@ for p in /nix-seed/store/*; do
   fi
 done
 
+# A copy failure is fatal even when the entrypoint itself resolves. In the
+# changed-closure shape the entrypoint was present all along, so a check of only
+# $real would hand off on a half-seeded store (a runner copy that hit a full
+# disk) and lose this diagnosis to the entrypoint's generic preflight. When
+# seeding succeeds the full closure was copied, so $real resolving then means the
+# store is complete.
+if [ "$failed" -ne 0 ]; then
+  echo "vega-builder: FATAL: seeding failed (read-only /nix, or the disk is full); the store is incomplete." >&2
+  exit 64
+fi
+
 if [ ! -e "$real" ]; then
-  if [ "$failed" -ne 0 ]; then
-    echo "vega-builder: FATAL: seeding failed (read-only /nix, or the disk is full) and ${real} still does not resolve." >&2
-  else
-    echo "vega-builder: FATAL: seeding did not make ${real} resolve; the /nix mount is not a usable store." >&2
-  fi
+  echo "vega-builder: FATAL: seeding did not make ${real} resolve; the /nix mount is not a usable store." >&2
   exit 64
 fi
 

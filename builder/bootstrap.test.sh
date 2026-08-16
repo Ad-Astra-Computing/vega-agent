@@ -147,6 +147,28 @@ suite() {
     echo "FAIL($runner): the new runner was not seeded" >&2; fails=$((fails + 1))
   fi
   rm -rf "$tmp"
+
+  # A reseed copy that fails (read-only /nix, full disk) must be fatal with the
+  # disk-full diagnosis, even though the entrypoint resolves the whole time.
+  # Without that, a half-seeded store (the new runner missing) would be handed off
+  # and the specific diagnosis lost to the entrypoint's generic preflight. A
+  # read-only /nix/store forces the copy to fail (both test environments run
+  # non-root, so the mode is enforced).
+  setup "$runner"
+  mkdir -p "$tmp/nix/store/entry/bin"
+  plant "$tmp/nix/store/entry/bin/run"
+  ln -s "$tmp/nix/store/entry/bin/run" "$tmp/bin/vega-builder-entrypoint"
+  mkdir -p "$tmp/nix-seed/store/new-runner"; : > "$tmp/nix-seed/store/new-runner/run.sh"
+  VBROOT="$tmp/nix/store/new-root"; RDIST="$tmp/nix/store/new-runner"
+  chmod a-w "$tmp/nix/store"
+  run_shim "$runner" one two >/dev/null 2>&1; rc=$?
+  chmod u+w "$tmp/nix/store"
+  if [ "$rc" = 64 ]; then
+    echo "ok($runner): a failed reseed copy is fatal, not a silent half-seed"
+  else
+    echo "FAIL($runner): failed reseed copy did not exit 64 (rc=$rc)" >&2; fails=$((fails + 1))
+  fi
+  rm -rf "$tmp"
   unset VBROOT RDIST
 
   # Heal path: the /bin symlink dangles, the seed holds the target (a store
