@@ -6,6 +6,17 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.17.2] - 2026-08-16
+
+### Changed
+
+- `@noble/curves` moved from 1.x to 2.3.0. The 2.x line renamed the subpath
+  export, so the Ed25519 import is now `@noble/curves/ed25519.js`. The signing
+  API (`getPublicKey`, `sign`, `verify`) is unchanged, and 1.x and 2.x produce
+  byte-identical public keys and signatures for the same key and message and
+  cross-verify each other, so every existing signature still verifies and the
+  trust root is unaffected.
+
 ## [0.17.1] - 2026-08-16
 
 ### Fixed
