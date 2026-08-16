@@ -6,6 +6,40 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-08-16
+
+### Fixed
+
+- The builder image shipped github-runner 2.334.0, which GitHub deprecated
+  server-side. A deprecated runner is refused before it can self-update and, in
+  the read-only Nix store, cannot update in place, so every deployed builder went
+  offline at once on GitHub's schedule (the listener connected, was told the
+  version is deprecated, exited, and the container restart-looped), and queued
+  jobs waited indefinitely. The runner is now github-runner 2.336.0. Pull the new
+  image and recreate the container; the builder image version tracks the agent
+  version, so the fixed image is 0.17.1 (the line moved from 0.16.x to 0.17.x when
+  the agent did).
+- For anyone still on a pre-0.16.0 image, upgrading also carries the 0.16.0 boot
+  seed and closure registration (`nix-seed` and the store load-db), which ended
+  the separate "runner binaries are gone" restart churn where the in-container GC
+  collected reseeded store paths the runner needed.
+
+### Changed
+
+- The GitHub Actions runner is pinned through a separate `nixpkgs-runner` flake
+  input, advanceable on its own so a server-side runner deprecation is a one-input
+  bump and a patch release rather than a full toolchain move. GitHub sets that
+  schedule, not us, so the runner pin is kept current independently of the rest of
+  the image.
+- The boot shim reseeds a persistent `/nix` volume whenever the baked closure
+  changed, not only when the entrypoint symlink dangles. A release that changes a
+  store path the entrypoint does not depend on (this one bumps the runner while the
+  entrypoint is byte-identical) left an older volume resolving the entrypoint but
+  missing the new runner, so the shim handed off and the preflight then refused to
+  boot: the upgrade re-bricked on a volume deployment. The fast path now also
+  requires the closure root and the runner present, so any changed path triggers
+  the additive reseed and a volume deployment self-heals on pull like a fresh one.
+
 ## [0.17.0] - 2026-08-13
 
 ### Added

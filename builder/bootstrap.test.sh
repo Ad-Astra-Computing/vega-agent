@@ -45,13 +45,19 @@ setup() {
 }
 
 # run_shim <runner> [args...]: host runs via sh; busybox runs via the real
-# interpreter with PATH emptied, exactly like the heal environment.
+# interpreter with PATH emptied, exactly like the heal environment. The image
+# sets VEGA_BUILDER_ROOT and RUNNER_DIST in the container Env, and the shim gates
+# its fast path on them, so forward them here (defaulting to a nonexistent path,
+# which the shim treats as "not seeded" and routes to the seed path). The busybox
+# pass clears the environment with env -i, so they must be passed explicitly.
 run_shim() {
   local runner="$1"; shift
+  local vbroot="${VBROOT:-/nonexistent}" rdist="${RDIST:-/nonexistent}"
   if [ "$runner" = busybox ]; then
-    env -i PATH=/nonexistent "$tmp/bin/busybox" sh "$tmp/bootstrap" "$@"
+    env -i PATH=/nonexistent VEGA_BUILDER_ROOT="$vbroot" RUNNER_DIST="$rdist" \
+      "$tmp/bin/busybox" sh "$tmp/bootstrap" "$@"
   else
-    sh "$tmp/bootstrap" "$@"
+    env VEGA_BUILDER_ROOT="$vbroot" RUNNER_DIST="$rdist" sh "$tmp/bootstrap" "$@"
   fi
 }
 
@@ -78,12 +84,14 @@ plant() {
 suite() {
   local runner="$1"
 
-  # Fast path: entrypoint resolves; the seed must not even be read, and the
-  # boot must positively attest which path it took (a healthy boot and an
-  # inert shim must not look identical in the log).
+  # Fast path: the whole closure resolves (entrypoint, builder root and runner);
+  # the seed must not even be read, and the boot must positively attest which
+  # path it took (a healthy boot and an inert shim must not look identical).
   setup "$runner"
   plant "$tmp/nix/store/real-entrypoint"
   ln -s "$tmp/nix/store/real-entrypoint" "$tmp/bin/vega-builder-entrypoint"
+  mkdir -p "$tmp/nix/store/builder-root" "$tmp/nix/store/runner"
+  VBROOT="$tmp/nix/store/builder-root"; RDIST="$tmp/nix/store/runner"
   : > "$tmp/nix-seed/store/sentinel"
   err="$(run_shim "$runner" 2>&1 >/dev/null)"
   case "$err" in
@@ -97,6 +105,71 @@ suite() {
     echo "ok($runner): fast path leaves the seed untouched"
   fi
   rm -rf "$tmp"
+
+  # Changed closure, UNCHANGED entrypoint: the 0.17.0 -> 0.17.1 shape, where the
+  # runner is bumped off a separate pin while the entrypoint derivation is
+  # byte-identical. On a persistent volume the entrypoint still resolves, but the
+  # new runner and the buildEnv over the whole closure are absent. An
+  # entrypoint-only fast path would hand off to a store missing the new runner and
+  # the preflight would re-brick the very upgrade meant to fix one. The shim must
+  # seed, keyed on VEGA_BUILDER_ROOT and RUNNER_DIST, not the entrypoint alone.
+  setup "$runner"
+  mkdir -p "$tmp/nix/store/entry/bin"
+  plant "$tmp/nix/store/entry/bin/run"
+  ln -s "$tmp/nix/store/entry/bin/run" "$tmp/bin/vega-builder-entrypoint"
+  mkdir -p "$tmp/nix-seed/store/entry/bin"; plant "$tmp/nix-seed/store/entry/bin/run"
+  mkdir -p "$tmp/nix-seed/store/new-runner" "$tmp/nix-seed/store/new-root"
+  : > "$tmp/nix-seed/store/new-runner/run.sh"
+  VBROOT="$tmp/nix/store/new-root"; RDIST="$tmp/nix/store/new-runner"
+  check "$runner" "changed closure with unchanged entrypoint seeds then execs" 0 "entrypoint ran: one two"
+  rm -rf "$tmp"
+
+  setup "$runner"
+  mkdir -p "$tmp/nix/store/entry/bin"
+  plant "$tmp/nix/store/entry/bin/run"
+  ln -s "$tmp/nix/store/entry/bin/run" "$tmp/bin/vega-builder-entrypoint"
+  mkdir -p "$tmp/nix-seed/store/entry/bin"; plant "$tmp/nix-seed/store/entry/bin/run"
+  mkdir -p "$tmp/nix-seed/store/new-runner" "$tmp/nix-seed/store/new-root"
+  : > "$tmp/nix-seed/store/new-runner/run.sh"
+  VBROOT="$tmp/nix/store/new-root"; RDIST="$tmp/nix/store/new-runner"
+  err="$(run_shim "$runner" 2>&1 >/dev/null)"
+  case "$err" in
+    *"seeding the baked store copy"*)
+      case "$err" in
+        *"direct handoff"*) echo "FAIL($runner): changed-closure took the fast path (re-brick)" >&2; fails=$((fails + 1)) ;;
+        *) echo "ok($runner): changed closure seeds instead of direct handoff" ;;
+      esac ;;
+    *) echo "FAIL($runner): changed closure printed no seeding line (stderr: '$err')" >&2; fails=$((fails + 1)) ;;
+  esac
+  if [ -e "$tmp/nix/store/new-runner/run.sh" ]; then
+    echo "ok($runner): the new runner is seeded into the volume"
+  else
+    echo "FAIL($runner): the new runner was not seeded" >&2; fails=$((fails + 1))
+  fi
+  rm -rf "$tmp"
+
+  # A reseed copy that fails (read-only /nix, full disk) must be fatal with the
+  # disk-full diagnosis, even though the entrypoint resolves the whole time.
+  # Without that, a half-seeded store (the new runner missing) would be handed off
+  # and the specific diagnosis lost to the entrypoint's generic preflight. A
+  # read-only /nix/store forces the copy to fail (both test environments run
+  # non-root, so the mode is enforced).
+  setup "$runner"
+  mkdir -p "$tmp/nix/store/entry/bin"
+  plant "$tmp/nix/store/entry/bin/run"
+  ln -s "$tmp/nix/store/entry/bin/run" "$tmp/bin/vega-builder-entrypoint"
+  mkdir -p "$tmp/nix-seed/store/new-runner"; : > "$tmp/nix-seed/store/new-runner/run.sh"
+  VBROOT="$tmp/nix/store/new-root"; RDIST="$tmp/nix/store/new-runner"
+  chmod a-w "$tmp/nix/store"
+  run_shim "$runner" one two >/dev/null 2>&1; rc=$?
+  chmod u+w "$tmp/nix/store"
+  if [ "$rc" = 64 ]; then
+    echo "ok($runner): a failed reseed copy is fatal, not a silent half-seed"
+  else
+    echo "FAIL($runner): failed reseed copy did not exit 64 (rc=$rc)" >&2; fails=$((fails + 1))
+  fi
+  rm -rf "$tmp"
+  unset VBROOT RDIST
 
   # Heal path: the /bin symlink dangles, the seed holds the target (a store
   # path DIRECTORY, like the real layout), plus the volume already has an
