@@ -8,8 +8,32 @@
  * in-flight while nothing completed, so the next stall identifies its own
  * culprit stage in the job log instead of needing on-host forensics.
  */
+/** Bytes as a human reads them, so a log line is scannable at a glance. */
+function human(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let v = bytes / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
+
+interface Inflight {
+  stage: string;
+  since: number;
+  /** Bytes transferred so far, and the total, when the stage reports them. */
+  moved?: number;
+  total?: number;
+  /** Bytes and time at the previous check, to derive a rate over that window. */
+  markMoved: number;
+  markAt: number;
+}
+
 export class StallWatchdog {
-  private readonly inflight = new Map<string, { stage: string; since: number }>();
+  private readonly inflight = new Map<string, Inflight>();
   private lastProgress: number;
 
   constructor(
@@ -22,7 +46,22 @@ export class StallWatchdog {
 
   /** Record that `path` entered `stage`. */
   stage(path: string, stage: string): void {
-    this.inflight.set(path, { stage, since: this.now() });
+    const at = this.now();
+    this.inflight.set(path, { stage, since: at, markMoved: 0, markAt: at });
+  }
+
+  /**
+   * Record transfer progress for `path`. This does NOT count as pipeline
+   * progress: a path that is still moving bytes has not completed, and the
+   * warning is about completion. It is what makes the warning actionable, since
+   * "stalled at 0 B/s" and "slow at 300 KiB/s" call for opposite responses and
+   * were previously indistinguishable from the log.
+   */
+  progress(path: string, movedBytes: number, totalBytes: number): void {
+    const e = this.inflight.get(path);
+    if (e === undefined) return;
+    e.moved = movedBytes;
+    e.total = totalBytes;
   }
 
   /** Record that `path` finished its pipeline (this is what counts as progress). */
@@ -37,9 +76,17 @@ export class StallWatchdog {
     const now = this.now();
     if (this.inflight.size === 0 || now - this.lastProgress < this.warnAfterMs) return false;
     const stalledS = Math.round((now - this.lastProgress) / 1000);
-    const lines = [...this.inflight.entries()].map(
-      ([path, e]) => `  ${e.stage} ${path} (${Math.round((now - e.since) / 1000)}s in stage)`,
-    );
+    const lines = [...this.inflight.entries()].map(([path, e]) => {
+      const parts = [`${Math.round((now - e.since) / 1000)}s in stage`];
+      if (e.moved !== undefined && e.total !== undefined) {
+        const windowS = (now - e.markAt) / 1000;
+        const rate = windowS > 0 ? (e.moved - e.markMoved) / windowS : 0;
+        parts.push(`${human(e.moved)}/${human(e.total)}`, `${human(rate)}/s`);
+        e.markMoved = e.moved;
+        e.markAt = now;
+      }
+      return `  ${e.stage} ${path} (${parts.join(", ")})`;
+    });
     this.warn(`vega-attest: no path has completed for ${stalledS}s; in-flight:\n${lines.join("\n")}`);
     return true;
   }

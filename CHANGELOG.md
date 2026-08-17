@@ -6,6 +6,38 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-08-17
+
+### Fixed
+
+- A stalled NAR upload no longer consumes the whole job before a retry can run.
+  The per-attempt deadline was a wall-clock allowance scaled to the payload, so a
+  5 GB NAR was given roughly 85 minutes and a wedged connection sat there for the
+  better part of it: two multi-GB uploads went 50 and 88 minutes without moving,
+  and the 90 minute step cap killed the job before any retry. An upload is now
+  bounded by INACTIVITY instead: the clock restarts on every chunk that leaves the
+  process and once more when the body ends, so a silent upload fails in five
+  minutes and retries, while a slow but progressing one runs as long as it needs.
+  That distinction is the point. A fixed cap cannot make it, and shortening the
+  old allowance would have aborted large uploads that were working, since a
+  presigned PUT is not resumable and every retry restarts from zero.
+
+### Added
+
+- Stall warnings report bytes transferred and the current rate per path
+  (`upload /nix/store/... (5293s in stage, 350 MiB/5.0 GiB, 0 B/s)`), so a wedged
+  upload and a slow one are distinguishable from the job log alone. Reading
+  progress is possible because the request body is wrapped to count bytes as they
+  are read; it stays a sized Blob, so the presigned PUT still sends Content-Length
+  rather than switching to chunked encoding.
+
+### Changed
+
+- `VEGA_UPLOAD_STALL_SECONDS` (default 300) sets how long an upload may move no
+  bytes before it is aborted and retried. `VEGA_UPLOAD_TIMEOUT_SECONDS` is now an
+  absolute per-attempt cap and defaults to off: any fixed cap eventually aborts a
+  large upload that is progressing normally.
+
 ## [0.17.3] - 2026-08-16
 
 ### Fixed

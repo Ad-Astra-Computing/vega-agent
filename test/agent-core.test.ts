@@ -99,42 +99,108 @@ describe("ControlPlaneClient", () => {
     expect(calls[0]!.headers.get("x-amz-checksum-sha256")).toBe(checksum);
   });
 
-  it("does not crash on a fractional upload deadline from a multi-GB NAR", async () => {
-    // The upload deadline scales with payload as (bytes / MiB) * 1000, a float for
-    // any NAR that is not a whole number of mebibytes. AbortSignal.timeout throws
-    // ERR_OUT_OF_RANGE ("delay ... must be an integer") on a fraction, so a large
-    // closure crashed the publish at the very end, after the build and most paths
-    // had already succeeded. 1859098.7529754639 is a value seen in production.
-    const { fn } = fakeFetch(() => new Response(null, { status: 200 }));
-    const client = new ControlPlaneClient(base, "jwt", fn);
-    await expect(
-      client.putNar("https://r2/put?sig=x", new Uint8Array([1, 2, 3]), "Zm9vYmFyYmF6", 1859098.7529754639),
-    ).resolves.toBeUndefined();
+  it("does not crash on a fractional deadline", async () => {
+    // AbortSignal.timeout throws ERR_OUT_OF_RANGE ("delay ... must be an integer")
+    // on a fraction. A payload-scaled upload deadline used to produce one, which
+    // crashed the publish at the very end of a large build; that formula is gone,
+    // but withDeadline is still where every computed timeout reaches the timer, so
+    // the guard stays covered here against a fractional configured value.
+    const { fn } = fakeFetch(() => new Response(JSON.stringify({ url: "https://r2/put?sig=x" })));
+    const client = new ControlPlaneClient(base, "jwt", fn, { ...fastRetry, requestTimeoutMs: 1859098.7529754639 });
+    await expect(client.uploadUrl("nar/x.nar.zst", "sha256:1bn7y79qj9cs5l0hqjjvb9ccfg6w5qg5x6f0a3d9b1c2e3f4g5h6i")).resolves.toBeDefined();
   });
 
-  it("computes a fractional deadline from a real NAR size without crashing", async () => {
-    // The end-to-end shape of the same bug: uploadNar derives the deadline from
-    // the file itself, so this covers the arithmetic rather than an injected
-    // value. A file of one byte over a mebibyte yields 1000.00095... ms. In
-    // production the float only wins the Math.max above the 1800 s upload floor,
-    // which is why this surfaced only once a closure passed ~1.8 GB; dropping the
-    // floor to zero reproduces it with a 1 MiB file instead of a 1.9 GB one.
-    const file = join(tmpdir(), `vega-nar-${Math.random().toString(36).slice(2)}.bin`);
-    await writeFile(file, new Uint8Array(1024 * 1024 + 1));
-    try {
-      const fn = (async (input: RequestInfo | URL, init?: RequestInit) => {
-        const req = new Request(input as RequestInfo, init);
-        return new URL(req.url).pathname === "/api/cache/upload-url"
-          ? new Response(JSON.stringify({ url: "https://r2/put?sig=x" }))
-          : new Response(null, { status: 200 });
+  describe("uploads are bounded by inactivity, not by total duration", () => {
+    // A NAR file large enough that Blob.stream() yields several chunks, so a
+    // "slow but progressing" upload can be modelled as gaps BETWEEN chunks.
+    const withFile = async <T>(bytes: number, run: (file: string) => Promise<T>): Promise<T> => {
+      const file = join(tmpdir(), `vega-nar-${Math.random().toString(36).slice(2)}.bin`);
+      await writeFile(file, new Uint8Array(bytes));
+      try {
+        return await run(file);
+      } finally {
+        await rm(file, { force: true });
+      }
+    };
+    /** A server that accepts the body in chunks, pausing `gapMs` between each. */
+    const drinker = (gapMs: number) =>
+      (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method !== "PUT") return new Response(JSON.stringify({ url: "https://r2/put?sig=x" }));
+        const reader = (init.body as unknown as Blob).stream().getReader();
+        for (;;) {
+          if (init.signal?.aborted === true) throw init.signal.reason;
+          const { done } = await reader.read();
+          if (done) break;
+          await new Promise((r) => setTimeout(r, gapMs));
+        }
+        return new Response(null, { status: 200 });
       }) as unknown as typeof fetch;
-      const client = new ControlPlaneClient(base, "jwt", fn, { ...fastRetry, uploadTimeoutMs: 0 });
+
+    it("aborts and retries an upload that moves no bytes at all", async () => {
+      // The production stall: two multi-GB NARs sat 50 to 88 minutes in "upload"
+      // and the job died at its 90 minute cap without ever retrying, because the
+      // per-attempt allowance had been scaled to the payload.
+      const silent = (async (_i: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_res, rej) => {
+          init?.signal?.addEventListener("abort", () => rej(init.signal!.reason));
+        })) as unknown as typeof fetch;
+      const client = new ControlPlaneClient(base, "jwt", silent, { ...fastRetry, attempts: 1, uploadStallMs: 20 });
       await expect(
-        client.uploadNar("nar/x.nar.zst", "sha256:1bn7y79qj9cs5l0hqjjvb9ccfg6w5qg5x6f0a3d9b1c2e3f4g5h6i", file, "Zm9vYmFyYmF6"),
-      ).resolves.toBeUndefined();
-    } finally {
-      await rm(file, { force: true });
-    }
+        client.putNar("https://r2/put?sig=x", new Uint8Array([1, 2, 3]), "Zm9vYmFyYmF6"),
+      ).rejects.toThrow(/stalled: no bytes moved/);
+    });
+
+    it("lets a slow upload run well past the stall window while bytes keep moving", async () => {
+      // The case a fixed cap gets wrong. Each gap is under the window but the
+      // total far exceeds it, which is exactly a big NAR on a thin link: it must
+      // NOT be aborted, because every retry restarts the PUT from zero.
+      await withFile(512 * 1024, async (file) => {
+        const client = new ControlPlaneClient(base, "jwt", drinker(25), { ...fastRetry, attempts: 1, uploadStallMs: 120 });
+        const started = Date.now();
+        await expect(
+          client.uploadNar("nar/x.nar.zst", "sha256:1bn7y79qj9cs5l0hqjjvb9ccfg6w5qg5x6f0a3d9b1c2e3f4g5h6i", file, "Zm9vYmFyYmF6"),
+        ).resolves.toBeUndefined();
+        expect(Date.now() - started).toBeGreaterThan(120); // outlived the window
+      });
+    });
+
+    it("reports bytes moved so a stalled upload is distinguishable from a slow one", async () => {
+      await withFile(256 * 1024, async (file) => {
+        const seen: number[] = [];
+        let total = 0;
+        const client = new ControlPlaneClient(base, "jwt", drinker(0), { ...fastRetry, attempts: 1 });
+        await client.uploadNar(
+          "nar/x.nar.zst",
+          "sha256:1bn7y79qj9cs5l0hqjjvb9ccfg6w5qg5x6f0a3d9b1c2e3f4g5h6i",
+          file,
+          "Zm9vYmFyYmF6",
+          (moved, size) => {
+            seen.push(moved);
+            total = size;
+          },
+        );
+        expect(total).toBe(256 * 1024);
+        expect(seen.at(-1)).toBe(256 * 1024); // every byte accounted for
+        expect(seen.length).toBeGreaterThan(1); // reported progressively, not once at the end
+      });
+    });
+
+    it("sends Content-Length, not chunked encoding, so a presigned PUT still validates", async () => {
+      // The counting wrapper must stay a Blob: handing fetch a bare ReadableStream
+      // switches the request to chunked transfer encoding, which R2 rejects for a
+      // presigned PUT. Undici reads .size for Content-Length.
+      await withFile(64 * 1024, async (file) => {
+        let sawLength: number | undefined;
+        const check = (async (_i: RequestInfo | URL, init?: RequestInit) => {
+          if (init?.method !== "PUT") return new Response(JSON.stringify({ url: "https://r2/put?sig=x" }));
+          sawLength = (init.body as unknown as Blob).size;
+          return new Response(null, { status: 200 });
+        }) as unknown as typeof fetch;
+        const client = new ControlPlaneClient(base, "jwt", check, { ...fastRetry, attempts: 1 });
+        await client.uploadNar("nar/x.nar.zst", "sha256:1bn7y79qj9cs5l0hqjjvb9ccfg6w5qg5x6f0a3d9b1c2e3f4g5h6i", file, "Zm9vYmFyYmF6");
+        expect(sawLength).toBe(64 * 1024);
+      });
+    });
   });
 
   it("streams a file-backed Blob and re-reads it on retry (replayable, no full-buffer)", async () => {
@@ -400,7 +466,7 @@ describe("ControlPlaneClient", () => {
         ...fastRetry,
         attempts: 1,
         requestTimeoutMs: 10,
-        uploadTimeoutMs: 5_000,
+        uploadStallMs: 5_000,
       });
       // The control-plane request path aborts at 10ms...
       await expect(client.attest({} as never)).rejects.toThrow(/timed out/);

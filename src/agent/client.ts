@@ -78,7 +78,25 @@ export interface RetryOptions {
   jitter: () => number;
   /** Per-attempt deadline for control-plane requests, ms. */
   requestTimeoutMs: number;
-  /** Per-attempt deadline for the NAR PUT, ms (multi-GB uploads are slow). */
+  /**
+   * How long a NAR PUT may move NO bytes before it is aborted and retried, ms.
+   *
+   * Uploads are bounded by INACTIVITY, not by total duration. A wall-clock
+   * allowance cannot tell a stalled upload from a slow one, so it has to be sized
+   * for the slowest legitimate case, and a stall then burns that whole allowance
+   * before any retry fires. Sizing it by payload made that worse the larger the
+   * NAR: a 5 GB upload got an 85 minute attempt, so a wedged connection consumed
+   * a 90 minute CI job and the retry never ran. Inactivity separates the two
+   * cases directly: a progressing upload runs as long as it needs, a silent one
+   * fails fast and retries.
+   */
+  uploadStallMs: number;
+  /**
+   * Absolute per-attempt cap for the NAR PUT, ms. 0 disables it, which is the
+   * default: any fixed cap eventually aborts a large upload that is progressing
+   * fine (5 GB at 1 MiB/s legitimately takes 85 minutes, and each retry restarts
+   * from zero because the PUT is not resumable). Kept as an opt-in escape hatch.
+   */
   uploadTimeoutMs: number;
 }
 
@@ -134,8 +152,61 @@ const DEFAULT_RETRY: RetryOptions = {
   sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
   jitter: Math.random,
   requestTimeoutMs: envSeconds("VEGA_HTTP_TIMEOUT_SECONDS", 120) * 1000,
-  uploadTimeoutMs: envSeconds("VEGA_UPLOAD_TIMEOUT_SECONDS", 1800) * 1000,
+  // Generous enough that R2 finalizing a multi-GB object (it verifies the
+  // checksum before responding) is never mistaken for a stall, and still an
+  // order of magnitude below the CI step caps these jobs run under.
+  uploadStallMs: envSeconds("VEGA_UPLOAD_STALL_SECONDS", 300) * 1000,
+  uploadTimeoutMs: envSeconds("VEGA_UPLOAD_TIMEOUT_SECONDS", 0) * 1000,
 };
+
+/**
+ * The same Blob, whose `stream()` reports each chunk as undici reads it.
+ *
+ * This is how an upload is observed at all. `fetch` exposes no progress events,
+ * but it does pull the request body through `Blob.stream()`, so wrapping that
+ * one method turns "bytes leaving this process" into something a timer can key
+ * on. The wrapper keeps `size`, so undici still sends Content-Length and the
+ * request stays a plain sized PUT: handing `fetch` a bare ReadableStream instead
+ * would switch it to chunked transfer encoding, which a presigned S3/R2 PUT
+ * rejects. Every call builds a fresh underlying stream, so the body stays
+ * replayable across retry attempts.
+ */
+function countingBlob(blob: Blob, onChunk: (bytes: number) => void): Blob {
+  const wrapper = {
+    size: blob.size,
+    type: blob.type,
+    stream(): ReadableStream<Uint8Array> {
+      const reader = blob.stream().getReader();
+      return new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          const { done, value } = await reader.read();
+          if (done) {
+            // Report the end of the body as progress too: what follows is the
+            // wait for the server's response, which must get its own fresh
+            // window rather than inheriting whatever is left of the last chunk's.
+            onChunk(0);
+            controller.close();
+            return;
+          }
+          onChunk(value.byteLength);
+          controller.enqueue(value);
+        },
+        cancel(reason) {
+          void reader.cancel(reason);
+        },
+      });
+    },
+    arrayBuffer: () => blob.arrayBuffer(),
+    text: () => blob.text(),
+    slice: (...args: Parameters<Blob["slice"]>) => blob.slice(...args),
+  };
+  // undici brand-checks the body, so the wrapper has to present as a Blob.
+  Object.setPrototypeOf(wrapper, Blob.prototype);
+  return wrapper as unknown as Blob;
+}
+
+/** Reports bytes moved so far for one upload, and its total size. */
+export type UploadProgress = (movedBytes: number, totalBytes: number) => void;
 
 export class ControlPlaneClient {
   private readonly baseUrl: string;
@@ -222,11 +293,66 @@ export class ControlPlaneClient {
     return { ...init, signal: AbortSignal.timeout(Math.ceil(timeoutMs)) };
   }
 
+  /**
+   * Init whose deadline is INACTIVITY rather than total duration, for uploads.
+   *
+   * The clock restarts on every chunk undici pulls out of the body, and once more
+   * when the body is exhausted so the wait for the server's response gets a full
+   * window of its own. `capMs > 0` adds an absolute backstop for the pathological
+   * case of a connection that dribbles just enough to keep resetting the clock.
+   *
+   * The caller must call `dispose` when the attempt settles, or the pending timer
+   * keeps a handle alive until it fires.
+   */
+  private withStall(
+    init: RequestInit,
+    stallMs: number,
+    capMs: number,
+    onProgress?: UploadProgress,
+  ): { init: RequestInit; dispose: () => void } {
+    const control = new AbortController();
+    const total = init.body instanceof Blob ? init.body.size : 0;
+    let moved = 0;
+    let idle: NodeJS.Timeout | undefined;
+    let cap: NodeJS.Timeout | undefined;
+    const give = (why: string): void => control.abort(new DOMException(why, "TimeoutError"));
+    const arm = (): void => {
+      if (idle !== undefined) clearTimeout(idle);
+      idle = setTimeout(() => give(`stalled: no bytes moved for ${Math.round(stallMs / 1000)}s`), Math.ceil(stallMs));
+      idle.unref();
+    };
+    arm();
+    if (capMs > 0) {
+      cap = setTimeout(() => give(`timed out after ${Math.round(capMs / 1000)}s`), Math.ceil(capMs));
+      cap.unref();
+    }
+    const body =
+      init.body instanceof Blob
+        ? countingBlob(init.body, (n) => {
+            moved += n;
+            arm();
+            onProgress?.(moved, total);
+          })
+        : init.body;
+    return {
+      init: { ...init, body, signal: control.signal },
+      dispose: () => {
+        if (idle !== undefined) clearTimeout(idle);
+        if (cap !== undefined) clearTimeout(cap);
+      },
+    };
+  }
+
   /** A deadline abort relabeled with the request it killed; other errors pass. */
   private labelTimeout(e: unknown, label: string, timeoutMs: number): unknown {
-    return e instanceof DOMException && (e.name === "TimeoutError" || e.name === "AbortError")
-      ? new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s`)
-      : e;
+    if (!(e instanceof DOMException) || (e.name !== "TimeoutError" && e.name !== "AbortError")) return e;
+    // A stall abort carries its own diagnosis ("stalled: no bytes moved for
+    // 300s"), which says far more than a duration; AbortSignal.timeout's own
+    // TimeoutError does not, so that one keeps the generic wording.
+    const why = /^(stalled|timed out)/.test(e.message)
+      ? e.message
+      : `timed out after ${Math.round(timeoutMs / 1000)}s`;
+    return new Error(`${label} ${why}`);
   }
 
   /** Backoff before the next attempt: honor Retry-After, else exponential with
@@ -256,17 +382,28 @@ export class ControlPlaneClient {
     label: string,
     timeoutMs = this.retry.requestTimeoutMs,
     consume?: (res: Response) => Promise<T>,
+    stall?: { stallMs: number; capMs: number; onProgress?: UploadProgress },
   ): Promise<T> {
     let lastErr: unknown;
     for (let attempt = 1; attempt <= this.retry.attempts; attempt++) {
       let res: Response | undefined;
+      // A fresh deadline AND a fresh body per attempt: the stall clock must not
+      // carry over, and the counting wrapper hands out a new underlying stream.
+      const prepared =
+        stall !== undefined
+          ? this.withStall(init, stall.stallMs, stall.capMs, stall.onProgress)
+          : { init: this.withDeadline(init, timeoutMs), dispose: () => {} };
       try {
-        res = await this.fetchImpl(url, this.withDeadline(init, timeoutMs));
+        res = await this.fetchImpl(url, prepared.init);
       } catch (e) {
         // Network-level failure OR the per-attempt deadline: retry if budget
         // remains. Label a deadline abort explicitly, so an exhausted budget
         // reports "timed out", not an opaque AbortError.
         lastErr = this.labelTimeout(e, label, timeoutMs);
+      } finally {
+        // The stall path has no `consume`, so the attempt is settled here and
+        // the timer must go: an armed one holds a handle until it fires.
+        prepared.dispose();
       }
       if (res !== undefined) {
         if (res.ok) {
@@ -324,13 +461,16 @@ export class ControlPlaneClient {
     presignedUrl: string,
     body: BodyInit,
     sha256Base64: string,
-    timeoutMs = this.retry.uploadTimeoutMs,
+    onProgress?: UploadProgress,
   ): Promise<void> {
     const res = await this.fetchWithRetry(
       presignedUrl,
       { method: "PUT", body, headers: { "x-amz-checksum-sha256": sha256Base64 } },
       "nar upload",
-      timeoutMs,
+      this.retry.requestTimeoutMs,
+      undefined,
+      // Bounded by inactivity, not by a duration guessed from the payload.
+      { stallMs: this.retry.uploadStallMs, capMs: this.retry.uploadTimeoutMs, ...(onProgress !== undefined ? { onProgress } : {}) },
     );
     // The PUT response body is unused; drain it so the connection is released.
     void res.body?.cancel();
@@ -344,23 +484,27 @@ export class ControlPlaneClient {
    * the URL's own window) is surfaced, not retried, so real failures are never
    * masked. The NAR streams from disk as a fresh file-backed Blob per attempt.
    */
-  async uploadNar(narUrl: string, fileHash: string, file: string, sha256Base64: string): Promise<void> {
+  async uploadNar(
+    narUrl: string,
+    fileHash: string,
+    file: string,
+    sha256Base64: string,
+    onProgress?: UploadProgress,
+  ): Promise<void> {
     const url = await this.uploadUrl(narUrl, fileHash);
-    // The deadline is a TOTAL-duration bound (fetch exposes no upload progress
-    // to key an inactivity timer on), so it must scale with the payload: a
-    // fixed budget would deterministically abort a slow-but-progressing
-    // multi-GB PUT on every attempt. Assume at least 1 MiB/s and never go
-    // below the configured floor.
+    // No payload-scaled deadline here any more: putNar bounds the attempt by
+    // inactivity, which is what a stalled upload actually looks like. Scaling a
+    // wall-clock allowance by size gave a 5 GB NAR an 85 minute attempt, so one
+    // wedged connection consumed a 90 minute CI job and never reached a retry.
     const blob = await openAsBlob(file);
-    const timeoutMs = Math.max(this.retry.uploadTimeoutMs, (blob.size / (1 << 20)) * 1000);
     try {
-      await this.putNar(url, blob, sha256Base64, timeoutMs);
+      await this.putNar(url, blob, sha256Base64, onProgress);
       return;
     } catch (e) {
       if (!(e instanceof HttpError) || e.status !== 403 || !presignLapsed(url, Date.now())) throw e;
     }
     const fresh = await this.uploadUrl(narUrl, fileHash);
-    await this.putNar(fresh, await openAsBlob(file), sha256Base64, timeoutMs);
+    await this.putNar(fresh, await openAsBlob(file), sha256Base64, onProgress);
   }
 
   /** Submit an attestation; returns the promotion decision. */
