@@ -112,6 +112,31 @@ describe("ControlPlaneClient", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("computes a fractional deadline from a real NAR size without crashing", async () => {
+    // The end-to-end shape of the same bug: uploadNar derives the deadline from
+    // the file itself, so this covers the arithmetic rather than an injected
+    // value. A file of one byte over a mebibyte yields 1000.00095... ms. In
+    // production the float only wins the Math.max above the 1800 s upload floor,
+    // which is why this surfaced only once a closure passed ~1.8 GB; dropping the
+    // floor to zero reproduces it with a 1 MiB file instead of a 1.9 GB one.
+    const file = join(tmpdir(), `vega-nar-${Math.random().toString(36).slice(2)}.bin`);
+    await writeFile(file, new Uint8Array(1024 * 1024 + 1));
+    try {
+      const fn = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const req = new Request(input as RequestInfo, init);
+        return new URL(req.url).pathname === "/api/cache/upload-url"
+          ? new Response(JSON.stringify({ url: "https://r2/put?sig=x" }))
+          : new Response(null, { status: 200 });
+      }) as unknown as typeof fetch;
+      const client = new ControlPlaneClient(base, "jwt", fn, { ...fastRetry, uploadTimeoutMs: 0 });
+      await expect(
+        client.uploadNar("nar/x.nar.zst", "sha256:1bn7y79qj9cs5l0hqjjvb9ccfg6w5qg5x6f0a3d9b1c2e3f4g5h6i", file, "Zm9vYmFyYmF6"),
+      ).resolves.toBeUndefined();
+    } finally {
+      await rm(file, { force: true });
+    }
+  });
+
   it("streams a file-backed Blob and re-reads it on retry (replayable, no full-buffer)", async () => {
     const file = join(tmpdir(), `vega-nar-${Math.random().toString(36).slice(2)}.bin`);
     const bytes = new Uint8Array([10, 20, 30, 40, 50]);
