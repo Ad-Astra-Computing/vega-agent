@@ -152,7 +152,12 @@ async function cacheBuild(
       // buffered: a heavy closure's NARs are large and VEGA_UPLOAD_CONCURRENCY of
       // them in memory OOM-kills the runner) and re-mints on a presign expiry.
       const checksum = sha256NixHashToBase64(nar.fileHash);
-      await client.uploadNar(nar.url, nar.fileHash, nar.file, checksum);
+      // Feed transfer progress to the watchdog so a stall warning says whether
+      // the upload is moving. The upload aborts itself on inactivity; this is
+      // what tells the reader which of the two they are looking at.
+      await client.uploadNar(nar.url, nar.fileHash, nar.file, checksum, (moved, total) =>
+        watchdog.progress(info.path, moved, total),
+      );
     }
     watchdog.stage(info.path, "attest");
     const outputAttr = topPaths.has(info.path) ? attr : "";
