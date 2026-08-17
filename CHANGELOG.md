@@ -34,9 +34,14 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 ### Changed
 
 - `VEGA_UPLOAD_STALL_SECONDS` (default 300) sets how long an upload may move no
-  bytes before it is aborted and retried. `VEGA_UPLOAD_TIMEOUT_SECONDS` is now an
-  absolute per-attempt cap and defaults to off: any fixed cap eventually aborts a
-  large upload that is progressing normally.
+  bytes before it is aborted and retried.
+- `VEGA_UPLOAD_TIMEOUT_SECONDS` no longer has any effect. It used to be a floor
+  the payload-scaled allowance was raised from, and there is no longer such an
+  allowance. An absolute per-attempt cap is available as `VEGA_UPLOAD_CAP_SECONDS`
+  and defaults to off, because any fixed cap eventually aborts a large upload that
+  is progressing normally. The new name is deliberate: reusing the old one would
+  have turned an existing `1800` into a hard 30 minute kill that no multi-GB
+  upload could survive, where being ignored leaves the safe default in place.
 
 ## [0.17.3] - 2026-08-16
 

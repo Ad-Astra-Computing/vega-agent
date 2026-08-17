@@ -80,7 +80,11 @@ export class StallWatchdog {
       const parts = [`${Math.round((now - e.since) / 1000)}s in stage`];
       if (e.moved !== undefined && e.total !== undefined) {
         const windowS = (now - e.markAt) / 1000;
-        const rate = windowS > 0 ? (e.moved - e.markMoved) / windowS : 0;
+        // A retry restarts the upload from zero, so `moved` can drop below the
+        // previous mark. Report 0 rather than a negative rate, which would be
+        // nonsense in the one log line someone reads while diagnosing a stall.
+        const delta = Math.max(0, e.moved - e.markMoved);
+        const rate = windowS > 0 ? delta / windowS : 0;
         parts.push(`${human(e.moved)}/${human(e.total)}`, `${human(rate)}/s`);
         e.markMoved = e.moved;
         e.markAt = now;

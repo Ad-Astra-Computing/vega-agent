@@ -96,6 +96,12 @@ export interface RetryOptions {
    * default: any fixed cap eventually aborts a large upload that is progressing
    * fine (5 GB at 1 MiB/s legitimately takes 85 minutes, and each retry restarts
    * from zero because the PUT is not resumable). Kept as an opt-in escape hatch.
+   *
+   * Read from VEGA_UPLOAD_CAP_SECONDS, deliberately NOT the old
+   * VEGA_UPLOAD_TIMEOUT_SECONDS. That name used to mean a FLOOR the payload-scaled
+   * allowance was raised from; reusing it would turn an existing `1800` into a hard
+   * 30 minute kill that no large upload could ever survive. Under the new name an
+   * old setting is simply inert, which is the safe direction.
    */
   uploadTimeoutMs: number;
 }
@@ -156,7 +162,7 @@ const DEFAULT_RETRY: RetryOptions = {
   // checksum before responding) is never mistaken for a stall, and still an
   // order of magnitude below the CI step caps these jobs run under.
   uploadStallMs: envSeconds("VEGA_UPLOAD_STALL_SECONDS", 300) * 1000,
-  uploadTimeoutMs: envSeconds("VEGA_UPLOAD_TIMEOUT_SECONDS", 0) * 1000,
+  uploadTimeoutMs: envSeconds("VEGA_UPLOAD_CAP_SECONDS", 0) * 1000,
 };
 
 /**

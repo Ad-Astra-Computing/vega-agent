@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { writeFile, rm } from "node:fs/promises";
 import { openAsBlob } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fetchActionsOidcToken } from "../src/agent/oidc.js";
@@ -136,7 +138,7 @@ describe("ControlPlaneClient", () => {
         return new Response(null, { status: 200 });
       }) as unknown as typeof fetch;
 
-    it("aborts and retries an upload that moves no bytes at all", async () => {
+    it("aborts an upload that moves no bytes at all", async () => {
       // The production stall: two multi-GB NARs sat 50 to 88 minutes in "upload"
       // and the job died at its 90 minute cap without ever retrying, because the
       // per-attempt allowance had been scaled to the payload.
@@ -185,20 +187,44 @@ describe("ControlPlaneClient", () => {
       });
     });
 
-    it("sends Content-Length, not chunked encoding, so a presigned PUT still validates", async () => {
-      // The counting wrapper must stay a Blob: handing fetch a bare ReadableStream
-      // switches the request to chunked transfer encoding, which R2 rejects for a
-      // presigned PUT. Undici reads .size for Content-Length.
-      await withFile(64 * 1024, async (file) => {
-        let sawLength: number | undefined;
-        const check = (async (_i: RequestInfo | URL, init?: RequestInit) => {
-          if (init?.method !== "PUT") return new Response(JSON.stringify({ url: "https://r2/put?sig=x" }));
-          sawLength = (init.body as unknown as Blob).size;
-          return new Response(null, { status: 200 });
-        }) as unknown as typeof fetch;
-        const client = new ControlPlaneClient(base, "jwt", check, { ...fastRetry, attempts: 1 });
-        await client.uploadNar("nar/x.nar.zst", "sha256:1bn7y79qj9cs5l0hqjjvb9ccfg6w5qg5x6f0a3d9b1c2e3f4g5h6i", file, "Zm9vYmFyYmF6");
-        expect(sawLength).toBe(64 * 1024);
+    it("puts real bytes over real fetch with Content-Length, not chunked encoding", async () => {
+      // Against a REAL server through REAL fetch, because the wire is the claim:
+      // asserting the wrapper's own .size through a fake proves nothing about what
+      // undici sends. A presigned S3/R2 PUT rejects chunked transfer encoding, so
+      // the wrapper has to keep the request a plain sized PUT. This also pins
+      // undici's acceptance of the wrapper as a body at all, which is the most
+      // fragile dependency of the design: an undici upgrade that tightened its
+      // brand check would fail here rather than in production.
+      await withFile(256 * 1024, async (file) => {
+        let seen: { length?: string; encoding?: string; bytes: number } | undefined;
+        const server = createServer((req, res) => {
+          let bytes = 0;
+          req.on("data", (c: Buffer) => {
+            bytes += c.length;
+          });
+          req.on("end", () => {
+            seen = {
+              ...(req.headers["content-length"] !== undefined ? { length: req.headers["content-length"] } : {}),
+              ...(req.headers["transfer-encoding"] !== undefined ? { encoding: req.headers["transfer-encoding"] } : {}),
+              bytes,
+            };
+            res.writeHead(200).end();
+          });
+        });
+        await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+        try {
+          const port = (server.address() as AddressInfo).port;
+          const moved: number[] = [];
+          // Default fetchImpl: the real one.
+          const client = new ControlPlaneClient(base, "jwt", undefined, { ...fastRetry, attempts: 1 });
+          await client.putNar(`http://127.0.0.1:${port}/put`, await openAsBlob(file), "Zm9vYmFyYmF6", (m) => moved.push(m));
+          expect(seen?.bytes).toBe(256 * 1024); // every byte arrived
+          expect(seen?.length).toBe(String(256 * 1024)); // sized, so a presign validates
+          expect(seen?.encoding).toBeUndefined(); // NOT chunked
+          expect(moved.at(-1)).toBe(256 * 1024); // and the counter agreed with the wire
+        } finally {
+          await new Promise<void>((r) => server.close(() => r()));
+        }
       });
     });
   });
