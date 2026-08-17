@@ -6,6 +6,22 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.17.3] - 2026-08-16
+
+### Fixed
+
+- The publish crashed at the very end, after the build and most paths had already
+  uploaded, on a large closure. The per-attempt upload deadline scales with the
+  payload as `(bytes / MiB) * 1000`, which is a float for any NAR that is not a
+  whole number of mebibytes, and `AbortSignal.timeout` throws `ERR_OUT_OF_RANGE`
+  ("delay ... must be an integer") on a fraction. A roughly 1.9 GB NAR produced a
+  deadline near 1859098.75 ms and the job exited 1 every time, so a self-hosted
+  runner went permanently red even though the build was fine and the cache
+  converged on resume. The deadline is now rounded up where every request deadline
+  is applied, so no computed timeout can reach the timer as a fraction. The value
+  itself is correct: a multi-GB PUT is given at least payload-size seconds at an
+  assumed 1 MiB/s so a slow but progressing upload is not aborted.
+
 ## [0.17.2] - 2026-08-16
 
 ### Changed
