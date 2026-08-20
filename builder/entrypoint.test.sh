@@ -230,6 +230,101 @@ rr "runtime present does not" "$dist" 1
 rr "unset RUNNER_DIST does not" ""    1
 rm -rf "$tmp"
 
+# parse_bytes / resolve_free_space: the disk guard. Without min-free, Nix only
+# collects between builds, so a build cycle bigger than the free space takes the
+# HOST to zero rather than failing the build. store_fs_bytes is stubbed, since
+# the filesystem size is a property of the host, not of this logic.
+pb() {
+  local name="$1" in="$2" want="$3" got rc=0
+  got="$(parse_bytes "$in")" || rc=$?
+  if [ "$want" = FAIL ]; then
+    if [ "$rc" = 0 ]; then
+      echo "FAIL: parse_bytes $name -> accepted '$in' as $got" >&2; fails=$((fails + 1))
+    else echo "ok: parse_bytes $name"; fi
+  elif [ "$got" != "$want" ]; then
+    echo "FAIL: parse_bytes $name -> $got (want $want)" >&2; fails=$((fails + 1))
+  else echo "ok: parse_bytes $name"; fi
+}
+pb "plain bytes"  "1024"    1024
+pb "G suffix"     "25G"     $((25 * 1024 * 1024 * 1024))
+pb "GiB suffix"   "60GiB"   $((60 * 1024 * 1024 * 1024))
+pb "M suffix"     "512M"    $((512 * 1024 * 1024))
+pb "zero"         "0"       0
+pb "not a number" "lots"    FAIL
+pb "empty"        ""        FAIL
+pb "bad unit"     "25X"     FAIL
+
+fs() {
+  local name="$1" want_min="$3" want_max="$4" got
+  # A distinct global: resolve_free_space declares its own `local total`, which
+  # under bash's dynamic scoping would shadow a same-named variable here.
+  STUB_FS_BYTES="$2"
+  # SC2329: invoked indirectly, by resolve_free_space.
+  # shellcheck disable=SC2329
+  store_fs_bytes() { echo "$STUB_FS_BYTES"; }
+  got="$(resolve_free_space)"
+  if [ "$got" != "$want_min $want_max" ]; then
+    echo "FAIL: free-space $name -> '$got' (want '$want_min $want_max')" >&2; fails=$((fails + 1))
+  else echo "ok: free-space $name"; fi
+}
+G=$((1024 * 1024 * 1024))
+# The shape that prompted this: a large shared host. 10%/25% of 896 GB would be
+# 83/208 GiB, so the caps land on the values proven to hold that machine.
+fs "large shared host caps at 25/60 GiB" 896000000000 $((25 * G)) $((60 * G))
+# A modest CI runner must NOT inherit a 25 GiB floor it can never satisfy: it
+# would sit permanently under the threshold and collect on every check.
+fs "20 GB runner scales down"  20000000000 2000000000 5000000000
+# Small enough that the percentage floor and cap collide: max must still exceed
+# min, or Nix would collect on every check and never clear the condition.
+fs "tiny disk keeps max above min" 4000000000 $((1 * G)) $((2 * G))
+# df unreadable: fall back to the floor rather than leaving the disk unguarded.
+fs "unreadable df falls back to floor" "" $((1 * G)) $((2 * G))
+
+STUB_FS_BYTES=896000000000; store_fs_bytes() { echo "$STUB_FS_BYTES"; }
+got="$(VEGA_MIN_FREE=30G VEGA_MAX_FREE=90G resolve_free_space)"
+if [ "$got" = "$((30 * G)) $((90 * G))" ]; then echo "ok: free-space env override"; else
+  echo "FAIL: free-space env override -> '$got'" >&2; fails=$((fails + 1)); fi
+got="$(VEGA_MIN_FREE=0 resolve_free_space)"
+if [ "$got" = "0 0" ]; then echo "ok: free-space explicit opt-out"; else
+  echo "FAIL: free-space opt-out -> '$got'" >&2; fails=$((fails + 1)); fi
+if VEGA_MIN_FREE=plenty resolve_free_space >/dev/null 2>&1; then
+  echo "FAIL: free-space accepted a non-numeric VEGA_MIN_FREE" >&2; fails=$((fails + 1))
+else echo "ok: free-space rejects a bad VEGA_MIN_FREE"; fi
+
+# The generated nix.conf must actually carry them, or none of the above matters.
+conf="$(nix_conf_contents true)"
+conf_has "min-free present" "$conf" "min-free = $((25 * G))"
+conf_has "max-free present" "$conf" "max-free = $((60 * G))"
+conf="$(VEGA_MIN_FREE=0 nix_conf_contents true)"
+conf_has "opt-out writes min-free 0" "$conf" "min-free = 0"
+if printf '%s\n' "$conf" | grep -q "max-free"; then
+  echo "FAIL: conf opt-out must not set max-free" >&2; fails=$((fails + 1))
+else echo "ok: conf opt-out omits max-free"; fi
+
+# The boot path may only use tools the image actually ships. The image has no
+# awk (builderRoot in flake.nix: coreutils, gnugrep, gnused, findutils, jq, ...),
+# and this script runs before the runner starts, so an out-of-closure command is
+# not a degraded feature but an aborted boot under `set -e`: every container
+# fails to start. This caught exactly that, in the free-space code below.
+for tool in awk gawk mawk perl python python3 bc; do
+  # Comments are stripped first: the code below deliberately NAMES awk in a
+  # comment explaining why it must not be called.
+  if sed 's/#.*//' "$here/entrypoint.sh" | grep -qE "(^|[^[:alnum:]_./-])${tool}[[:space:]]"; then
+    echo "FAIL: entrypoint.sh invokes '${tool}', which the builder image does not ship" >&2
+    fails=$((fails + 1))
+  else
+    echo "ok: entrypoint avoids ${tool} (not in the image closure)"
+  fi
+done
+
+# gib formats the boot announcement without awk.
+g_out="$(gib $((25 * 1024 * 1024 * 1024)))"
+if [ "$g_out" = "25.0 GiB" ]; then echo "ok: gib formats GiB"; else
+  echo "FAIL: gib -> '$g_out' (want '25.0 GiB')" >&2; fails=$((fails + 1)); fi
+g_out="$(gib 1610612736)"  # 1.5 GiB
+if [ "$g_out" = "1.5 GiB" ]; then echo "ok: gib formats a fraction"; else
+  echo "FAIL: gib fraction -> '$g_out' (want '1.5 GiB')" >&2; fails=$((fails + 1)); fi
+
 if [ "$fails" -ne 0 ]; then
   echo "$fails test(s) failed" >&2
   exit 1
