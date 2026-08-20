@@ -167,6 +167,26 @@ Notes:
   `VEGA_GC=false` (disable), `VEGA_GC_DELETE_OLDER_THAN` (default `7d`),
   `VEGA_GC_INTERVAL` (default `7d`) and `VEGA_GC_INITIAL_DELAY` (default `1h`).
   An ephemeral runner skips it (its store is fresh per job).
+- **The store has a free-space floor, enforced during a build.** A periodic GC
+  runs between builds, so it cannot help when one build produces more garbage
+  than the disk has headroom: the build fills the disk first, and on a shared
+  host the casualty is the whole machine rather than the build. Nix collects on
+  its own whenever free space drops below `min-free`, until `max-free` is free,
+  which is the only mechanism that acts mid-build. The entrypoint writes both
+  into the generated `nix.conf` and prints them at boot.
+
+  The defaults are a fraction of the store's filesystem (10% and 25%), floored
+  at 1 GiB and capped at 25 GiB and 60 GiB, because a fixed size is wrong at both
+  ends: 25 GiB on a 20 GB runner would sit permanently under the threshold and
+  collect on every check, while 1 GiB on a large shared host is a rounding error
+  against one build cycle. Override with `VEGA_MIN_FREE` and `VEGA_MAX_FREE`,
+  which accept a byte count or a binary suffix (`VEGA_MIN_FREE=25G`).
+  `VEGA_MIN_FREE=0` disables the floor, and the boot line says so.
+
+  These are written into the `nix.conf` the entrypoint generates. If you mount
+  your own `/etc/nix/nix.conf`, it is yours and the entrypoint does not edit it,
+  so set `min-free` and `max-free` there; the boot warns when a mounted config
+  leaves them unset.
 - Nix's build sandbox is **auto-detected** (`VEGA_NIX_SANDBOX`, default `auto`).
   At startup the entrypoint builds a throwaway derivation under the real sandbox
   to learn whether this container can create the user namespace the sandbox
