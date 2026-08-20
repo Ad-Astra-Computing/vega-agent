@@ -279,8 +279,15 @@ preflight_boot_closure() {
 
 # Total bytes of the filesystem holding the store. Split out so the tests can
 # stub it: the number is a property of the host, not of the logic above it.
+#
+# coreutils only. The image ships NO awk (see builder contents in flake.nix), and
+# this runs before the runner starts, so reaching for a tool outside the closure
+# would not degrade, it would abort the boot under `set -e` and leave every
+# container failing to start. `-P` keeps the record on one line so the size is
+# always the second field; a failure yields empty, which the caller treats as
+# "unknown" rather than propagating a non-zero status into an assignment.
 store_fs_bytes() {
-  df -PB1 /nix 2>/dev/null | awk 'NR==2 {print $2}'
+  df -PB1 /nix 2>/dev/null | tail -n1 | tr -s ' ' | cut -d' ' -f2 || true
 }
 
 # A byte count, optionally with a binary suffix (K/M/G/T, `iB` tolerated), so an
@@ -322,8 +329,12 @@ MAX_FREE_CAP=$((60 * 1024 * 1024 * 1024))     # 60 GiB
 
 resolve_free_space() {
   local total min max
-  total="$(store_fs_bytes)"
-  [ -n "${total:-}" ] && [ "$total" -gt 0 ] 2>/dev/null || total=0
+  total="$(store_fs_bytes || true)"
+  # Anything non-numeric (an odd df, a busy mount, no df at all) means "unknown",
+  # never an arithmetic error in the boot path.
+  case "${total:-}" in
+    "" | *[!0-9]*) total=0 ;;
+  esac
 
   if [ -n "${VEGA_MIN_FREE:-}" ]; then
     min="$(parse_bytes "${VEGA_MIN_FREE}")" || {
@@ -364,9 +375,11 @@ resolve_free_space() {
   echo "${min} ${max}"
 }
 
-# Bytes as GiB with one decimal, for the boot announcement only.
+# Bytes as GiB with one decimal, for the boot announcement only. Shell
+# arithmetic rather than awk, which the image does not ship.
 gib() {
-  awk -v b="$1" 'BEGIN { printf "%.1f GiB", b / 1073741824 }'
+  local b="${1:-0}"
+  printf '%s.%s GiB' "$((b / 1073741824))" "$(((b % 1073741824) * 10 / 1073741824))"
 }
 
 # Emit the generated nix.conf for the given sandbox mode. Split out of

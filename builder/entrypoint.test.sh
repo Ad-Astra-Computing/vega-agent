@@ -301,6 +301,30 @@ if printf '%s\n' "$conf" | grep -q "max-free"; then
   echo "FAIL: conf opt-out must not set max-free" >&2; fails=$((fails + 1))
 else echo "ok: conf opt-out omits max-free"; fi
 
+# The boot path may only use tools the image actually ships. The image has no
+# awk (builderRoot in flake.nix: coreutils, gnugrep, gnused, findutils, jq, ...),
+# and this script runs before the runner starts, so an out-of-closure command is
+# not a degraded feature but an aborted boot under `set -e`: every container
+# fails to start. This caught exactly that, in the free-space code below.
+for tool in awk gawk mawk perl python python3 bc; do
+  # Comments are stripped first: the code below deliberately NAMES awk in a
+  # comment explaining why it must not be called.
+  if sed 's/#.*//' "$here/entrypoint.sh" | grep -qE "(^|[^[:alnum:]_./-])${tool}[[:space:]]"; then
+    echo "FAIL: entrypoint.sh invokes '${tool}', which the builder image does not ship" >&2
+    fails=$((fails + 1))
+  else
+    echo "ok: entrypoint avoids ${tool} (not in the image closure)"
+  fi
+done
+
+# gib formats the boot announcement without awk.
+g_out="$(gib $((25 * 1024 * 1024 * 1024)))"
+if [ "$g_out" = "25.0 GiB" ]; then echo "ok: gib formats GiB"; else
+  echo "FAIL: gib -> '$g_out' (want '25.0 GiB')" >&2; fails=$((fails + 1)); fi
+g_out="$(gib 1610612736)"  # 1.5 GiB
+if [ "$g_out" = "1.5 GiB" ]; then echo "ok: gib formats a fraction"; else
+  echo "FAIL: gib fraction -> '$g_out' (want '1.5 GiB')" >&2; fails=$((fails + 1)); fi
+
 if [ "$fails" -ne 0 ]; then
   echo "$fails test(s) failed" >&2
   exit 1
