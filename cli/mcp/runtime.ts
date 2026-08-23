@@ -61,10 +61,16 @@ export function buildToolContext(
   const flagKey = opts.flagKey ?? null;
   return {
     fetcher: withRetry(boundedFetcher(cacheUrl, MAX_RESPONSE_BYTES)),
+    // The revocation list is global, so it is asked of the ORIGIN: a tenant or
+    // view scope in `cacheUrl` would 404 it and every answer would be unknown.
+    rootFetcher: withRetry(boundedFetcher(new URL(cacheUrl).origin, MAX_RESPONSE_BYTES)),
     cacheUrl,
     sharedKeyName: SHARED_KEY_NAME,
     ...(opts.maxScan !== undefined ? { maxScan: opts.maxScan } : {}),
     resolveKey: async (sigNames) => flagKey ?? pickTrustedKey(await trustedKeys(), sigNames),
+    // From the user's own trusted keys, never the flag and never the narinfo's
+    // signers, so the global list is authenticated whatever key signed the build.
+    resolveSharedKey: async () => pickTrustedKey(await trustedKeys(), [SHARED_KEY_NAME]),
     // Streaming NAR fetch (decompress + hash), bounded by a timeout rather than a
     // byte cap since a legitimate NAR can be large. A caller may pass a smaller
     // per-call timeout (the change gate does, to keep one in-flight NAR within

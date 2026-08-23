@@ -15,7 +15,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
   the cache origin (it is global, not per-tenant) and authenticated with the
   user's pinned shared key, never one the same cache served. A revoked binding
   now fails by every route, including the tenant and signature-only ones and the
-  MCP risk gate an agent acts on, since "Vega withdrew this" is a different
+  MCP risk gate an agent acts on, whatever key signed the build, since "Vega withdrew this" is a different
   answer rather than weaker evidence. A status that cannot be established is
   reported as unknown and is not treated as clean, so a cache that withholds the
   list is distinguishable from one with nothing to hide. The list carries a

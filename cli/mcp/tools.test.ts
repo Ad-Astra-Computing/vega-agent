@@ -17,6 +17,8 @@ function ctxFor(opts: { keyName?: string; narOk?: boolean; narChecked?: boolean;
   pub: NixPublicKey;
 } {
   const master = generateKeyPair(opts.keyName ?? "vega-cache-1").secret;
+  // The list is always signed by the SHARED key, even when the build is not.
+  const sharedMaster = generateKeyPair("vega-cache-1").secret;
   const pub = derivePublicKey(master);
   const info: NarInfo = {
     storePath: `/nix/store/${HASH}-hello-2.12.1`,
@@ -61,7 +63,7 @@ function ctxFor(opts: { keyName?: string; narOk?: boolean; narChecked?: boolean;
           total: list.length,
           at,
           signature: signBytes(
-            master,
+            sharedMaster,
             new TextEncoder().encode(
               `vega-revocations:v2:${at}:${list.length}:${JSON.stringify(list)}`,
             ),
@@ -79,6 +81,9 @@ function ctxFor(opts: { keyName?: string; narOk?: boolean; narChecked?: boolean;
     cacheUrl: "https://vega-cache.dev",
     sharedKeyName: "vega-cache-1",
     resolveKey: async (sigNames) => (sigNames.includes(pub.name) ? pub : null),
+    // The user's pinned shared key, which is what authenticates the global list
+    // whatever key signed the build.
+    resolveSharedKey: async () => derivePublicKey(sharedMaster),
     verifyNar: async () => ({ ok: opts.narOk ?? true, checked: opts.narChecked ?? true, detail: "test" }),
   };
   return { ctx, pub };
@@ -189,6 +194,21 @@ describe("riskTool verdicts", () => {
     if (!isError(r)) {
       expect(r.verdict).toBe("warn");
       expect(r.reasonCodes).toContain("REVOCATION_STATUS_UNKNOWN");
+    }
+  });
+
+  it("denies a revoked build that is NOT signed by the shared key", async () => {
+    // The case every earlier fixture missed: the verifying key is a tenant key,
+    // so the list can only be authenticated through the separately pinned shared
+    // key. Without that wiring the status is unknown, and the scoped branch
+    // answered as though nothing had been withdrawn.
+    const { ctx } = ctxFor({ keyName: "vega-someone-repo-1", revoked: true });
+    const r = await riskTool(ctx, { target: HASH });
+    expect(isError(r)).toBe(false);
+    if (!isError(r)) {
+      expect(r.proofs.revocation.revoked).toBe(true);
+      expect(r.verdict).toBe("deny");
+      expect(r.reasonCodes).toContain("REVOKED_BY_VEGA");
     }
   });
 

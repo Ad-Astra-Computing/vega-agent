@@ -32,6 +32,23 @@ export interface ToolContext {
   cacheUrl: string;
   /** The global shared key name (e.g. `vega-cache-1`). */
   sharedKeyName: string;
+  /**
+   * The user's PINNED shared key, and a fetcher rooted at the cache ORIGIN.
+   *
+   * Both exist for the revocation list, which is global and signed by the shared
+   * key whatever tier a path sits in. Without them the list can only be
+   * authenticated when the verifying key HAPPENS to be the shared key, so a
+   * revoked path signed by a tenant or upstream key reads as status-unknown and
+   * the risk gate answers about it as though nothing were withdrawn.
+   */
+  rootFetcher?: Fetcher | undefined;
+  /**
+   * The user's PINNED shared key, for the revocation list only. Deliberately
+   * separate from {@link resolveKey}: that one honours an explicit --public-key,
+   * which names the key a BUILD is expected to be signed by, and using it here
+   * would let a tenant key be presented as the authority on a global list.
+   */
+  resolveSharedKey?: (() => Promise<NixPublicKey | null>) | undefined;
   /** Resolve a trusted public key for the narinfo's signature key names, from
    * the user's nix.conf / an explicit key. Returns null if none is trusted. */
   resolveKey(sigNames: string[]): Promise<NixPublicKey | null>;
@@ -102,8 +119,11 @@ export async function runVerify(
     };
   }
 
+  const sharedPublicKey = ctx.resolveSharedKey ? await ctx.resolveSharedKey() : null;
   const result = await verifyBuild({
     fetcher: ctx.fetcher,
+    ...(ctx.rootFetcher !== undefined ? { rootFetcher: ctx.rootFetcher } : {}),
+    ...(sharedPublicKey !== null ? { sharedPublicKey } : {}),
     info,
     publicKey,
     sharedKeyName: ctx.sharedKeyName,
@@ -227,6 +247,10 @@ export function assessRisk(r: VerifyResult, narOk: boolean, narChecked = true): 
       nextActions: ["build_locally", "pin_previous_verified_version"],
     };
   }
+  // Every tier from here on: say when the withdrawal question went unanswered.
+  // Only the shared branch used to, so a scoped or upstream path came back
+  // clean without ever disclosing that nobody could check.
+  const unknownRev = r.revocation.revoked === null ? ["REVOCATION_STATUS_UNKNOWN"] : [];
   if (r.signature.scope === "upstream") {
     // A verified mirror of an upstream cache; not a Vega trust statement. For an
     // upstream mirror the trust anchor is the upstream signature (which the user
@@ -237,7 +261,7 @@ export function assessRisk(r: VerifyResult, narOk: boolean, narChecked = true): 
     return {
       verdict: "allow",
       tier: "upstream",
-      reasonCodes: ["MIRRORED_UPSTREAM", "NOT_A_VEGA_TRUST_STATEMENT", ...note],
+      reasonCodes: ["MIRRORED_UPSTREAM", "NOT_A_VEGA_TRUST_STATEMENT", ...note, ...unknownRev],
       proofs,
       nextActions: [],
     };
@@ -246,7 +270,7 @@ export function assessRisk(r: VerifyResult, narOk: boolean, narChecked = true): 
     return {
       verdict: "warn",
       tier: "scoped",
-      reasonCodes: ["SCOPED_BINDING_NOT_GLOBAL", ...note],
+      reasonCodes: ["SCOPED_BINDING_NOT_GLOBAL", ...note, ...unknownRev],
       proofs,
       nextActions: ["request_shared_promotion", "build_locally"],
     };
@@ -270,7 +294,7 @@ export function assessRisk(r: VerifyResult, narOk: boolean, narChecked = true): 
   // and each is a cache deciding what this caller gets to know. Warn rather than
   // allow, and say which, or the staleness bound buys nothing here: replay to
   // stale would read as clean.
-  const unknownRevocation = r.revocation.revoked === null;
+  const unknownRevocation = unknownRev.length > 0;
   if (unchecked || unknownRevocation) {
     return {
       verdict: "warn",

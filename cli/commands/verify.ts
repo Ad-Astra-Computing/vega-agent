@@ -138,6 +138,40 @@ function tick(ok: boolean): string {
   return ok ? pc.green("ok") : pc.red("FAIL");
 }
 
+/**
+ * Whether `vega verify` should exit 0, as a pure decision.
+ *
+ * Extracted because it was inline in the command action and therefore untested,
+ * and a revoked tenant build shipped exiting 0 as a result: the JSON path
+ * honoured the decision and the human path fell off the end of a success branch.
+ * The shell only sees this function's answer, so this is where it belongs.
+ */
+export function verifyExitOk(
+  r: VerifyResult,
+  o: { narOk: boolean; narChecked: boolean; tenantScope: boolean; allowSignatureOnly?: boolean },
+): boolean {
+  // An explicit revocation overrides every route to success. The weaker tiers
+  // below deliberately accept weaker evidence, but "Vega withdrew this" is not
+  // weaker evidence, it is a different answer, and it applies to a tenant
+  // binding as much as a shared one.
+  if (r.revocation.revoked === true) return false;
+  if (fullyVerified(r) && o.narOk) return true;
+  // A tenant scope (--url .../tenant/<owner>/<repo>) is an explicit request to
+  // verify a tenant build: a Vega tenant-key signature plus actually-checked
+  // bytes is the success criterion there, never an upstream-mirror signature.
+  if (o.tenantScope && r.signature.ok && r.signature.scope === "scoped" && o.narChecked) return true;
+  // A valid scoped/upstream signature is a real result but NOT full Vega
+  // verification, so outside a tenant scope it needs an explicit opt-in and a
+  // default CI `vega verify && ...` cannot be satisfied by one.
+  return (
+    Boolean(o.allowSignatureOnly) &&
+    r.signature.ok &&
+    o.narOk &&
+    r.signature.scope !== "shared" &&
+    !r.transparency.found
+  );
+}
+
 export function registerVerify(program: Command): void {
   program
     .command("verify")
@@ -244,14 +278,13 @@ export function registerVerify(program: Command): void {
         // explicitly allowed, so a default CI `vega verify && ...` cannot be
         // satisfied by a signature-only build.
         const signatureOnlyOk = sig.ok && narOk && sig.scope !== "shared" && !t.found;
-        // An explicit revocation overrides every route to success. tenantOk and
-        // signatureOnlyOk deliberately accept weaker evidence than full
-        // verification, but "Vega withdrew this" is not weaker evidence, it is a
-        // different answer, and it applies to a tenant binding as much as a
-        // shared one.
         const revoked = result.revocation.revoked === true;
-        const exitOk =
-          !revoked && (verified || tenantOk || (Boolean(opts.allowSignatureOnly) && signatureOnlyOk));
+        const exitOk = verifyExitOk(result, {
+          narOk,
+          narChecked,
+          tenantScope: isTenantScope(cacheUrl),
+          ...(opts.allowSignatureOnly !== undefined ? { allowSignatureOnly: opts.allowSignatureOnly } : {}),
+        });
 
         if (opts.json) {
           jsonEvent({ hash, ...result, nar: nar ?? undefined, verified, exitOk });
