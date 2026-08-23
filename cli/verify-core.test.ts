@@ -87,14 +87,21 @@ function scenario(
       [`/${f.hashId}.narinfo`]: narinfoText,
       "/log/sth": f.sth,
       [`/log/proof/inclusion/${f.proof.index}`]: f.proof,
-      "/api/revocations": {
-        v: 1,
-        revocations: revList,
-        signature: signBytes(
-          master,
-          new TextEncoder().encode(`vega-revocations:v1:${JSON.stringify(revList)}`),
-        ),
-      },
+      "/api/revocations": (() => {
+        const at = Date.now();
+        return {
+          v: 2,
+          revocations: revList,
+          total: revList.length,
+          at,
+          signature: signBytes(
+            master,
+            new TextEncoder().encode(
+              `vega-revocations:v2:${at}:${revList.length}:${JSON.stringify(revList)}`,
+            ),
+          ),
+        };
+      })(),
     };
     f.leavesData.forEach((data, i) => {
       map[`/log/entry/${i}`] = { index: i, data };
@@ -108,7 +115,7 @@ function scenario(
       json: async () => v,
     };
   };
-  return { fetcher, pub, info: f, narinfoText };
+  return { fetcher, pub, master, info: f, narinfoText };
 }
 
 interface Fixture {
@@ -173,13 +180,76 @@ describe("verifyBuild", () => {
             ok: true,
             status: 200,
             text: async () => "",
-            json: async () => ({ v: 1, revocations: [], signature: "vega-cache-1:AAAA" }),
+            json: async () => ({
+              v: 2,
+              revocations: [],
+              total: 0,
+              at: Date.now(),
+              signature: "vega-cache-1:AAAA",
+            }),
           }
         : fetcher(path);
     const r2 = await verifyBuild({ fetcher: forged, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
     expect(r2.revocation.revoked).toBeNull();
     expect(r2.revocation.note).toMatch(/signature/);
     expect(fullyVerified(r2)).toBe(false);
+  });
+
+  it("treats a stale or truncated list as unknown, not as clean", async () => {
+    // A valid signature proves origin, not recency or completeness. A capture
+    // taken before a revocation still verifies for ever, and a list the server
+    // capped still verifies while missing the entries that fell off. Either can
+    // be the wrong answer, which is worse than no answer.
+    const { fetcher, pub, master, info } = scenario();
+    const stale: Fetcher = async (path) =>
+      path === "/api/revocations"
+        ? {
+            ok: true,
+            status: 200,
+            text: async () => "",
+            json: async () => {
+              const at = Date.now() - 48 * 60 * 60 * 1000; // two days old
+              return {
+                v: 2,
+                revocations: [],
+                total: 0,
+                at,
+                signature: signBytes(
+                  master,
+                  new TextEncoder().encode(`vega-revocations:v2:${at}:0:[]`),
+                ),
+              };
+            },
+          }
+        : fetcher(path);
+    const r = await verifyBuild({ fetcher: stale, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
+    expect(r.revocation.revoked).toBeNull();
+    expect(r.revocation.note).toMatch(/stale/);
+
+    const truncated: Fetcher = async (path) =>
+      path === "/api/revocations"
+        ? {
+            ok: true,
+            status: 200,
+            text: async () => "",
+            json: async () => {
+              const at = Date.now();
+              return {
+                v: 2,
+                revocations: [],
+                total: 7, // the server holds seven; it served none of them
+                at,
+                signature: signBytes(
+                  master,
+                  new TextEncoder().encode(`vega-revocations:v2:${at}:7:[]`),
+                ),
+              };
+            },
+          }
+        : fetcher(path);
+    const r2 = await verifyBuild({ fetcher: truncated, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
+    expect(r2.revocation.revoked).toBeNull();
+    expect(r2.revocation.note).toMatch(/truncated/);
   });
 
   it("rejects when verified against the wrong trusted key", async () => {

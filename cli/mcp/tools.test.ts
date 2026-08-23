@@ -54,12 +54,17 @@ function ctxFor(opts: { keyName?: string; narOk?: boolean; narChecked?: boolean;
         const list = opts.revoked
           ? [{ hash: HASH, storePath: `/nix/store/${HASH}-hello-2.12.1`, reason: "source withdrawn", at: 1 }]
           : [];
+        const at = Date.now();
         return {
-          v: 1,
+          v: 2,
           revocations: list,
+          total: list.length,
+          at,
           signature: signBytes(
             master,
-            new TextEncoder().encode(`vega-revocations:v1:${JSON.stringify(list)}`),
+            new TextEncoder().encode(
+              `vega-revocations:v2:${at}:${list.length}:${JSON.stringify(list)}`,
+            ),
           ),
         };
       })(),

@@ -245,6 +245,17 @@ async function getJson(fetcher: Fetcher, path: string): Promise<unknown> {
  * result so the caller can render a complete verdict.
  */
 
+/**
+ * How old a signed revocation list may be before it stops counting as an answer.
+ *
+ * The signature proves origin, not recency, so without a bound an attacker who
+ * captured the endpoint before a revocation could replay it for ever. Generous
+ * enough to absorb clock skew and a cache in front of the origin, short enough
+ * that suppressing a revocation means continuously replaying rather than
+ * keeping one artifact.
+ */
+const REVOCATION_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+
 /** A revocation as the control plane publishes it. */
 interface RevocationEntry {
   hash: string;
@@ -278,7 +289,7 @@ async function checkRevoked(
   publicKey: NixPublicKey,
   storePath: string,
 ): Promise<VerifyResult["revocation"]> {
-  let body: { revocations?: unknown; signature?: unknown };
+  let body: { revocations?: unknown; signature?: unknown; at?: unknown; total?: unknown };
   try {
     body = (await getJson(fetcher, "/api/revocations")) as typeof body;
   } catch {
@@ -289,12 +300,27 @@ async function checkRevoked(
   if (typeof body.signature !== "string" || body.signature === "") {
     return { revoked: null, note: "revocation list is unsigned" };
   }
+  const at = typeof body.at === "number" ? body.at : NaN;
+  const total = typeof body.total === "number" ? body.total : NaN;
+  if (!Number.isFinite(at) || !Number.isFinite(total)) {
+    return { revoked: null, note: "revocation list carries no freshness or total" };
+  }
   // Re-serialize exactly what the control plane signed. JSON.parse preserves key
   // order and JSON.stringify re-emits it, so a list that round-trips unchanged
   // reproduces the signed bytes.
-  const msg = new TextEncoder().encode(`vega-revocations:v1:${JSON.stringify(list)}`);
+  const msg = new TextEncoder().encode(`vega-revocations:v2:${at}:${total}:${JSON.stringify(list)}`);
   if (!verifyBytes(publicKey, msg, body.signature)) {
     return { revoked: null, note: "revocation list signature did not verify" };
+  }
+  // A validly-signed answer can still be the wrong answer. Stale means it may
+  // predate the revocation being looked for; truncated means the entry may be
+  // one the cap dropped. Neither is "not revoked".
+  const ageMs = Date.now() - at;
+  if (ageMs > REVOCATION_MAX_AGE_MS) {
+    return { revoked: null, note: `revocation list is stale (${Math.round(ageMs / 3600_000)}h old)` };
+  }
+  if (total !== list.length) {
+    return { revoked: null, note: `revocation list is truncated (${list.length} of ${total})` };
   }
   const hit = (list as RevocationEntry[]).find(
     (e) => e && typeof e === "object" && e.storePath === storePath,
