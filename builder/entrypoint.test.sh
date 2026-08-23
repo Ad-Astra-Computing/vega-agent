@@ -253,6 +253,12 @@ pb "zero"         "0"       0
 pb "not a number" "lots"    FAIL
 pb "empty"        ""        FAIL
 pb "bad unit"     "25X"     FAIL
+# Shell arithmetic is int64 and wraps silently. One overflow yields a negative
+# max-free (Nix refuses to run, a confusing boot failure), another yields 0,
+# which turns the floor OFF. Neither may be reachable from a typo.
+pb "absurd value"  "99999999999999999999G" FAIL
+pb "int64 edge"    "9223372036854775807G"  FAIL
+pb "large but ok"  "999G"   $((999 * 1024 * 1024 * 1024))
 
 fs() {
   local name="$1" want_min="$3" want_max="$4" got

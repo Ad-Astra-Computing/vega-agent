@@ -297,6 +297,11 @@ parse_bytes() {
   num="${raw%%[!0-9]*}"
   unit="${raw#"$num"}"
   [ -n "$num" ] || return 1
+  # A value this large is a typo, not a policy. Shell arithmetic is int64 and
+  # wraps silently, and the wrap is worse than the typo: one overflow lands on a
+  # negative max-free that Nix rejects (a confusing refusal to boot), another
+  # lands on 0, which DISABLES the floor this exists to set. Refuse instead.
+  [ "${#num}" -gt 12 ] && return 1
   case "$unit" in
     "" | B) mult=1 ;;
     K | k | KiB | kiB | KB | kB) mult=1024 ;;
