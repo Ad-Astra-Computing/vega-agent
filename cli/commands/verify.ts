@@ -284,6 +284,16 @@ export function registerVerify(program: Command): void {
         keyValues(rows);
 
         if (t.note && sig.scope !== "shared") info(`\n  ${pc.gray(t.note)}`);
+        // First, and on its own: a withdrawn binding is not a weaker pass, and
+        // the tenant branch below would otherwise print "Verified in your tenant
+        // tier" over the top of it.
+        if (revoked) {
+          fail(
+            result.revocation.reason
+              ? `Vega has revoked this build: ${result.revocation.reason}. Do not trust it.`
+              : "Vega has revoked this build. Do not trust it.",
+          );
+        }
         if (verified) {
           success(
             nar !== null
@@ -314,6 +324,11 @@ export function registerVerify(program: Command): void {
         } else {
           fail("Verification failed. Do not trust this build.");
         }
+        // Backstop. The branches above each decide what to PRINT; this decides
+        // what the shell sees, once, for all of them. A branch that printed a
+        // success it should not have (a revoked tenant build did exactly that)
+        // cannot reach exit 0 by falling off the end.
+        if (!exitOk) process.exit(1);
       },
     );
 }

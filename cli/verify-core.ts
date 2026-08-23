@@ -273,13 +273,16 @@ interface RevocationEntry {
  * key. What it can do is refuse to answer, which is why an unreachable or
  * unverified list returns null rather than false.
  *
- * What this does NOT stop is replay. The signed payload carries no timestamp or
- * counter, so an older honestly-signed list still verifies, and the signature
- * over the empty list is a permanent "nothing is revoked" answer to anyone who
- * captured it. Suppressing a revocation therefore costs an attacker a
- * pre-captured public artifact, not the key. Closing that needs a freshness
- * field the server signs and this checks; until then the guarantee is "cannot
- * forge", not "cannot withhold".
+ * Replay and truncation are why `at` and `total` are inside the signature rather
+ * than beside it. Without `at` an older honestly-signed list verifies for ever,
+ * so the signature over the empty list would be a permanent "nothing is
+ * revoked" answer to anyone who captured it; without `total` a list the server
+ * capped still verifies while the entries that fell off read as clean. Both are
+ * checked below, so suppressing a revocation now costs continuous replay inside
+ * the freshness window rather than one pre-captured artifact.
+ *
+ * The residue is the client's own clock: a machine running behind extends that
+ * window by its own error, which no server-side field can fix.
  *
  * Not fatal to call on a scoped or upstream path. The list covers shared
  * bindings, so those simply are not in it, and asking costs one request.

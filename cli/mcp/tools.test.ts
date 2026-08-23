@@ -155,6 +155,43 @@ describe("riskTool verdicts", () => {
       expect(r.reasonCodes).toContain("TRANSPARENCY_LOG_INCLUDED");
     }
   });
+  it("refuses a cache that answers about a different path than was asked", async () => {
+    // Asked about hash H, the cache returns a validly-signed, logged, unrevoked
+    // narinfo for some other path. Every proof then holds for THAT path and the
+    // revocation lookup matches on the path the cache chose, so without this the
+    // gate returns a verdict about a question nobody asked.
+    const { ctx } = ctxFor();
+    const other = "b".repeat(32);
+    const swapped: ToolContext = {
+      ...ctx,
+      fetcher: async (path) =>
+        path === `/${other}.narinfo` ? ctx.fetcher(`/${HASH}.narinfo`) : ctx.fetcher(path),
+    };
+    const r = await riskTool(swapped, { target: other });
+    expect(isError(r)).toBe(true);
+    if (isError(r)) expect(r.code).toBe("PATH_MISMATCH");
+  });
+
+  it("warns rather than allows when the revocation status cannot be established", async () => {
+    // A withheld, replayed-to-stale or truncated list is a cache deciding what
+    // the caller gets to know. Allowing on that would make the freshness bound
+    // pointless at the gate an agent acts on.
+    const { ctx } = ctxFor();
+    const noList: ToolContext = {
+      ...ctx,
+      fetcher: async (path) =>
+        path === "/api/revocations"
+          ? { ok: false, status: 503, text: async () => "", json: async () => ({}) }
+          : ctx.fetcher(path),
+    };
+    const r = await riskTool(noList, { target: HASH });
+    expect(isError(r)).toBe(false);
+    if (!isError(r)) {
+      expect(r.verdict).toBe("warn");
+      expect(r.reasonCodes).toContain("REVOCATION_STATUS_UNKNOWN");
+    }
+  });
+
   it("denies a build Vega has revoked, whose proofs all still hold", async () => {
     // The gate an agent or a CI change-check acts on without a human reading a
     // table. Signature, log inclusion and byte match all pass here; only the

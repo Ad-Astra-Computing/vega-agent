@@ -57,6 +57,18 @@ function ctxFor(opts: { keyName?: string; tamper?: boolean; narChecked?: boolean
       [`/${GOOD}.narinfo`]: formatNarInfo(info),
       "/log/sth": sth,
       [`/log/proof/inclusion/${proof.index}`]: proof,
+      // A healthy cache answers the revocation list; an unknown status is a
+      // warn, not an allow.
+      "/api/revocations": (() => {
+        const at = Date.now();
+        return {
+          v: 2,
+          revocations: [],
+          total: 0,
+          at,
+          signature: signBytes(master, new TextEncoder().encode(`vega-revocations:v2:${at}:0:[]`)),
+        };
+      })(),
     };
     leaves.forEach((data, i) => (map[`/log/entry/${i}`] = { index: i, data }));
     const v = map[path];

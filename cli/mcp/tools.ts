@@ -61,7 +61,7 @@ export interface ToolError {
   /** A stable, caller-safe classifier for the failure, so an aggregator (e.g.
    * the change assessor) can distinguish "cannot make a trust statement" cases
    * (NOT_IN_CACHE, NO_TRUSTED_KEY, NOT_A_STORE_PATH) from a proven-bad verdict. */
-  code?: "NOT_A_STORE_PATH" | "NOT_IN_CACHE" | "NO_TRUSTED_KEY";
+  code?: "NOT_A_STORE_PATH" | "NOT_IN_CACHE" | "NO_TRUSTED_KEY" | "PATH_MISMATCH";
 }
 export function isError(v: unknown): v is ToolError {
   return typeof v === "object" && v !== null && typeof (v as ToolError).error === "string";
@@ -78,6 +78,18 @@ export async function runVerify(
   const res = await ctx.fetcher(`/${hash}.narinfo`);
   if (!res.ok) return { error: `no build found for ${hash} (HTTP ${res.status})`, code: "NOT_IN_CACHE" };
   const info = parseNarInfo(await res.text());
+  // The answer has to be about the path that was asked about. Without this a
+  // cache asked for a revoked hash can return a different validly-signed,
+  // logged, unrevoked narinfo: every check then passes for THAT path, the
+  // revocation lookup matches on the path the cache chose, and this returns
+  // "allow" for a question about a revoked build. These are the gates an agent
+  // and the change check act on, so it matters more here than in the CLI.
+  if (!info.storePath.startsWith(`/nix/store/${hash}-`)) {
+    return {
+      error: `the cache answered for ${untrusted(info.storePath, 512)}, not the path ${hash} was asked about`,
+      code: "PATH_MISMATCH",
+    };
+  }
   const sigNames = info.sigs.map((s) => s.slice(0, s.indexOf(":")).trim()).filter(Boolean);
 
   const publicKey = await ctx.resolveKey(sigNames);
@@ -253,13 +265,27 @@ export function assessRisk(r: VerifyResult, narOk: boolean, narChecked = true): 
   // the signature and the transparency record; if we could not re-hash the bytes
   // locally, the trust chain still holds and nix re-checks them on substitution,
   // but we did not personally confirm them: warn rather than a clean allow.
-  if (unchecked) {
+  // Not knowing whether Vega withdrew this is not the same as knowing it did
+  // not. The list may have been withheld, replayed until stale, or truncated,
+  // and each is a cache deciding what this caller gets to know. Warn rather than
+  // allow, and say which, or the staleness bound buys nothing here: replay to
+  // stale would read as clean.
+  const unknownRevocation = r.revocation.revoked === null;
+  if (unchecked || unknownRevocation) {
     return {
       verdict: "warn",
       tier: "shared",
-      reasonCodes: ["SHARED_REPRODUCED", "TRANSPARENCY_LOG_INCLUDED", "NAR_NOT_LOCALLY_CHECKED"],
+      reasonCodes: [
+        "SHARED_REPRODUCED",
+        "TRANSPARENCY_LOG_INCLUDED",
+        ...(unchecked ? ["NAR_NOT_LOCALLY_CHECKED"] : []),
+        ...(unknownRevocation ? ["REVOCATION_STATUS_UNKNOWN"] : []),
+      ],
       proofs,
-      nextActions: ["substitute through nix, which re-checks the narHash"],
+      nextActions: [
+        ...(unchecked ? ["substitute through nix, which re-checks the narHash"] : []),
+        ...(unknownRevocation ? ["retry when the cache serves a current revocation list"] : []),
+      ],
     };
   }
   return {

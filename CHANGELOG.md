@@ -18,9 +18,9 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
   MCP risk gate an agent acts on, since "Vega withdrew this" is a different
   answer rather than weaker evidence. A status that cannot be established is
   reported as unknown and is not treated as clean, so a cache that withholds the
-  list is distinguishable from one with nothing to hide. The signature stops a
-  cache forging a revocation, not withholding one: the payload carries no
-  freshness marker, so an older validly-signed list still verifies.
+  list is distinguishable from one with nothing to hide. The list carries a
+  signed timestamp and total, both checked, so a stale replay or a truncated
+  answer is unknown rather than clean.
 
 ## [0.18.1] - 2026-08-23
 
