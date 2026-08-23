@@ -187,6 +187,15 @@ export function registerVerify(program: Command): void {
           fail(`no build found for ${hash} (HTTP ${res.status})`);
         }
         const narInfo = parseNarInfo(narText);
+        // The answer must be about the path that was asked about. Nothing else
+        // pins that: a cache asked for a revoked hash could return a different
+        // validly-signed, logged, unrevoked narinfo, and every check below would
+        // pass for THAT path while the caller believes it verified this one.
+        if (!narInfo.storePath.startsWith(`/nix/store/${hash}-`)) {
+          fail(
+            `the cache answered for ${narInfo.storePath}, which is not the path ${hash} was asked about`,
+          );
+        }
         const sigNames = narInfo.sigs.map((s) => s.slice(0, s.indexOf(":")).trim()).filter(Boolean);
         const publicKey = await resolveKey(cacheUrl, sigNames, opts.publicKey);
 

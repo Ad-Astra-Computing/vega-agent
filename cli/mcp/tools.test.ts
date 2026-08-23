@@ -12,7 +12,7 @@ const utf8 = new TextEncoder();
 const hex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
 const HASH = "abc123def456abc123def456abc123de";
 
-function ctxFor(opts: { keyName?: string; narOk?: boolean; narChecked?: boolean; tamper?: (f: { narinfoText: string; sth: any; proof: any; leaves: string[] }) => void } = {}): {
+function ctxFor(opts: { keyName?: string; narOk?: boolean; narChecked?: boolean; revoked?: boolean; tamper?: (f: { narinfoText: string; sth: any; proof: any; leaves: string[] }) => void } = {}): {
   ctx: ToolContext;
   pub: NixPublicKey;
 } {
@@ -50,11 +50,19 @@ function ctxFor(opts: { keyName?: string; narOk?: boolean; narChecked?: boolean;
       [`/log/proof/inclusion/${state.proof.index}`]: state.proof,
       // A healthy cache answers the revocation list; verification is strict
       // about not being able to establish the status.
-      "/api/revocations": {
-        v: 1,
-        revocations: [],
-        signature: signBytes(master, new TextEncoder().encode("vega-revocations:v1:[]")),
-      },
+      "/api/revocations": (() => {
+        const list = opts.revoked
+          ? [{ hash: HASH, storePath: `/nix/store/${HASH}-hello-2.12.1`, reason: "source withdrawn", at: 1 }]
+          : [];
+        return {
+          v: 1,
+          revocations: list,
+          signature: signBytes(
+            master,
+            new TextEncoder().encode(`vega-revocations:v1:${JSON.stringify(list)}`),
+          ),
+        };
+      })(),
     };
     state.leaves.forEach((data, i) => (map[`/log/entry/${i}`] = { index: i, data }));
     const v = map[path];
@@ -142,6 +150,20 @@ describe("riskTool verdicts", () => {
       expect(r.reasonCodes).toContain("TRANSPARENCY_LOG_INCLUDED");
     }
   });
+  it("denies a build Vega has revoked, whose proofs all still hold", async () => {
+    // The gate an agent or a CI change-check acts on without a human reading a
+    // table. Signature, log inclusion and byte match all pass here; only the
+    // revocation differs, so an "allow" could not be blamed on anything else.
+    const { ctx } = ctxFor({ revoked: true });
+    const r = await riskTool(ctx, { target: HASH });
+    expect(isError(r)).toBe(false);
+    if (!isError(r)) {
+      expect(r.verdict).toBe("deny");
+      expect(r.reasonCodes).toContain("REVOKED_BY_VEGA");
+      expect(r.proofs.revocation.revoked).toBe(true);
+    }
+  });
+
   it("denies a forged inclusion proof", async () => {
     const { ctx } = ctxFor({ tamper: (s) => (s.proof.proofHex = s.proof.proofHex.map((h: string) => h.replace(/./, (c) => (c === "0" ? "1" : "0")))) });
     const r = await riskTool(ctx, { target: HASH });

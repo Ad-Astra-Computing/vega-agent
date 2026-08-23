@@ -134,6 +134,11 @@ function shape(r: VerifyResult, narOk: boolean, narChecked: boolean) {
       scanned: t.scanned,
       ...(t.note !== undefined ? { note: untrusted(t.note, 256) } : {}),
     },
+    revocation: {
+      revoked: r.revocation.revoked,
+      ...(r.revocation.reason !== undefined ? { reason: untrusted(r.revocation.reason, 256) } : {}),
+      ...(r.revocation.note !== undefined ? { note: untrusted(r.revocation.note, 256) } : {}),
+    },
     narHashChecked: narChecked,
     narHashVerified: narChecked && narOk,
     verified: fullyVerified(r) && narChecked && narOk,
@@ -177,6 +182,19 @@ export function assessRisk(r: VerifyResult, narOk: boolean, narChecked = true): 
   const unchecked = !narChecked;
   const note = unchecked ? ["NAR_NOT_LOCALLY_CHECKED"] : [];
 
+  // Before the signature, because a withdrawn binding is withdrawn whatever its
+  // proofs say: signature, log inclusion and byte match can all hold on a build
+  // Vega has since revoked, and this is the answer a caller acts on without a
+  // human reading the table.
+  if (r.revocation.revoked === true) {
+    return {
+      verdict: "deny",
+      tier: r.signature.scope,
+      reasonCodes: ["REVOKED_BY_VEGA"],
+      proofs,
+      nextActions: ["build_locally", "pin_previous_verified_version"],
+    };
+  }
   if (!r.signature.ok) {
     return {
       verdict: "deny",

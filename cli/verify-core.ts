@@ -258,9 +258,17 @@ interface RevocationEntry {
  * Ask whether this binding has been withdrawn.
  *
  * The list is signed over a domain-separated payload with the same key that
- * signs the tree head, so a cache cannot invent a revocation OR quietly drop
- * one: dropping changes the signed bytes. What it CAN do is refuse to answer,
- * which is why an unreachable or unverified list returns null rather than false.
+ * signs the tree head, so a cache cannot INVENT a revocation: that needs the
+ * key. What it can do is refuse to answer, which is why an unreachable or
+ * unverified list returns null rather than false.
+ *
+ * What this does NOT stop is replay. The signed payload carries no timestamp or
+ * counter, so an older honestly-signed list still verifies, and the signature
+ * over the empty list is a permanent "nothing is revoked" answer to anyone who
+ * captured it. Suppressing a revocation therefore costs an attacker a
+ * pre-captured public artifact, not the key. Closing that needs a freshness
+ * field the server signs and this checks; until then the guarantee is "cannot
+ * forge", not "cannot withhold".
  *
  * Not fatal to call on a scoped or upstream path. The list covers shared
  * bindings, so those simply are not in it, and asking costs one request.
