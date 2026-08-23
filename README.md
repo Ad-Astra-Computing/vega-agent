@@ -93,7 +93,8 @@ still stands. A revoked build fails whatever tier it sits in. The revocation
 list is signed, and carries the time it was produced and how many entries exist,
 so a replayed or truncated answer is reported as unknown rather than as clean;
 a list older than six hours counts as unknown, and so does one this cache will
-not serve. Verification does not pass on an unknown. `vega diff` rebuilds locally and tells you whether a
+not serve. Full verification does not pass on an unknown; the weaker tenant and
+`--allow-signature-only` results, which ask for less to begin with, still do. `vega diff` rebuilds locally and tells you whether a
 build is reproducible, naming the cause of any divergence. `vega gate` builds an
 installable, diffs its dependency closure against a committed `vega-closure.lock`
 baseline, and emits `allow`/`warn`/`deny`, exiting non-zero on `deny`, so CI can

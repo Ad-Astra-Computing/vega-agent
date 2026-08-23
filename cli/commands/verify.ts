@@ -146,6 +146,26 @@ function tick(ok: boolean): string {
  * honoured the decision and the human path fell off the end of a success branch.
  * The shell only sees this function's answer, so this is where it belongs.
  */
+/**
+ * The key that authenticates the revocation list: the user's pinned shared key,
+ * or a `--public-key` they passed that IS the shared key.
+ *
+ * The flag counts here only when it names the shared key exactly. That is a
+ * deliberate trust decision the user typed, and it is the flow this command's
+ * own "no trusted key" message recommends, so refusing it would have the CLI
+ * recommend something that then reports every build's revocation as unknown.
+ * A flag naming any OTHER key is ignored: it says which key a BUILD should
+ * carry, and must never become the authority on a global list.
+ */
+async function sharedKeyForList(
+  verifyingKey: NixPublicKey,
+  flag?: string,
+): Promise<NixPublicKey | null> {
+  const pinned = pickTrustedKey(await trustedKeys(), [SHARED_KEY_NAME]);
+  if (pinned) return pinned;
+  return flag !== undefined && verifyingKey.name === SHARED_KEY_NAME ? verifyingKey : null;
+}
+
 export function verifyExitOk(
   r: VerifyResult,
   o: { narOk: boolean; narChecked: boolean; tenantScope: boolean; allowSignatureOnly?: boolean },
@@ -243,7 +263,7 @@ export function registerVerify(program: Command): void {
         // than the narinfo's signers. The constructor derives the origin.
         const result: VerifyResult = await verifyBuild({
           fetcher,
-          revocation: revocationAuthority(cacheUrl, pickTrustedKey(await trustedKeys(), [SHARED_KEY_NAME])),
+          revocation: revocationAuthority(cacheUrl, await sharedKeyForList(publicKey, opts.publicKey)),
           info: narInfo,
           publicKey,
           sharedKeyName: SHARED_KEY_NAME,

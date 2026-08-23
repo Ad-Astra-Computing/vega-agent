@@ -17,9 +17,6 @@ const MAX_RESPONSE_BYTES = 4 * 1024 * 1024; // narinfo/sth/entry/proof are tiny
 const REQUEST_TIMEOUT_MS = 15_000; // small bodies; fail fast on a stalled cache
 const NAR_TIMEOUT_MS = 120_000; // NARs can be large but must still terminate
 
-/** A fetcher that aborts any response exceeding `maxBytes`, so a hostile cache
- * cannot exhaust memory by returning a giant narinfo/proof/entry body, and times
- * out a stalled response so a single call cannot hang. */
 /**
  * The revocation authority for a cache URL: a fetcher rooted at its ORIGIN, and
  * the user's pinned shared key.
@@ -36,6 +33,9 @@ export function revocationAuthority(cacheUrl: string, sharedKey: NixPublicKey | 
   };
 }
 
+/** A fetcher that aborts any response exceeding `maxBytes`, so a hostile cache
+ * cannot exhaust memory by returning a giant narinfo/proof/entry body, and times
+ * out a stalled response so a single call cannot hang. */
 export function boundedFetcher(base: string, maxBytes: number): Fetcher {
   return async (path) => {
     const res = await fetch(`${base}${path}`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
