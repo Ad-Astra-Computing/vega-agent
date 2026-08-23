@@ -48,6 +48,13 @@ function ctxFor(opts: { keyName?: string; narOk?: boolean; narChecked?: boolean;
       [`/${HASH}.narinfo`]: state.narinfoText,
       "/log/sth": state.sth,
       [`/log/proof/inclusion/${state.proof.index}`]: state.proof,
+      // A healthy cache answers the revocation list; verification is strict
+      // about not being able to establish the status.
+      "/api/revocations": {
+        v: 1,
+        revocations: [],
+        signature: signBytes(master, new TextEncoder().encode("vega-revocations:v1:[]")),
+      },
     };
     state.leaves.forEach((data, i) => (map[`/log/entry/${i}`] = { index: i, data }));
     const v = map[path];

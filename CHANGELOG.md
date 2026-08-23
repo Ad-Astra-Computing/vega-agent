@@ -6,6 +6,20 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+### Fixed
+
+- `vega verify` checks whether Vega has withdrawn a binding. It verified the
+  signature, the signed tree head and log inclusion, and never asked, so a path
+  whose shared signature had been revoked still reported a clean pass, which is
+  the one answer a verifier must not give. The revocation list is fetched from
+  the cache origin (it is global, not per-tenant) and authenticated with the
+  user's pinned shared key, never one the same cache served. A revoked binding
+  now fails by every route, including the tenant and signature-only ones, since
+  "Vega withdrew this" is a different answer rather than weaker evidence. A
+  status that cannot be established is reported as unknown and is not treated as
+  clean, so a cache that withholds the list is distinguishable from one with
+  nothing to hide.
+
 ## [0.18.1] - 2026-08-23
 
 ### Added

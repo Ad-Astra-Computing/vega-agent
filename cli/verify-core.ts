@@ -176,6 +176,19 @@ export interface VerifyResult {
   storePath: string;
   narHash: string;
   signature: { ok: boolean; keyName: string; scope: "shared" | "scoped" | "upstream" };
+  /**
+   * Whether Vega has withdrawn this binding.
+   *
+   * A signature and a log proof say the binding was made and recorded. Neither
+   * says it still stands. Without this, `verify` reported a clean pass on a path
+   * Vega had revoked, which is the one answer a verifier must never give.
+   *
+   * `revoked: null` means the status could not be established (the list was
+   * unreachable, unsigned, or its signature did not verify). That is reported,
+   * never treated as "not revoked": a cache that withholds the list would
+   * otherwise be indistinguishable from one with nothing to hide.
+   */
+  revocation: { revoked: boolean | null; reason?: string; at?: number; note?: string };
   transparency: {
     found: boolean;
     index: number | null;
@@ -190,6 +203,24 @@ export interface VerifyResult {
 
 export interface VerifyOptions {
   fetcher: Fetcher;
+  /**
+   * A fetcher rooted at the cache ORIGIN, for endpoints that are global rather
+   * than per-scope. The revocation list is one: verifying a tenant path points
+   * `fetcher` at /tenant/<owner>/<repo>, where /api/revocations does not exist,
+   * so asking through it reports every tenant build's status as unknown.
+   * Defaults to `fetcher`, which is correct when already at the root.
+   */
+  rootFetcher?: Fetcher;
+  /**
+   * The user's PINNED shared key, used to authenticate the revocation list.
+   *
+   * The list is signed with the global cache key whatever tier the path sits in,
+   * so verifying a tenant build cannot authenticate it with the tenant key. And
+   * it must be a key the user already trusts: a list authenticated by a key the
+   * same cache served would let that cache decide what counts as revoked.
+   * Absent, the status is reported unknown rather than guessed.
+   */
+  sharedPublicKey?: NixPublicKey;
   /** The single, already-fetched narinfo snapshot to verify (used for the
    * signature, the log binding, and by the caller for the NAR bytes too, so
    * every check is against the same document). */
@@ -213,6 +244,57 @@ async function getJson(fetcher: Fetcher, path: string): Promise<unknown> {
  * (nothing to verify); every other failure is reported as a false flag in the
  * result so the caller can render a complete verdict.
  */
+
+/** A revocation as the control plane publishes it. */
+interface RevocationEntry {
+  hash: string;
+  storePath: string;
+  fingerprint?: string;
+  reason: string;
+  at: number;
+}
+
+/**
+ * Ask whether this binding has been withdrawn.
+ *
+ * The list is signed over a domain-separated payload with the same key that
+ * signs the tree head, so a cache cannot invent a revocation OR quietly drop
+ * one: dropping changes the signed bytes. What it CAN do is refuse to answer,
+ * which is why an unreachable or unverified list returns null rather than false.
+ *
+ * Not fatal to call on a scoped or upstream path. The list covers shared
+ * bindings, so those simply are not in it, and asking costs one request.
+ */
+async function checkRevoked(
+  fetcher: Fetcher,
+  publicKey: NixPublicKey,
+  storePath: string,
+): Promise<VerifyResult["revocation"]> {
+  let body: { revocations?: unknown; signature?: unknown };
+  try {
+    body = (await getJson(fetcher, "/api/revocations")) as typeof body;
+  } catch {
+    return { revoked: null, note: "revocation list unreachable" };
+  }
+  const list = body.revocations;
+  if (!Array.isArray(list)) return { revoked: null, note: "revocation list malformed" };
+  if (typeof body.signature !== "string" || body.signature === "") {
+    return { revoked: null, note: "revocation list is unsigned" };
+  }
+  // Re-serialize exactly what the control plane signed. JSON.parse preserves key
+  // order and JSON.stringify re-emits it, so a list that round-trips unchanged
+  // reproduces the signed bytes.
+  const msg = new TextEncoder().encode(`vega-revocations:v1:${JSON.stringify(list)}`);
+  if (!verifyBytes(publicKey, msg, body.signature)) {
+    return { revoked: null, note: "revocation list signature did not verify" };
+  }
+  const hit = (list as RevocationEntry[]).find(
+    (e) => e && typeof e === "object" && e.storePath === storePath,
+  );
+  if (hit === undefined) return { revoked: false };
+  return { revoked: true, ...(hit.reason ? { reason: hit.reason } : {}), ...(hit.at ? { at: hit.at } : {}) };
+}
+
 export async function verifyBuild(opts: VerifyOptions): Promise<VerifyResult> {
   const { fetcher, info, publicKey, sharedKeyName } = opts;
 
@@ -237,7 +319,19 @@ export async function verifyBuild(opts: VerifyOptions): Promise<VerifyResult> {
       bindingOk: false,
       scanned: 0,
     },
+    revocation: { revoked: null },
   };
+
+  // Before anything about the log. A withdrawn binding is withdrawn whatever
+  // tier it sits in, and the scoped/upstream return below would otherwise skip
+  // the question entirely.
+  // Explicit shared key, else the verifying key when it IS the shared key.
+  const revKey =
+    opts.sharedPublicKey ?? (publicKey.name === sharedKeyName ? publicKey : undefined);
+  result.revocation =
+    revKey === undefined
+      ? { revoked: null, note: "no pinned shared key to authenticate the revocation list" }
+      : await checkRevoked(opts.rootFetcher ?? fetcher, revKey, info.storePath);
 
   // Only the shared tier is promoted into the global transparency log; scoped
   // Vega bindings and upstream mirrors are signature-only by design.
@@ -300,6 +394,10 @@ export function fullyVerified(r: VerifyResult): boolean {
   return (
     r.signature.ok &&
     r.signature.scope === "shared" &&
+    // Strictly false, never merely "not true": a binding whose revocation
+    // status could not be established has not been fully verified, and saying
+    // otherwise is how a cache that withholds the list gets treated as clean.
+    r.revocation.revoked === false &&
     r.transparency.found &&
     r.transparency.sthVerified &&
     r.transparency.leafHashOk &&

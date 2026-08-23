@@ -23,7 +23,9 @@ function hex(b: Uint8Array): string {
 // A fake build: a signed narinfo, a transparency log containing its promotion
 // leaf among decoys, a signed tree head, and an inclusion proof. Everything is
 // produced with the real primitives so the test exercises the genuine crypto.
-function scenario(opts: { keyName?: string; tamper?: (f: Fixture) => void } = {}) {
+function scenario(
+  opts: { keyName?: string; tamper?: (f: Fixture) => void; revocations?: (f: Fixture) => unknown[] } = {},
+) {
   const master = generateKeyPair(opts.keyName ?? "vega-cache-1").secret;
   const pub = derivePublicKey(master);
 
@@ -78,10 +80,21 @@ function scenario(opts: { keyName?: string; tamper?: (f: Fixture) => void } = {}
 
   const narinfoText = formatNarInfo(f.info);
   const fetcher: Fetcher = async (path) => {
+    // A healthy cache answers the revocation list, signed the way the control
+    // plane signs it. `revocations` lets a case publish a real revocation.
+    const revList = opts.revocations ? opts.revocations(f) : [];
     const map: Record<string, unknown> = {
       [`/${f.hashId}.narinfo`]: narinfoText,
       "/log/sth": f.sth,
       [`/log/proof/inclusion/${f.proof.index}`]: f.proof,
+      "/api/revocations": {
+        v: 1,
+        revocations: revList,
+        signature: signBytes(
+          master,
+          new TextEncoder().encode(`vega-revocations:v1:${JSON.stringify(revList)}`),
+        ),
+      },
     };
     f.leavesData.forEach((data, i) => {
       map[`/log/entry/${i}`] = { index: i, data };
@@ -122,6 +135,51 @@ describe("verifyBuild", () => {
     expect(r.transparency.inclusionOk).toBe(true);
     expect(r.transparency.bindingOk).toBe(true);
     expect(fullyVerified(r)).toBe(true);
+  });
+
+  it("will not fully verify a binding Vega has revoked", async () => {
+    // Signature and log proof both still hold: they say the binding was made and
+    // recorded, not that it still stands. Reporting a clean pass here is the one
+    // answer a verifier must never give.
+    const { fetcher, pub, info } = scenario({
+      revocations: (f) => [
+        { hash: f.hashId, storePath: f.info.storePath, reason: "source withdrawn", at: 1_700_000_000_000 },
+      ],
+    });
+    const r = await verifyBuild({ fetcher, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
+    expect(r.signature.ok).toBe(true);
+    expect(r.transparency.found).toBe(true); // everything else is still good
+    expect(r.revocation.revoked).toBe(true);
+    expect(r.revocation.reason).toBe("source withdrawn");
+    expect(fullyVerified(r)).toBe(false);
+  });
+
+  it("reports unknown, not clean, when the revocation list cannot be trusted", async () => {
+    // A cache that withholds or forges the list must not be indistinguishable
+    // from one with nothing to hide.
+    const { fetcher, pub, info } = scenario();
+    const noList: Fetcher = async (path) =>
+      path === "/api/revocations"
+        ? { ok: false, status: 503, text: async () => "", json: async () => ({}) }
+        : fetcher(path);
+    const r = await verifyBuild({ fetcher: noList, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
+    expect(r.revocation.revoked).toBeNull();
+    expect(fullyVerified(r)).toBe(false);
+
+    // A list whose signature does not verify is equally unusable.
+    const forged: Fetcher = async (path) =>
+      path === "/api/revocations"
+        ? {
+            ok: true,
+            status: 200,
+            text: async () => "",
+            json: async () => ({ v: 1, revocations: [], signature: "vega-cache-1:AAAA" }),
+          }
+        : fetcher(path);
+    const r2 = await verifyBuild({ fetcher: forged, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
+    expect(r2.revocation.revoked).toBeNull();
+    expect(r2.revocation.note).toMatch(/signature/);
+    expect(fullyVerified(r2)).toBe(false);
   });
 
   it("rejects when verified against the wrong trusted key", async () => {

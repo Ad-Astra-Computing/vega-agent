@@ -195,8 +195,20 @@ export function registerVerify(program: Command): void {
         // single failed request mid-log-scan (up to thousands of entries) does not
         // abort verify.
         const fetcher: Fetcher = withRetry(boundedFetcher(cacheUrl, 4 * 1024 * 1024));
+        // The revocation list is global, not per-tenant: asking for it through a
+        // /tenant/<owner>/<repo> base 404s and reports every tenant build as
+        // unknown. Ask the origin.
+        const rootFetcher: Fetcher = withRetry(
+          boundedFetcher(new URL(cacheUrl).origin, 4 * 1024 * 1024),
+        );
+        // The revocation list is signed by the shared key regardless of tier, and
+        // must be checked against one the user already trusts, so resolve it from
+        // their trusted keys rather than from the narinfo's signers.
+        const sharedPublicKey = pickTrustedKey(await trustedKeys(), [SHARED_KEY_NAME]);
         const result: VerifyResult = await verifyBuild({
           fetcher,
+          rootFetcher,
+          ...(sharedPublicKey ? { sharedPublicKey } : {}),
           info: narInfo,
           publicKey,
           sharedKeyName: SHARED_KEY_NAME,
@@ -223,7 +235,14 @@ export function registerVerify(program: Command): void {
         // explicitly allowed, so a default CI `vega verify && ...` cannot be
         // satisfied by a signature-only build.
         const signatureOnlyOk = sig.ok && narOk && sig.scope !== "shared" && !t.found;
-        const exitOk = verified || tenantOk || (Boolean(opts.allowSignatureOnly) && signatureOnlyOk);
+        // An explicit revocation overrides every route to success. tenantOk and
+        // signatureOnlyOk deliberately accept weaker evidence than full
+        // verification, but "Vega withdrew this" is not weaker evidence, it is a
+        // different answer, and it applies to a tenant binding as much as a
+        // shared one.
+        const revoked = result.revocation.revoked === true;
+        const exitOk =
+          !revoked && (verified || tenantOk || (Boolean(opts.allowSignatureOnly) && signatureOnlyOk));
 
         if (opts.json) {
           jsonEvent({ hash, ...result, nar: nar ?? undefined, verified, exitOk });
@@ -234,6 +253,16 @@ export function registerVerify(program: Command): void {
         const rows: [string, string][] = [
           [`Signature (${sig.keyName})`, `${tick(sig.ok)}  ${sig.scope}`],
         ];
+        // Always shown. A reader who does not see the row cannot tell a binding
+        // that stands from one nobody asked about.
+        rows.push([
+          "Revocation",
+          result.revocation.revoked === true
+            ? `${tick(false)}  REVOKED${result.revocation.reason ? `: ${result.revocation.reason}` : ""}`
+            : result.revocation.revoked === false
+              ? `${tick(true)}  not revoked`
+              : `${tick(false)}  unknown (${result.revocation.note ?? "not checked"})`,
+        ]);
         if (sig.scope === "shared") {
           rows.push(["Signed tree head", tick(t.sthVerified)]);
           rows.push([
