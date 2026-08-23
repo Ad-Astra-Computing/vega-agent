@@ -9,6 +9,12 @@ const ctx: ToolContext = {
   cacheUrl: "https://vega-cache.dev",
   sharedKeyName: "vega-cache-1",
   resolveKey: async () => null,
+  // Required, so a context can never quietly skip the question. This one never
+  // verifies a build, so it says "cannot ask" explicitly.
+  revocationAuthority: async () => ({
+    fetcher: async () => ({ ok: false, status: 404, text: async () => "", json: async () => ({}) }),
+    sharedKey: null,
+  }),
   verifyNar: async () => ({ ok: false, detail: "not fetched" }),
 };
 

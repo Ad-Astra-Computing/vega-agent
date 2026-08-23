@@ -81,9 +81,9 @@ function ctxFor(opts: { keyName?: string; narOk?: boolean; narChecked?: boolean;
     cacheUrl: "https://vega-cache.dev",
     sharedKeyName: "vega-cache-1",
     resolveKey: async (sigNames) => (sigNames.includes(pub.name) ? pub : null),
-    // The user's pinned shared key, which is what authenticates the global list
-    // whatever key signed the build.
-    resolveSharedKey: async () => derivePublicKey(sharedMaster),
+    // The pinned shared key authenticates the global list whatever key signed
+    // the build; the fixture serves the list on its own fetcher.
+    revocationAuthority: async () => ({ fetcher, sharedKey: derivePublicKey(sharedMaster) }),
     verifyNar: async () => ({ ok: opts.narOk ?? true, checked: opts.narChecked ?? true, detail: "test" }),
   };
   return { ctx, pub };
@@ -182,12 +182,14 @@ describe("riskTool verdicts", () => {
     // the caller gets to know. Allowing on that would make the freshness bound
     // pointless at the gate an agent acts on.
     const { ctx } = ctxFor();
+    // Break the AUTHORITY's fetcher specifically. The build still fetches fine
+    // through ctx.fetcher, so only the withdrawal question goes unanswered.
     const noList: ToolContext = {
       ...ctx,
-      fetcher: async (path) =>
-        path === "/api/revocations"
-          ? { ok: false, status: 503, text: async () => "", json: async () => ({}) }
-          : ctx.fetcher(path),
+      revocationAuthority: async () => ({
+        fetcher: async () => ({ ok: false, status: 503, text: async () => "", json: async () => ({}) }),
+        sharedKey: (await ctx.revocationAuthority()).sharedKey,
+      }),
     };
     const r = await riskTool(noList, { target: HASH });
     expect(isError(r)).toBe(false);
@@ -300,6 +302,12 @@ describe("vega_reproduce", () => {
     cacheUrl: "https://vega-cache.dev",
     sharedKeyName: "vega-cache-1",
     resolveKey: async () => null,
+    // Required, so a context can never quietly skip the question. This one never
+      // verifies a build, so it says "cannot ask" explicitly.
+      revocationAuthority: async () => ({
+      fetcher: async () => ({ ok: false, status: 404, text: async () => "", json: async () => ({}) }),
+      sharedKey: null,
+    }),
     verifyNar: async () => ({ ok: true, detail: "" }),
   });
 

@@ -80,6 +80,9 @@ function ctxFor(opts: { keyName?: string; tamper?: boolean; narChecked?: boolean
     cacheUrl: "https://vega-cache.dev",
     sharedKeyName: "vega-cache-1",
     resolveKey: async (sigNames) => (sigNames.includes(pub.name) ? pub : null),
+    // Required, so this fixture can no longer quietly depend on the verifying
+    // key happening to be the shared one.
+    revocationAuthority: async () => ({ fetcher, sharedKey: derivePublicKey(master) }),
     verifyNar: async () => ({ ok: opts.narChecked === false ? false : true, checked: opts.narChecked ?? true, detail: "test" }),
   };
 }

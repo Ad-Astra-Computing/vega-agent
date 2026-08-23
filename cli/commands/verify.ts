@@ -8,7 +8,7 @@ import { checkNarHash } from "../nar-check.js";
 import type { NixPublicKey } from "../../src/nix/types.js";
 import { trustedKeys, pickTrustedKey } from "../keys.js";
 import { verifyBuild, fullyVerified, withRetry, type Fetcher, type VerifyResult } from "../verify-core.js";
-import { boundedFetcher } from "../mcp/runtime.js";
+import { boundedFetcher, revocationAuthority } from "../mcp/runtime.js";
 
 const SHARED_KEY_NAME = "vega-cache-1";
 
@@ -238,20 +238,12 @@ export function registerVerify(program: Command): void {
         // single failed request mid-log-scan (up to thousands of entries) does not
         // abort verify.
         const fetcher: Fetcher = withRetry(boundedFetcher(cacheUrl, 4 * 1024 * 1024));
-        // The revocation list is global, not per-tenant: asking for it through a
-        // /tenant/<owner>/<repo> base 404s and reports every tenant build as
-        // unknown. Ask the origin.
-        const rootFetcher: Fetcher = withRetry(
-          boundedFetcher(new URL(cacheUrl).origin, 4 * 1024 * 1024),
-        );
-        // The revocation list is signed by the shared key regardless of tier, and
-        // must be checked against one the user already trusts, so resolve it from
-        // their trusted keys rather than from the narinfo's signers.
-        const sharedPublicKey = pickTrustedKey(await trustedKeys(), [SHARED_KEY_NAME]);
+        // Signed by the shared key regardless of tier, and checked against one
+        // the user already trusts, so it comes from their trusted keys rather
+        // than the narinfo's signers. The constructor derives the origin.
         const result: VerifyResult = await verifyBuild({
           fetcher,
-          rootFetcher,
-          ...(sharedPublicKey ? { sharedPublicKey } : {}),
+          revocation: revocationAuthority(cacheUrl, pickTrustedKey(await trustedKeys(), [SHARED_KEY_NAME])),
           info: narInfo,
           publicKey,
           sharedKeyName: SHARED_KEY_NAME,

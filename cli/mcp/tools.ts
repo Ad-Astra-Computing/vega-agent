@@ -21,6 +21,7 @@ import {
   parseStorePathHash,
   type Fetcher,
   type VerifyResult,
+  type RevocationAuthority,
 } from "../verify-core.js";
 import { parseNarInfo } from "../../src/nix/narinfo.js";
 import type { NarInfo, NixPublicKey } from "../../src/nix/types.js";
@@ -41,14 +42,14 @@ export interface ToolContext {
    * revoked path signed by a tenant or upstream key reads as status-unknown and
    * the risk gate answers about it as though nothing were withdrawn.
    */
-  rootFetcher?: Fetcher | undefined;
   /**
-   * The user's PINNED shared key, for the revocation list only. Deliberately
-   * separate from {@link resolveKey}: that one honours an explicit --public-key,
-   * which names the key a BUILD is expected to be signed by, and using it here
-   * would let a tenant key be presented as the authority on a global list.
+   * Where to ask about revocation and whose word to take. REQUIRED, not
+   * optional: an optional one is how three consumers shipped silently reporting
+   * revoked builds as status-unknown. Deliberately separate from
+   * {@link resolveKey}, which honours an explicit --public-key naming the key a
+   * BUILD should carry; that key must not become the authority on a global list.
    */
-  resolveSharedKey?: (() => Promise<NixPublicKey | null>) | undefined;
+  revocationAuthority(): Promise<RevocationAuthority>;
   /** Resolve a trusted public key for the narinfo's signature key names, from
    * the user's nix.conf / an explicit key. Returns null if none is trusted. */
   resolveKey(sigNames: string[]): Promise<NixPublicKey | null>;
@@ -119,11 +120,9 @@ export async function runVerify(
     };
   }
 
-  const sharedPublicKey = ctx.resolveSharedKey ? await ctx.resolveSharedKey() : null;
   const result = await verifyBuild({
     fetcher: ctx.fetcher,
-    ...(ctx.rootFetcher !== undefined ? { rootFetcher: ctx.rootFetcher } : {}),
-    ...(sharedPublicKey !== null ? { sharedPublicKey } : {}),
+    revocation: await ctx.revocationAuthority(),
     info,
     publicKey,
     sharedKeyName: ctx.sharedKeyName,

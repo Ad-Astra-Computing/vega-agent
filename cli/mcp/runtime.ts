@@ -7,7 +7,7 @@
 
 import { parsePublicKey } from "../../src/nix/signing.js";
 import { trustedKeys, pickTrustedKey } from "../keys.js";
-import { withRetry, type Fetcher } from "../verify-core.js";
+import { withRetry, type Fetcher, type RevocationAuthority } from "../verify-core.js";
 import { checkNarHash } from "../nar-check.js";
 import type { ToolContext } from "./tools.js";
 import type { NixPublicKey } from "../../src/nix/types.js";
@@ -20,6 +20,22 @@ const NAR_TIMEOUT_MS = 120_000; // NARs can be large but must still terminate
 /** A fetcher that aborts any response exceeding `maxBytes`, so a hostile cache
  * cannot exhaust memory by returning a giant narinfo/proof/entry body, and times
  * out a stalled response so a single call cannot hang. */
+/**
+ * The revocation authority for a cache URL: a fetcher rooted at its ORIGIN, and
+ * the user's pinned shared key.
+ *
+ * The origin is derived here rather than by callers, because the list is global
+ * and a caller holding a tenant- or view-scoped URL would otherwise ask the
+ * wrong place and get "unknown" for every build. Every consumer goes through
+ * this, so there is one definition of where to ask and who to believe.
+ */
+export function revocationAuthority(cacheUrl: string, sharedKey: NixPublicKey | null): RevocationAuthority {
+  return {
+    fetcher: withRetry(boundedFetcher(new URL(cacheUrl).origin, MAX_RESPONSE_BYTES)),
+    sharedKey,
+  };
+}
+
 export function boundedFetcher(base: string, maxBytes: number): Fetcher {
   return async (path) => {
     const res = await fetch(`${base}${path}`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
@@ -61,16 +77,14 @@ export function buildToolContext(
   const flagKey = opts.flagKey ?? null;
   return {
     fetcher: withRetry(boundedFetcher(cacheUrl, MAX_RESPONSE_BYTES)),
-    // The revocation list is global, so it is asked of the ORIGIN: a tenant or
-    // view scope in `cacheUrl` would 404 it and every answer would be unknown.
-    rootFetcher: withRetry(boundedFetcher(new URL(cacheUrl).origin, MAX_RESPONSE_BYTES)),
     cacheUrl,
     sharedKeyName: SHARED_KEY_NAME,
     ...(opts.maxScan !== undefined ? { maxScan: opts.maxScan } : {}),
     resolveKey: async (sigNames) => flagKey ?? pickTrustedKey(await trustedKeys(), sigNames),
     // From the user's own trusted keys, never the flag and never the narinfo's
     // signers, so the global list is authenticated whatever key signed the build.
-    resolveSharedKey: async () => pickTrustedKey(await trustedKeys(), [SHARED_KEY_NAME]),
+    revocationAuthority: async () =>
+      revocationAuthority(cacheUrl, pickTrustedKey(await trustedKeys(), [SHARED_KEY_NAME])),
     // Streaming NAR fetch (decompress + hash), bounded by a timeout rather than a
     // byte cap since a legitimate NAR can be large. A caller may pass a smaller
     // per-call timeout (the change gate does, to keep one in-flight NAR within

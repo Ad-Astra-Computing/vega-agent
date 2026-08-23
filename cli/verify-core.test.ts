@@ -115,7 +115,7 @@ function scenario(
       json: async () => v,
     };
   };
-  return { fetcher, pub, master, info: f, narinfoText };
+  return { fetcher, pub, master, sharedPub: pub, info: f, narinfoText };
 }
 
 interface Fixture {
@@ -131,8 +131,8 @@ interface Fixture {
 
 describe("verifyBuild", () => {
   it("fully verifies a genuine shared build (signature + STH + inclusion + binding)", async () => {
-    const { fetcher, pub, info } = scenario();
-    const r = await verifyBuild({ fetcher, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
+    const { fetcher, pub, sharedPub, info } = scenario();
+    const r = await verifyBuild({ fetcher, revocation: { fetcher, sharedKey: sharedPub }, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
     expect(r.signature.ok).toBe(true);
     expect(r.signature.scope).toBe("shared");
     expect(r.transparency.sthVerified).toBe(true);
@@ -148,12 +148,12 @@ describe("verifyBuild", () => {
     // Signature and log proof both still hold: they say the binding was made and
     // recorded, not that it still stands. Reporting a clean pass here is the one
     // answer a verifier must never give.
-    const { fetcher, pub, info } = scenario({
+    const { fetcher, pub, sharedPub, info } = scenario({
       revocations: (f) => [
         { hash: f.hashId, storePath: f.info.storePath, reason: "source withdrawn", at: 1_700_000_000_000 },
       ],
     });
-    const r = await verifyBuild({ fetcher, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
+    const r = await verifyBuild({ fetcher, revocation: { fetcher, sharedKey: sharedPub }, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
     expect(r.signature.ok).toBe(true);
     expect(r.transparency.found).toBe(true); // everything else is still good
     expect(r.revocation.revoked).toBe(true);
@@ -164,12 +164,12 @@ describe("verifyBuild", () => {
   it("reports unknown, not clean, when the revocation list cannot be trusted", async () => {
     // A cache that withholds or forges the list must not be indistinguishable
     // from one with nothing to hide.
-    const { fetcher, pub, info } = scenario();
+    const { fetcher, pub, sharedPub, info } = scenario();
     const noList: Fetcher = async (path) =>
       path === "/api/revocations"
         ? { ok: false, status: 503, text: async () => "", json: async () => ({}) }
         : fetcher(path);
-    const r = await verifyBuild({ fetcher: noList, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
+    const r = await verifyBuild({ fetcher: noList, revocation: { fetcher: noList, sharedKey: sharedPub }, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
     expect(r.revocation.revoked).toBeNull();
     expect(fullyVerified(r)).toBe(false);
 
@@ -189,7 +189,7 @@ describe("verifyBuild", () => {
             }),
           }
         : fetcher(path);
-    const r2 = await verifyBuild({ fetcher: forged, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
+    const r2 = await verifyBuild({ fetcher: forged, revocation: { fetcher: forged, sharedKey: sharedPub }, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
     expect(r2.revocation.revoked).toBeNull();
     expect(r2.revocation.note).toMatch(/signature/);
     expect(fullyVerified(r2)).toBe(false);
@@ -200,7 +200,7 @@ describe("verifyBuild", () => {
     // taken before a revocation still verifies for ever, and a list the server
     // capped still verifies while missing the entries that fell off. Either can
     // be the wrong answer, which is worse than no answer.
-    const { fetcher, pub, master, info } = scenario();
+    const { fetcher, pub, sharedPub, master, info } = scenario();
     const stale: Fetcher = async (path) =>
       path === "/api/revocations"
         ? {
@@ -222,7 +222,7 @@ describe("verifyBuild", () => {
             },
           }
         : fetcher(path);
-    const r = await verifyBuild({ fetcher: stale, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
+    const r = await verifyBuild({ fetcher: stale, revocation: { fetcher: stale, sharedKey: sharedPub }, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
     expect(r.revocation.revoked).toBeNull();
     expect(r.revocation.note).toMatch(/stale/);
 
@@ -247,34 +247,65 @@ describe("verifyBuild", () => {
             },
           }
         : fetcher(path);
-    const r2 = await verifyBuild({ fetcher: truncated, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
+    const r2 = await verifyBuild({ fetcher: truncated, revocation: { fetcher: truncated, sharedKey: sharedPub }, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
     expect(r2.revocation.revoked).toBeNull();
     expect(r2.revocation.note).toMatch(/truncated/);
   });
 
+  it("asks the ORIGIN for the list, not the scope being verified", async () => {
+    // The production motivation for a separate authority fetcher: verifying a
+    // tenant path roots the main fetcher at /tenant/<owner>/<repo>, where the
+    // global list does not exist. Every earlier fixture served the list on the
+    // main fetcher, so this could regress and the whole suite would pass.
+    const { fetcher, pub, sharedPub, info } = scenario();
+    const scoped: Fetcher = async (path) =>
+      path === "/api/revocations"
+        ? { ok: false, status: 404, text: async () => "", json: async () => ({}) }
+        : fetcher(path);
+    // Asking through the scope: the list 404s and the status is unknown.
+    const bad = await verifyBuild({
+      fetcher: scoped,
+      revocation: { fetcher: scoped, sharedKey: sharedPub },
+      info: info.info,
+      publicKey: pub,
+      sharedKeyName: "vega-cache-1",
+    });
+    expect(bad.revocation.revoked).toBeNull();
+    // Asking the origin, while the build itself is still fetched through the
+    // scope: answered.
+    const good = await verifyBuild({
+      fetcher: scoped,
+      revocation: { fetcher, sharedKey: sharedPub },
+      info: info.info,
+      publicKey: pub,
+      sharedKeyName: "vega-cache-1",
+    });
+    expect(good.revocation.revoked).toBe(false);
+  });
+
   it("rejects when verified against the wrong trusted key", async () => {
-    const { fetcher, info } = scenario();
+    const { fetcher, sharedPub, info } = scenario();
     const wrong = generateKeyPair("vega-cache-1").public; // same name, different key
-    const r = await verifyBuild({ fetcher, info: info.info, publicKey: wrong, sharedKeyName: "vega-cache-1" });
+    const r = await verifyBuild({ fetcher, revocation: { fetcher, sharedKey: sharedPub }, info: info.info, publicKey: wrong, sharedKeyName: "vega-cache-1" });
     expect(r.signature.ok).toBe(false);
     expect(r.transparency.sthVerified).toBe(false);
     expect(fullyVerified(r)).toBe(false);
   });
 
   it("flags a tampered STH signature", async () => {
-    const { fetcher, pub, info } = scenario({
+    const { fetcher, pub, sharedPub, info } = scenario({
       tamper: (f) => {
         f.sth.timestamp = 9999; // signature no longer matches the message
       },
     });
-    const r = await verifyBuild({ fetcher, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
+    const r = await verifyBuild({ fetcher, revocation: { fetcher, sharedKey: sharedPub }, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
     expect(r.signature.ok).toBe(true);
     expect(r.transparency.sthVerified).toBe(false);
     expect(fullyVerified(r)).toBe(false);
   });
 
   it("does not find a leaf whose bound narHash differs from the narinfo", async () => {
-    const { fetcher, pub, info } = scenario({
+    const { fetcher, pub, sharedPub, info } = scenario({
       tamper: (f) => {
         // Repoint the promotion leaf at a different narHash; binding must fail.
         const leaf = JSON.parse(f.leavesData[f.promotionIndex]!);
@@ -282,7 +313,7 @@ describe("verifyBuild", () => {
         f.leavesData[f.promotionIndex] = JSON.stringify(leaf);
       },
     });
-    const r = await verifyBuild({ fetcher, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
+    const r = await verifyBuild({ fetcher, revocation: { fetcher, sharedKey: sharedPub }, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
     // The leaf no longer binds, so it is not accepted and inclusion is not claimed.
     expect(r.transparency.found).toBe(false);
     expect(r.transparency.inclusionOk).toBe(false);
@@ -290,20 +321,20 @@ describe("verifyBuild", () => {
   });
 
   it("rejects a forged inclusion proof against the signed root", async () => {
-    const { fetcher, pub, info } = scenario({
+    const { fetcher, pub, sharedPub, info } = scenario({
       tamper: (f) => {
         f.proof.proofHex = f.proof.proofHex.map((h) => h.replace(/./, (c) => (c === "0" ? "1" : "0")));
       },
     });
-    const r = await verifyBuild({ fetcher, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
+    const r = await verifyBuild({ fetcher, revocation: { fetcher, sharedKey: sharedPub }, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
     expect(r.transparency.found).toBe(true);
     expect(r.transparency.inclusionOk).toBe(false);
     expect(fullyVerified(r)).toBe(false);
   });
 
   it("treats a scoped (non-shared) binding as signature-only", async () => {
-    const { fetcher, pub, info } = scenario({ keyName: "vega-owner-42-1" });
-    const r = await verifyBuild({ fetcher, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
+    const { fetcher, pub, sharedPub, info } = scenario({ keyName: "vega-owner-42-1" });
+    const r = await verifyBuild({ fetcher, revocation: { fetcher, sharedKey: sharedPub }, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
     expect(r.signature.ok).toBe(true);
     expect(r.signature.scope).toBe("scoped");
     expect(r.transparency.found).toBe(false);
@@ -312,8 +343,8 @@ describe("verifyBuild", () => {
   });
 
   it("classifies a non-Vega key as an upstream mirror, not a Vega binding", async () => {
-    const { fetcher, pub, info } = scenario({ keyName: "cache.nixos.org-1" });
-    const r = await verifyBuild({ fetcher, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
+    const { fetcher, pub, sharedPub, info } = scenario({ keyName: "cache.nixos.org-1" });
+    const r = await verifyBuild({ fetcher, revocation: { fetcher, sharedKey: sharedPub }, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1" });
     expect(r.signature.ok).toBe(true);
     expect(r.signature.scope).toBe("upstream");
     expect(r.transparency.note).toMatch(/mirrored upstream/);
@@ -321,8 +352,8 @@ describe("verifyBuild", () => {
   });
 
   it("bounds the scan and reports when the leaf is beyond maxScan", async () => {
-    const { fetcher, pub, info } = scenario();
-    const r = await verifyBuild({ fetcher, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1", maxScan: 1 });
+    const { fetcher, pub, sharedPub, info } = scenario();
+    const r = await verifyBuild({ fetcher, revocation: { fetcher, sharedKey: sharedPub }, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1", maxScan: 1 });
     expect(r.transparency.found).toBe(false);
     expect(r.transparency.scanned).toBe(1);
     expect(r.transparency.note).toMatch(/most recent 1 of/);
@@ -332,8 +363,8 @@ describe("verifyBuild", () => {
     // The promotion leaf is at index 2 of 4; scanning newest-first with a cap of
     // 2 reaches indexes 3 then 2, so it is found. An oldest-first scan with the
     // same cap would stop at indexes 0,1 and wrongly report the build absent.
-    const { fetcher, pub, info } = scenario();
-    const r = await verifyBuild({ fetcher, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1", maxScan: 2 });
+    const { fetcher, pub, sharedPub, info } = scenario();
+    const r = await verifyBuild({ fetcher, revocation: { fetcher, sharedKey: sharedPub }, info: info.info, publicKey: pub, sharedKeyName: "vega-cache-1", maxScan: 2 });
     expect(r.transparency.found).toBe(true);
     expect(r.transparency.index).toBe(2);
     expect(r.transparency.scanned).toBe(2);

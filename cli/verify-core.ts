@@ -203,24 +203,7 @@ export interface VerifyResult {
 
 export interface VerifyOptions {
   fetcher: Fetcher;
-  /**
-   * A fetcher rooted at the cache ORIGIN, for endpoints that are global rather
-   * than per-scope. The revocation list is one: verifying a tenant path points
-   * `fetcher` at /tenant/<owner>/<repo>, where /api/revocations does not exist,
-   * so asking through it reports every tenant build's status as unknown.
-   * Defaults to `fetcher`, which is correct when already at the root.
-   */
-  rootFetcher?: Fetcher;
-  /**
-   * The user's PINNED shared key, used to authenticate the revocation list.
-   *
-   * The list is signed with the global cache key whatever tier the path sits in,
-   * so verifying a tenant build cannot authenticate it with the tenant key. And
-   * it must be a key the user already trusts: a list authenticated by a key the
-   * same cache served would let that cache decide what counts as revoked.
-   * Absent, the status is reported unknown rather than guessed.
-   */
-  sharedPublicKey?: NixPublicKey;
+  revocation: RevocationAuthority;
   /** The single, already-fetched narinfo snapshot to verify (used for the
    * signature, the log binding, and by the caller for the NAR bytes too, so
    * every check is against the same document). */
@@ -255,6 +238,27 @@ async function getJson(fetcher: Fetcher, path: string): Promise<unknown> {
  * keeping one artifact.
  */
 const REVOCATION_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Who to ask about revocation, and with what authority.
+ *
+ * REQUIRED on {@link VerifyOptions}, and that is the whole point. This started
+ * as two optional fields, so a new call site type-checked while silently
+ * degrading to "status unknown", and three separate consumers shipped answering
+ * about revoked builds as though nothing had been withdrawn. A required field
+ * makes a new consumer fail to compile until it decides, and `sharedKey: null`
+ * makes "we cannot ask" an explicit, greppable choice rather than an omission.
+ *
+ * Build it with `revocationAuthority()` rather than by hand: the list is global,
+ * so the fetcher has to be rooted at the cache ORIGIN, and a tenant-scoped base
+ * would 404 it and report every build as unknown.
+ */
+export interface RevocationAuthority {
+  /** Rooted at the cache ORIGIN, never a tenant or view scope. */
+  fetcher: Fetcher;
+  /** The user's pinned shared key, or null when they have pinned none. */
+  sharedKey: NixPublicKey | null;
+}
 
 /** A revocation as the control plane publishes it. */
 interface RevocationEntry {
@@ -362,13 +366,11 @@ export async function verifyBuild(opts: VerifyOptions): Promise<VerifyResult> {
   // Before anything about the log. A withdrawn binding is withdrawn whatever
   // tier it sits in, and the scoped/upstream return below would otherwise skip
   // the question entirely.
-  // Explicit shared key, else the verifying key when it IS the shared key.
-  const revKey =
-    opts.sharedPublicKey ?? (publicKey.name === sharedKeyName ? publicKey : undefined);
+  const revKey = opts.revocation.sharedKey;
   result.revocation =
-    revKey === undefined
+    revKey === null
       ? { revoked: null, note: "no pinned shared key to authenticate the revocation list" }
-      : await checkRevoked(opts.rootFetcher ?? fetcher, revKey, info.storePath);
+      : await checkRevoked(opts.revocation.fetcher, revKey, info.storePath);
 
   // Only the shared tier is promoted into the global transparency log; scoped
   // Vega bindings and upstream mirrors are signature-only by design.
