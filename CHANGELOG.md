@@ -6,6 +6,30 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-08-23
+
+### Added
+
+- The builder gives its store a free-space floor, so a build collects garbage
+  instead of taking the host's disk to zero. The image shipped only a periodic
+  GC, which runs between builds and therefore cannot help when one build cycle
+  produces more garbage than the disk has headroom: on a shared host that ran to
+  0 bytes free twice in a day, against roughly 49 GiB of collectable paths per
+  cycle. Nix's own `min-free`/`max-free` collect during a build, and the
+  entrypoint now writes both into the generated `nix.conf` and prints them at
+  boot.
+- `VEGA_MIN_FREE` and `VEGA_MAX_FREE` tune the floor, accepting a byte count or a
+  binary suffix (`VEGA_MIN_FREE=25G`). `VEGA_MIN_FREE=0` disables it, and the
+  boot line says so rather than leaving the operator to infer it. The defaults
+  are a fraction of the store's filesystem (10% and 25%, floored at 1 GiB, capped
+  at 25 GiB and 60 GiB), because a fixed size is wrong at both ends: 25 GiB on a
+  20 GB runner would collect on every check, and 1 GiB on a large shared host is
+  a rounding error against one build cycle.
+- Booting against a mounted `/etc/nix/nix.conf` that sets no `min-free` warns.
+  That file belongs to the operator and the entrypoint does not edit it, so the
+  floor is theirs to set; the failure mode is a full host rather than a failed
+  build, and it is invisible until it happens.
+
 ## [0.18.0] - 2026-08-17
 
 ### Fixed

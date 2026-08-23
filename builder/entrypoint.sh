@@ -277,6 +277,116 @@ preflight_boot_closure() {
   return 0
 }
 
+# Total bytes of the filesystem holding the store. Split out so the tests can
+# stub it: the number is a property of the host, not of the logic above it.
+#
+# coreutils only. The image ships NO awk (see builder contents in flake.nix), and
+# this runs before the runner starts, so reaching for a tool outside the closure
+# would not degrade, it would abort the boot under `set -e` and leave every
+# container failing to start. `-P` keeps the record on one line so the size is
+# always the second field; a failure yields empty, which the caller treats as
+# "unknown" rather than propagating a non-zero status into an assignment.
+store_fs_bytes() {
+  df -PB1 /nix 2>/dev/null | tail -n1 | tr -s ' ' | cut -d' ' -f2 || true
+}
+
+# A byte count, optionally with a binary suffix (K/M/G/T, `iB` tolerated), so an
+# operator can write 25G instead of counting zeros. Prints bytes, or fails.
+parse_bytes() {
+  local raw="${1:-}" num unit mult
+  num="${raw%%[!0-9]*}"
+  unit="${raw#"$num"}"
+  [ -n "$num" ] || return 1
+  # A value this large is a typo, not a policy. Shell arithmetic is int64 and
+  # wraps silently, and the wrap is worse than the typo: one overflow lands on a
+  # negative max-free that Nix rejects (a confusing refusal to boot), another
+  # lands on 0, which DISABLES the floor this exists to set. Refuse instead.
+  [ "${#num}" -gt 12 ] && return 1
+  case "$unit" in
+    "" | B) mult=1 ;;
+    K | k | KiB | kiB | KB | kB) mult=1024 ;;
+    M | m | MiB | miB | MB | mB) mult=$((1024 * 1024)) ;;
+    G | g | GiB | giB | GB | gB) mult=$((1024 * 1024 * 1024)) ;;
+    T | t | TiB | tiB | TB | tB) mult=$((1024 * 1024 * 1024 * 1024)) ;;
+    *) return 1 ;;
+  esac
+  echo $((num * mult))
+}
+
+# The free-space thresholds for Nix's own collector, printed as "<min> <max>".
+#
+# This is the only mechanism that collects DURING a build. A periodic GC, however
+# frequent, runs between builds, so it cannot help when one build cycle produces
+# more garbage than the disk has headroom: the build fills the disk and the host
+# hits zero before the timer ever fires. Below `min-free` Nix collects until
+# `max-free` is free, so the disk cannot run out while a build is running.
+#
+# Defaulted as a fraction of the store's filesystem rather than a fixed size,
+# because a fixed one is wrong at both ends: 25 GiB on a 20 GB runner would sit
+# permanently under the threshold and collect continuously, while 1 GiB on a
+# large shared host is a rounding error against a build cycle. The caps stop the
+# fraction running away on a very large disk.
+MIN_FREE_PCT=10
+MAX_FREE_PCT=25
+MIN_FREE_FLOOR=$((1024 * 1024 * 1024))        # 1 GiB
+MIN_FREE_CAP=$((25 * 1024 * 1024 * 1024))     # 25 GiB
+MAX_FREE_CAP=$((60 * 1024 * 1024 * 1024))     # 60 GiB
+
+resolve_free_space() {
+  local total min max
+  total="$(store_fs_bytes || true)"
+  # Anything non-numeric (an odd df, a busy mount, no df at all) means "unknown",
+  # never an arithmetic error in the boot path.
+  case "${total:-}" in
+    "" | *[!0-9]*) total=0 ;;
+  esac
+
+  if [ -n "${VEGA_MIN_FREE:-}" ]; then
+    min="$(parse_bytes "${VEGA_MIN_FREE}")" || {
+      echo "vega-builder: VEGA_MIN_FREE='${VEGA_MIN_FREE}' is not a byte count (try 25G)" >&2
+      return 1
+    }
+  elif [ "$total" -gt 0 ]; then
+    min=$((total * MIN_FREE_PCT / 100))
+    [ "$min" -lt "$MIN_FREE_FLOOR" ] && min="$MIN_FREE_FLOOR"
+    [ "$min" -gt "$MIN_FREE_CAP" ] && min="$MIN_FREE_CAP"
+  else
+    # df could not read the filesystem; fall back to the floor rather than
+    # leaving the disk unprotected, which is the failure this exists to prevent.
+    min="$MIN_FREE_FLOOR"
+  fi
+
+  # 0 is Nix's own "disabled", so an operator can opt out explicitly.
+  if [ "$min" -le 0 ]; then
+    echo "0 0"
+    return 0
+  fi
+
+  if [ -n "${VEGA_MAX_FREE:-}" ]; then
+    max="$(parse_bytes "${VEGA_MAX_FREE}")" || {
+      echo "vega-builder: VEGA_MAX_FREE='${VEGA_MAX_FREE}' is not a byte count (try 60G)" >&2
+      return 1
+    }
+  elif [ "$total" -gt 0 ]; then
+    max=$((total * MAX_FREE_PCT / 100))
+    [ "$max" -gt "$MAX_FREE_CAP" ] && max="$MAX_FREE_CAP"
+  else
+    max=$((min * 2))
+  fi
+
+  # Collecting has to reach a HIGHER free-space mark than the one that triggered
+  # it, or Nix would collect on every check and never clear the condition.
+  [ "$max" -le "$min" ] && max=$((min * 2))
+  echo "${min} ${max}"
+}
+
+# Bytes as GiB with one decimal, for the boot announcement only. Shell
+# arithmetic rather than awk, which the image does not ship.
+gib() {
+  local b="${1:-0}"
+  printf '%s.%s GiB' "$((b / 1073741824))" "$(((b % 1073741824) * 10 / 1073741824))"
+}
+
 # Emit the generated nix.conf for the given sandbox mode. Split out of
 # setup_nix so the test harness can assert the contents without a container.
 nix_conf_contents() {
@@ -297,6 +407,13 @@ nix_conf_contents() {
   echo "cores = ${VEGA_NIX_CORES:-0}"
   # Single-user nix in the container: no nixbld build users / group.
   echo "build-users-group ="
+  # Keep a build from taking the host's disk to zero: collect mid-build instead.
+  # Single-user Nix means the client enforces these itself, with no daemon to
+  # restart for them to take effect.
+  local free_min free_max
+  read -r free_min free_max <<<"$(resolve_free_space)"
+  echo "min-free = ${free_min}"
+  [ "${free_min}" -gt 0 ] && echo "max-free = ${free_max}"
   echo "substituters = https://cache.nixos.org ${VEGA_CACHE_URL} ${VEGA_EXTRA_SUBSTITUTERS:-}"
   echo "trusted-public-keys = ${NIXOS_CACHE_KEY} ${VEGA_CACHE_PUBKEY} ${VEGA_EXTRA_TRUSTED_PUBLIC_KEYS:-}"
 }
@@ -317,11 +434,29 @@ setup_nix() {
   # because the mounted config disabled it).
   if [ -e /etc/nix/nix.conf ]; then
     enforce_required_sandbox || exit 1
+    # A mounted config is the operator's to own, so we do not inject the
+    # free-space thresholds into it. Say so: the failure mode of not having them
+    # is a full host disk rather than a failed build, and it is invisible until
+    # it happens.
+    local mounted_min
+    mounted_min="$(effective_setting min-free)"
+    if [ -z "${mounted_min}" ] || [ "${mounted_min}" = 0 ]; then
+      echo "vega-builder: WARNING: the mounted /etc/nix/nix.conf sets no min-free, so Nix will not collect during a build and a large build can take this host's disk to zero. Set min-free and max-free there (VEGA_MIN_FREE/VEGA_MAX_FREE only apply to the generated config)." >&2
+    fi
   else
-    local sandbox
+    # Validate the operator's thresholds BEFORE writing the file, so a typo is a
+    # loud refusal rather than a config silently missing its disk guard.
+    local free_min free_max sandbox
+    read -r free_min free_max <<<"$(resolve_free_space)" || exit 1
+    [ -n "${free_min}" ] || exit 1
     sandbox="$(resolve_sandbox)" || exit 1
     nix_conf_contents "${sandbox}" > /etc/nix/nix.conf
     echo "vega-builder: nix sandbox = ${sandbox}" >&2
+    if [ "${free_min}" -gt 0 ]; then
+      echo "vega-builder: store free-space floor: collect below $(gib "${free_min}") until $(gib "${free_max}") free (VEGA_MIN_FREE/VEGA_MAX_FREE)" >&2
+    else
+      echo "vega-builder: store free-space floor DISABLED (VEGA_MIN_FREE=0); a build can fill this disk" >&2
+    fi
   fi
   # Never register a runner whose own runtime cannot execute a job.
   preflight_boot_closure || exit 1
