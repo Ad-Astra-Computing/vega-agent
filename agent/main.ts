@@ -18,7 +18,7 @@ import { fetchActionsOidcToken } from "../src/agent/oidc.js";
 import { OidcTokenProvider } from "../src/agent/token-provider.js";
 import { ControlPlaneClient } from "../src/agent/client.js";
 import { buildAttestBody } from "../src/agent/narinfo.js";
-import { planUploads, parseByteCeiling, globMatches, storePathName } from "../src/agent/upload-plan.js";
+import { planUploads, parseByteCeiling, matchedPatterns, unmatchedPatterns } from "../src/agent/upload-plan.js";
 import { narObjectExists } from "../src/agent/upstream.js";
 import { mapConcurrent } from "../src/agent/concurrency.js";
 import { tenantSubstituter, hostConfigBlock, isNixPublicKey } from "../src/agent/substituter.js";
@@ -92,6 +92,7 @@ async function cacheBuild(
   attr: string,
   dir: string | undefined,
   opts: CacheOpts,
+  matchedExclude: Set<string>,
 ): Promise<{ promoted: number; total: number }> {
   console.log(`Building ${installable} ...`);
   await nixBuild(installable, { substituters: opts.substituters, trustedKeys: opts.trustedKeys });
@@ -127,15 +128,7 @@ async function cacheBuild(
     ...(opts.exclude.length > 0 ? { exclude: opts.exclude } : {}),
     ...(opts.maxNarBytes !== undefined ? { maxNarBytes: opts.maxNarBytes } : {}),
   });
-  for (const p of opts.exclude) {
-    if (!plan.skippedByPolicy.some((e) => e.reason === "excluded" && globMatches(p, storePathName(e.path)))) {
-      ghaWarn(
-        `Exclude pattern ${JSON.stringify(p)} matched no path in this closure. It is matched ` +
-          `against the store path NAME (the part after the hash), so a full /nix/store/... path ` +
-          `never matches. Everything it was meant to skip is being published.`,
-      );
-    }
-  }
+  for (const p of matchedPatterns(opts.exclude, plan)) matchedExclude.add(p);
   const toUpload = new Set(plan.toUpload);
   const paths = closure.filter((p) => toUpload.has(p.path));
   if (opts.skipUpstream) {
@@ -365,16 +358,27 @@ async function main(): Promise<void> {
 
   let promoted = 0;
   let total = 0;
+  // Accumulated across every build: a pattern aimed at one output must not warn
+  // just because another output's closure does not contain it.
+  const matchedExclude = new Set<string>();
   try {
     for (const { b, dir } of targets) {
       // A foreign flake (dir === null) still caches to the tenant tier, just
       // without a reproducible subflake dir.
-      const r = await cacheBuild(client, b.installable, b.attr, dir ?? undefined, opts);
+      const r = await cacheBuild(client, b.installable, b.attr, dir ?? undefined, opts, matchedExclude);
       promoted += r.promoted;
       total += r.total;
     }
   } finally {
     await rm(opts.work, { recursive: true, force: true });
+  }
+
+  for (const p of unmatchedPatterns(opts.exclude, matchedExclude)) {
+    ghaWarn(
+      `Exclude pattern ${JSON.stringify(p)} matched no path in any build this run. It is ` +
+        `matched against the store path NAME (the part after the hash), so a full ` +
+        `/nix/store/... path never matches. Nothing was skipped for it.`,
+    );
   }
 
   console.log(`Done. ${promoted}/${total} published to the shared cache.`);

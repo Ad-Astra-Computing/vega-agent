@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { planUploads, globMatches, storePathName, parseByteCeiling } from "../src/agent/upload-plan.js";
+import { planUploads, globMatches, storePathName, parseByteCeiling, matchedPatterns, unmatchedPatterns } from "../src/agent/upload-plan.js";
 import { narObjectExists } from "../src/agent/upstream.js";
 
 // 32-char store hashes (nixbase32 alphabet) for three paths.
@@ -160,6 +160,13 @@ describe("globMatches", () => {
     expect(ms).toBeLessThan(100);
   });
 
+  it("matches a literal * in the name with a wildcard", () => {
+    // Nix rejects * in a store name, so this is unreachable from a closure, but
+    // the function is exported and the literal branch must not shadow the star.
+    expect(globMatches("*", "*a")).toBe(true);
+    expect(globMatches("*b", "*ab")).toBe(true);
+  });
+
   it("treats ? as exactly one character", () => {
     expect(globMatches("hello-?", "hello-1")).toBe(true);
     expect(globMatches("hello-?", "hello-12")).toBe(false);
@@ -190,6 +197,11 @@ describe("parseByteCeiling", () => {
     expect(parseByteCeiling("  ", "X")).toBeUndefined();
   });
 
+  it("parses a plain byte count", () => {
+    expect(parseByteCeiling("100", "X")).toBe(100);
+    expect(parseByteCeiling(" 2000 ", "X")).toBe(2000);
+  });
+
   it("throws on a value that is not a positive number", () => {
     // Silently reading these as "no ceiling" would disable the guard at the
     // moment the operator believed they had armed it.
@@ -204,5 +216,33 @@ describe("planUploads size ceiling", () => {
     const plan = await planUploads([e("/nix/store/" + "a".repeat(32) + "-at", 100), e("/nix/store/" + "b".repeat(32) + "-over", 101)], { maxNarBytes: 100 });
     expect(plan.toUpload).toEqual(["/nix/store/" + "a".repeat(32) + "-at"]);
     expect(plan.skippedByPolicy.map((s) => s.reason)).toEqual(["too-large"]);
+  });
+});
+
+describe("unmatched exclude patterns", () => {
+  const big = "/nix/store/" + "a".repeat(32) + "-microvm-store-disk.erofs";
+
+  it("reports a pattern that matched nothing", async () => {
+    const plan = await planUploads([e(big)], { exclude: ["*.erofs", "*.squashfs"] });
+    const matched = matchedPatterns(["*.erofs", "*.squashfs"], plan);
+    expect([...matched]).toEqual(["*.erofs"]);
+    expect(unmatchedPatterns(["*.erofs", "*.squashfs"], matched)).toEqual(["*.squashfs"]);
+  });
+
+  it("does not report a pattern shadowed by another that matched the same path", async () => {
+    const pats = ["*.erofs", "microvm-*"];
+    const plan = await planUploads([e(big)], { exclude: pats });
+    expect(unmatchedPatterns(pats, matchedPatterns(pats, plan))).toEqual([]);
+  });
+
+  it("does not report a pattern matched by an earlier build", () => {
+    // Accumulated across builds: a pattern aimed at one output must not warn
+    // because a later output's closure lacks it.
+    expect(unmatchedPatterns(["*.erofs"], new Set(["*.erofs"]))).toEqual([]);
+  });
+
+  it("never reports a full store path as matched, since matching is name-only", async () => {
+    const plan = await planUploads([e(big)], { exclude: [big] });
+    expect(unmatchedPatterns([big], matchedPatterns([big], plan))).toEqual([big]);
   });
 });

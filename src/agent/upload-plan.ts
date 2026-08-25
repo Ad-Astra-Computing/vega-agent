@@ -43,13 +43,17 @@ export function globMatches(glob: string, name: string): boolean {
   let starG = -1;
   let starN = 0;
   while (n < name.length) {
-    if (g < glob.length && (glob[g] === "?" || glob[g] === name[n])) {
-      g++;
-      n++;
-    } else if (g < glob.length && glob[g] === "*") {
-      // Remember where to resume, then try matching the star against nothing.
+    if (g < glob.length && glob[g] === "*") {
+      // The wildcard branch must come FIRST. Testing literal equality first
+      // consumes a glob '*' as a literal when the name also has one at that
+      // position, so '*' would not match '*a'. Nix rejects '*' in a store path
+      // name, so no real closure entry reaches it, but this is exported and the
+      // next caller may not be passing store names.
       starG = g++;
       starN = n;
+    } else if (g < glob.length && (glob[g] === "?" || glob[g] === name[n])) {
+      g++;
+      n++;
     } else if (starG !== -1) {
       // Mismatch after a star: give the star one more character and retry.
       g = starG + 1;
@@ -151,4 +155,27 @@ export function parseByteCeiling(raw: string | undefined, envName: string): numb
     );
   }
   return n;
+}
+
+/**
+ * Exclude patterns that matched nothing, so a typo does not pass for a skip.
+ *
+ * Usually a full `/nix/store/...` path pasted where a NAME glob belongs, which
+ * can never match. Takes the patterns already known to have matched rather than
+ * re-deriving them, so a caller with several builds can accumulate across all of
+ * them: a pattern aimed at one output would otherwise warn on every other one.
+ */
+export function unmatchedPatterns(
+  exclude: readonly string[],
+  matched: ReadonlySet<string>,
+): string[] {
+  return exclude.filter((p) => p.trim() !== "" && !matched.has(p));
+}
+
+/** The exclude patterns that dropped at least one path in this plan. */
+export function matchedPatterns(exclude: readonly string[], plan: UploadPlan): Set<string> {
+  const names = plan.skippedByPolicy
+    .filter((e) => e.reason === "excluded")
+    .map((e) => storePathName(e.path));
+  return new Set(exclude.filter((p) => names.some((n) => globMatches(p, n))));
 }
