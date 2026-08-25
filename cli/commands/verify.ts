@@ -8,7 +8,7 @@ import { checkNarHash } from "../nar-check.js";
 import type { NixPublicKey } from "../../src/nix/types.js";
 import { trustedKeys, pickTrustedKey } from "../keys.js";
 import { verifyBuild, fullyVerified, withRetry, type Fetcher, type VerifyResult } from "../verify-core.js";
-import { boundedFetcher } from "../mcp/runtime.js";
+import { boundedFetcher, revocationAuthority } from "../mcp/runtime.js";
 
 const SHARED_KEY_NAME = "vega-cache-1";
 
@@ -138,6 +138,67 @@ function tick(ok: boolean): string {
   return ok ? pc.green("ok") : pc.red("FAIL");
 }
 
+/**
+ * The key that authenticates the revocation list: the user's pinned shared key,
+ * or a `--public-key` they passed that IS the shared key.
+ *
+ * The flag counts here only when it names the shared key exactly. That is a
+ * deliberate trust decision the user typed, and it is the flow this command's
+ * own "no trusted key" message recommends, so refusing it would have the CLI
+ * recommend something that then reports every build's revocation as unknown.
+ * A flag naming any OTHER key is ignored: it says which key a BUILD should
+ * carry, and must never become the authority on a global list.
+ */
+export async function sharedKeyForList(
+  verifyingKey: NixPublicKey,
+  flag?: string,
+): Promise<NixPublicKey | null> {
+  const pinned = pickTrustedKey(await trustedKeys(), [SHARED_KEY_NAME]);
+  if (pinned) return pinned;
+  // Truthiness, matching resolveKey, NOT `!== undefined`. An empty flag (a
+  // `--public-key "$VAR"` whose variable is unset) is not a key the user typed:
+  // resolveKey ignores it too and, on a tenant URL, falls back to the key the
+  // CACHE publishes. Accepting that here would let a hostile origin serve a
+  // self-made key named vega-cache-1, sign its own empty revocation list with
+  // it, and reach a full green "Verified" on a root the user never chose.
+  if (!flag) return null;
+  return verifyingKey.name === SHARED_KEY_NAME ? verifyingKey : null;
+}
+
+/**
+ * Whether `vega verify` should exit 0, as a pure decision.
+ *
+ * Extracted because it was inline in the command action and therefore untested,
+ * and a revoked tenant build shipped exiting 0 as a result: the JSON path
+ * honoured the decision and the human path fell off the end of a success branch.
+ * The shell only sees this function's answer, so this is where it belongs.
+ */
+export function verifyExitOk(
+  r: VerifyResult,
+  o: { narOk: boolean; narChecked: boolean; tenantScope: boolean; allowSignatureOnly?: boolean },
+): boolean {
+  // An explicit revocation overrides every route to success. The weaker tiers
+  // below deliberately accept weaker evidence, but "Vega withdrew this" is not
+  // weaker evidence, it is a different answer, and it applies to a tenant
+  // binding as much as a shared one.
+  if (r.revocation.revoked === true) return false;
+  if (fullyVerified(r) && o.narOk) return true;
+  // A tenant scope (--url .../tenant/<owner>/<repo>) is an explicit request to
+  // verify a tenant build: a Vega tenant-key signature plus actually-checked
+  // bytes is the success criterion there, never an upstream-mirror signature.
+  if (o.tenantScope && r.signature.ok && r.signature.scope === "scoped" && o.narChecked) return true;
+  // A valid scoped/upstream signature is a real result but NOT full Vega
+  // verification, so outside a tenant scope it needs an explicit opt-in and a
+  // default CI `vega verify && ...` cannot be satisfied by one.
+  return (
+    Boolean(o.allowSignatureOnly) &&
+    r.signature.ok &&
+    o.narOk &&
+    r.signature.scope !== "shared" &&
+    !r.transparency.found
+  );
+}
+
 export function registerVerify(program: Command): void {
   program
     .command("verify")
@@ -187,6 +248,15 @@ export function registerVerify(program: Command): void {
           fail(`no build found for ${hash} (HTTP ${res.status})`);
         }
         const narInfo = parseNarInfo(narText);
+        // The answer must be about the path that was asked about. Nothing else
+        // pins that: a cache asked for a revoked hash could return a different
+        // validly-signed, logged, unrevoked narinfo, and every check below would
+        // pass for THAT path while the caller believes it verified this one.
+        if (!narInfo.storePath.startsWith(`/nix/store/${hash}-`)) {
+          fail(
+            `the cache answered for ${narInfo.storePath}, which is not the path ${hash} was asked about`,
+          );
+        }
         const sigNames = narInfo.sigs.map((s) => s.slice(0, s.indexOf(":")).trim()).filter(Boolean);
         const publicKey = await resolveKey(cacheUrl, sigNames, opts.publicKey);
 
@@ -195,8 +265,12 @@ export function registerVerify(program: Command): void {
         // single failed request mid-log-scan (up to thousands of entries) does not
         // abort verify.
         const fetcher: Fetcher = withRetry(boundedFetcher(cacheUrl, 4 * 1024 * 1024));
+        // Signed by the shared key regardless of tier, and checked against one
+        // the user already trusts, so it comes from their trusted keys rather
+        // than the narinfo's signers. The constructor derives the origin.
         const result: VerifyResult = await verifyBuild({
           fetcher,
+          revocation: revocationAuthority(cacheUrl, await sharedKeyForList(publicKey, opts.publicKey)),
           info: narInfo,
           publicKey,
           sharedKeyName: SHARED_KEY_NAME,
@@ -223,7 +297,13 @@ export function registerVerify(program: Command): void {
         // explicitly allowed, so a default CI `vega verify && ...` cannot be
         // satisfied by a signature-only build.
         const signatureOnlyOk = sig.ok && narOk && sig.scope !== "shared" && !t.found;
-        const exitOk = verified || tenantOk || (Boolean(opts.allowSignatureOnly) && signatureOnlyOk);
+        const revoked = result.revocation.revoked === true;
+        const exitOk = verifyExitOk(result, {
+          narOk,
+          narChecked,
+          tenantScope: isTenantScope(cacheUrl),
+          ...(opts.allowSignatureOnly !== undefined ? { allowSignatureOnly: opts.allowSignatureOnly } : {}),
+        });
 
         if (opts.json) {
           jsonEvent({ hash, ...result, nar: nar ?? undefined, verified, exitOk });
@@ -234,6 +314,16 @@ export function registerVerify(program: Command): void {
         const rows: [string, string][] = [
           [`Signature (${sig.keyName})`, `${tick(sig.ok)}  ${sig.scope}`],
         ];
+        // Always shown. A reader who does not see the row cannot tell a binding
+        // that stands from one nobody asked about.
+        rows.push([
+          "Revocation",
+          result.revocation.revoked === true
+            ? `${tick(false)}  REVOKED${result.revocation.reason ? `: ${result.revocation.reason}` : ""}`
+            : result.revocation.revoked === false
+              ? `${tick(true)}  not revoked`
+              : `${tick(false)}  unknown (${result.revocation.note ?? "not checked"})`,
+        ]);
         if (sig.scope === "shared") {
           rows.push(["Signed tree head", tick(t.sthVerified)]);
           rows.push([
@@ -246,6 +336,16 @@ export function registerVerify(program: Command): void {
         keyValues(rows);
 
         if (t.note && sig.scope !== "shared") info(`\n  ${pc.gray(t.note)}`);
+        // First, and on its own: a withdrawn binding is not a weaker pass, and
+        // the tenant branch below would otherwise print "Verified in your tenant
+        // tier" over the top of it.
+        if (revoked) {
+          fail(
+            result.revocation.reason
+              ? `Vega has revoked this build: ${result.revocation.reason}. Do not trust it.`
+              : "Vega has revoked this build. Do not trust it.",
+          );
+        }
         if (verified) {
           success(
             nar !== null
@@ -276,6 +376,11 @@ export function registerVerify(program: Command): void {
         } else {
           fail("Verification failed. Do not trust this build.");
         }
+        // Backstop. The branches above each decide what to PRINT; this decides
+        // what the shell sees, once, for all of them. A branch that printed a
+        // success it should not have (a revoked tenant build did exactly that)
+        // cannot reach exit 0 by falling off the end.
+        if (!exitOk) process.exit(1);
       },
     );
 }

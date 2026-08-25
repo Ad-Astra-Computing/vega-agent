@@ -12,11 +12,13 @@ const utf8 = new TextEncoder();
 const hex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
 const HASH = "abc123def456abc123def456abc123de";
 
-function ctxFor(opts: { keyName?: string; narOk?: boolean; narChecked?: boolean; tamper?: (f: { narinfoText: string; sth: any; proof: any; leaves: string[] }) => void } = {}): {
+function ctxFor(opts: { keyName?: string; narOk?: boolean; narChecked?: boolean; revoked?: boolean; tamper?: (f: { narinfoText: string; sth: any; proof: any; leaves: string[] }) => void } = {}): {
   ctx: ToolContext;
   pub: NixPublicKey;
 } {
   const master = generateKeyPair(opts.keyName ?? "vega-cache-1").secret;
+  // The list is always signed by the SHARED key, even when the build is not.
+  const sharedMaster = generateKeyPair("vega-cache-1").secret;
   const pub = derivePublicKey(master);
   const info: NarInfo = {
     storePath: `/nix/store/${HASH}-hello-2.12.1`,
@@ -48,6 +50,26 @@ function ctxFor(opts: { keyName?: string; narOk?: boolean; narChecked?: boolean;
       [`/${HASH}.narinfo`]: state.narinfoText,
       "/log/sth": state.sth,
       [`/log/proof/inclusion/${state.proof.index}`]: state.proof,
+      // A healthy cache answers the revocation list; verification is strict
+      // about not being able to establish the status.
+      "/api/revocations": (() => {
+        const list = opts.revoked
+          ? [{ hash: HASH, storePath: `/nix/store/${HASH}-hello-2.12.1`, reason: "source withdrawn", at: 1 }]
+          : [];
+        const at = Date.now();
+        return {
+          v: 2,
+          revocations: list,
+          total: list.length,
+          at,
+          signature: signBytes(
+            sharedMaster,
+            new TextEncoder().encode(
+              `vega-revocations:v2:${at}:${list.length}:${JSON.stringify(list)}`,
+            ),
+          ),
+        };
+      })(),
     };
     state.leaves.forEach((data, i) => (map[`/log/entry/${i}`] = { index: i, data }));
     const v = map[path];
@@ -59,6 +81,9 @@ function ctxFor(opts: { keyName?: string; narOk?: boolean; narChecked?: boolean;
     cacheUrl: "https://vega-cache.dev",
     sharedKeyName: "vega-cache-1",
     resolveKey: async (sigNames) => (sigNames.includes(pub.name) ? pub : null),
+    // The pinned shared key authenticates the global list whatever key signed
+    // the build; the fixture serves the list on its own fetcher.
+    revocationAuthority: async () => ({ fetcher, sharedKey: derivePublicKey(sharedMaster) }),
     verifyNar: async () => ({ ok: opts.narOk ?? true, checked: opts.narChecked ?? true, detail: "test" }),
   };
   return { ctx, pub };
@@ -135,6 +160,74 @@ describe("riskTool verdicts", () => {
       expect(r.reasonCodes).toContain("TRANSPARENCY_LOG_INCLUDED");
     }
   });
+  it("refuses a cache that answers about a different path than was asked", async () => {
+    // Asked about hash H, the cache returns a validly-signed, logged, unrevoked
+    // narinfo for some other path. Every proof then holds for THAT path and the
+    // revocation lookup matches on the path the cache chose, so without this the
+    // gate returns a verdict about a question nobody asked.
+    const { ctx } = ctxFor();
+    const other = "b".repeat(32);
+    const swapped: ToolContext = {
+      ...ctx,
+      fetcher: async (path) =>
+        path === `/${other}.narinfo` ? ctx.fetcher(`/${HASH}.narinfo`) : ctx.fetcher(path),
+    };
+    const r = await riskTool(swapped, { target: other });
+    expect(isError(r)).toBe(true);
+    if (isError(r)) expect(r.code).toBe("PATH_MISMATCH");
+  });
+
+  it("warns rather than allows when the revocation status cannot be established", async () => {
+    // A withheld, replayed-to-stale or truncated list is a cache deciding what
+    // the caller gets to know. Allowing on that would make the freshness bound
+    // pointless at the gate an agent acts on.
+    const { ctx } = ctxFor();
+    // Break the AUTHORITY's fetcher specifically. The build still fetches fine
+    // through ctx.fetcher, so only the withdrawal question goes unanswered.
+    const noList: ToolContext = {
+      ...ctx,
+      revocationAuthority: async () => ({
+        fetcher: async () => ({ ok: false, status: 503, text: async () => "", json: async () => ({}) }),
+        sharedKey: (await ctx.revocationAuthority()).sharedKey,
+      }),
+    };
+    const r = await riskTool(noList, { target: HASH });
+    expect(isError(r)).toBe(false);
+    if (!isError(r)) {
+      expect(r.verdict).toBe("warn");
+      expect(r.reasonCodes).toContain("REVOCATION_STATUS_UNKNOWN");
+    }
+  });
+
+  it("denies a revoked build that is NOT signed by the shared key", async () => {
+    // The case every earlier fixture missed: the verifying key is a tenant key,
+    // so the list can only be authenticated through the separately pinned shared
+    // key. Without that wiring the status is unknown, and the scoped branch
+    // answered as though nothing had been withdrawn.
+    const { ctx } = ctxFor({ keyName: "vega-someone-repo-1", revoked: true });
+    const r = await riskTool(ctx, { target: HASH });
+    expect(isError(r)).toBe(false);
+    if (!isError(r)) {
+      expect(r.proofs.revocation.revoked).toBe(true);
+      expect(r.verdict).toBe("deny");
+      expect(r.reasonCodes).toContain("REVOKED_BY_VEGA");
+    }
+  });
+
+  it("denies a build Vega has revoked, whose proofs all still hold", async () => {
+    // The gate an agent or a CI change-check acts on without a human reading a
+    // table. Signature, log inclusion and byte match all pass here; only the
+    // revocation differs, so an "allow" could not be blamed on anything else.
+    const { ctx } = ctxFor({ revoked: true });
+    const r = await riskTool(ctx, { target: HASH });
+    expect(isError(r)).toBe(false);
+    if (!isError(r)) {
+      expect(r.verdict).toBe("deny");
+      expect(r.reasonCodes).toContain("REVOKED_BY_VEGA");
+      expect(r.proofs.revocation.revoked).toBe(true);
+    }
+  });
+
   it("denies a forged inclusion proof", async () => {
     const { ctx } = ctxFor({ tamper: (s) => (s.proof.proofHex = s.proof.proofHex.map((h: string) => h.replace(/./, (c) => (c === "0" ? "1" : "0")))) });
     const r = await riskTool(ctx, { target: HASH });
@@ -209,6 +302,12 @@ describe("vega_reproduce", () => {
     cacheUrl: "https://vega-cache.dev",
     sharedKeyName: "vega-cache-1",
     resolveKey: async () => null,
+    // Required, so a context can never quietly skip the question. This one never
+      // verifies a build, so it says "cannot ask" explicitly.
+      revocationAuthority: async () => ({
+      fetcher: async () => ({ ok: false, status: 404, text: async () => "", json: async () => ({}) }),
+      sharedKey: null,
+    }),
     verifyNar: async () => ({ ok: true, detail: "" }),
   });
 

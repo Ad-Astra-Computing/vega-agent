@@ -21,6 +21,7 @@ import {
   parseStorePathHash,
   type Fetcher,
   type VerifyResult,
+  type RevocationAuthority,
 } from "../verify-core.js";
 import { parseNarInfo } from "../../src/nix/narinfo.js";
 import type { NarInfo, NixPublicKey } from "../../src/nix/types.js";
@@ -32,6 +33,16 @@ export interface ToolContext {
   cacheUrl: string;
   /** The global shared key name (e.g. `vega-cache-1`). */
   sharedKeyName: string;
+  /**
+   * Where to ask about revocation and whose word to take. REQUIRED, not
+   * optional: an optional one is how three consumers shipped silently reporting
+   * revoked builds as status-unknown. Deliberately separate from
+   * {@link resolveKey}, which honours an explicit --public-key whatever it names;
+   * a flag naming some OTHER key says what a BUILD should carry and must not
+   * speak for a global list. A flag naming the shared key exactly does count,
+   * because that is a root the user typed.
+   */
+  revocationAuthority(): Promise<RevocationAuthority>;
   /** Resolve a trusted public key for the narinfo's signature key names, from
    * the user's nix.conf / an explicit key. Returns null if none is trusted. */
   resolveKey(sigNames: string[]): Promise<NixPublicKey | null>;
@@ -61,7 +72,7 @@ export interface ToolError {
   /** A stable, caller-safe classifier for the failure, so an aggregator (e.g.
    * the change assessor) can distinguish "cannot make a trust statement" cases
    * (NOT_IN_CACHE, NO_TRUSTED_KEY, NOT_A_STORE_PATH) from a proven-bad verdict. */
-  code?: "NOT_A_STORE_PATH" | "NOT_IN_CACHE" | "NO_TRUSTED_KEY";
+  code?: "NOT_A_STORE_PATH" | "NOT_IN_CACHE" | "NO_TRUSTED_KEY" | "PATH_MISMATCH";
 }
 export function isError(v: unknown): v is ToolError {
   return typeof v === "object" && v !== null && typeof (v as ToolError).error === "string";
@@ -78,6 +89,18 @@ export async function runVerify(
   const res = await ctx.fetcher(`/${hash}.narinfo`);
   if (!res.ok) return { error: `no build found for ${hash} (HTTP ${res.status})`, code: "NOT_IN_CACHE" };
   const info = parseNarInfo(await res.text());
+  // The answer has to be about the path that was asked about. Without this a
+  // cache asked for a revoked hash can return a different validly-signed,
+  // logged, unrevoked narinfo: every check then passes for THAT path, the
+  // revocation lookup matches on the path the cache chose, and this returns
+  // "allow" for a question about a revoked build. These are the gates an agent
+  // and the change check act on, so it matters more here than in the CLI.
+  if (!info.storePath.startsWith(`/nix/store/${hash}-`)) {
+    return {
+      error: `the cache answered for ${untrusted(info.storePath, 512)}, not the path ${hash} was asked about`,
+      code: "PATH_MISMATCH",
+    };
+  }
   const sigNames = info.sigs.map((s) => s.slice(0, s.indexOf(":")).trim()).filter(Boolean);
 
   const publicKey = await ctx.resolveKey(sigNames);
@@ -92,6 +115,7 @@ export async function runVerify(
 
   const result = await verifyBuild({
     fetcher: ctx.fetcher,
+    revocation: await ctx.revocationAuthority(),
     info,
     publicKey,
     sharedKeyName: ctx.sharedKeyName,
@@ -133,6 +157,11 @@ function shape(r: VerifyResult, narOk: boolean, narChecked: boolean) {
       bindingOk: t.bindingOk,
       scanned: t.scanned,
       ...(t.note !== undefined ? { note: untrusted(t.note, 256) } : {}),
+    },
+    revocation: {
+      revoked: r.revocation.revoked,
+      ...(r.revocation.reason !== undefined ? { reason: untrusted(r.revocation.reason, 256) } : {}),
+      ...(r.revocation.note !== undefined ? { note: untrusted(r.revocation.note, 256) } : {}),
     },
     narHashChecked: narChecked,
     narHashVerified: narChecked && narOk,
@@ -177,6 +206,19 @@ export function assessRisk(r: VerifyResult, narOk: boolean, narChecked = true): 
   const unchecked = !narChecked;
   const note = unchecked ? ["NAR_NOT_LOCALLY_CHECKED"] : [];
 
+  // Before the signature, because a withdrawn binding is withdrawn whatever its
+  // proofs say: signature, log inclusion and byte match can all hold on a build
+  // Vega has since revoked, and this is the answer a caller acts on without a
+  // human reading the table.
+  if (r.revocation.revoked === true) {
+    return {
+      verdict: "deny",
+      tier: r.signature.scope,
+      reasonCodes: ["REVOKED_BY_VEGA"],
+      proofs,
+      nextActions: ["build_locally", "pin_previous_verified_version"],
+    };
+  }
   if (!r.signature.ok) {
     return {
       verdict: "deny",
@@ -197,6 +239,10 @@ export function assessRisk(r: VerifyResult, narOk: boolean, narChecked = true): 
       nextActions: ["build_locally", "pin_previous_verified_version"],
     };
   }
+  // Every tier from here on: say when the withdrawal question went unanswered.
+  // Only the shared branch used to, so a scoped or upstream path came back
+  // clean without ever disclosing that nobody could check.
+  const unknownRev = r.revocation.revoked === null ? ["REVOCATION_STATUS_UNKNOWN"] : [];
   if (r.signature.scope === "upstream") {
     // A verified mirror of an upstream cache; not a Vega trust statement. For an
     // upstream mirror the trust anchor is the upstream signature (which the user
@@ -207,7 +253,7 @@ export function assessRisk(r: VerifyResult, narOk: boolean, narChecked = true): 
     return {
       verdict: "allow",
       tier: "upstream",
-      reasonCodes: ["MIRRORED_UPSTREAM", "NOT_A_VEGA_TRUST_STATEMENT", ...note],
+      reasonCodes: ["MIRRORED_UPSTREAM", "NOT_A_VEGA_TRUST_STATEMENT", ...note, ...unknownRev],
       proofs,
       nextActions: [],
     };
@@ -216,7 +262,7 @@ export function assessRisk(r: VerifyResult, narOk: boolean, narChecked = true): 
     return {
       verdict: "warn",
       tier: "scoped",
-      reasonCodes: ["SCOPED_BINDING_NOT_GLOBAL", ...note],
+      reasonCodes: ["SCOPED_BINDING_NOT_GLOBAL", ...note, ...unknownRev],
       proofs,
       nextActions: ["request_shared_promotion", "build_locally"],
     };
@@ -235,13 +281,27 @@ export function assessRisk(r: VerifyResult, narOk: boolean, narChecked = true): 
   // the signature and the transparency record; if we could not re-hash the bytes
   // locally, the trust chain still holds and nix re-checks them on substitution,
   // but we did not personally confirm them: warn rather than a clean allow.
-  if (unchecked) {
+  // Not knowing whether Vega withdrew this is not the same as knowing it did
+  // not. The list may have been withheld, replayed until stale, or truncated,
+  // and each is a cache deciding what this caller gets to know. Warn rather than
+  // allow, and say which, or the staleness bound buys nothing here: replay to
+  // stale would read as clean.
+  const unknownRevocation = unknownRev.length > 0;
+  if (unchecked || unknownRevocation) {
     return {
       verdict: "warn",
       tier: "shared",
-      reasonCodes: ["SHARED_REPRODUCED", "TRANSPARENCY_LOG_INCLUDED", "NAR_NOT_LOCALLY_CHECKED"],
+      reasonCodes: [
+        "SHARED_REPRODUCED",
+        "TRANSPARENCY_LOG_INCLUDED",
+        ...(unchecked ? ["NAR_NOT_LOCALLY_CHECKED"] : []),
+        ...(unknownRevocation ? ["REVOCATION_STATUS_UNKNOWN"] : []),
+      ],
       proofs,
-      nextActions: ["substitute through nix, which re-checks the narHash"],
+      nextActions: [
+        ...(unchecked ? ["substitute through nix, which re-checks the narHash"] : []),
+        ...(unknownRevocation ? ["retry when the cache serves a current revocation list"] : []),
+      ],
     };
   }
   return {

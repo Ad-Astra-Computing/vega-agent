@@ -176,6 +176,19 @@ export interface VerifyResult {
   storePath: string;
   narHash: string;
   signature: { ok: boolean; keyName: string; scope: "shared" | "scoped" | "upstream" };
+  /**
+   * Whether Vega has withdrawn this binding.
+   *
+   * A signature and a log proof say the binding was made and recorded. Neither
+   * says it still stands. Without this, `verify` reported a clean pass on a path
+   * Vega had revoked, which is the one answer a verifier must never give.
+   *
+   * `revoked: null` means the status could not be established (the list was
+   * unreachable, unsigned, or its signature did not verify). That is reported,
+   * never treated as "not revoked": a cache that withholds the list would
+   * otherwise be indistinguishable from one with nothing to hide.
+   */
+  revocation: { revoked: boolean | null; reason?: string; at?: number; note?: string };
   transparency: {
     found: boolean;
     index: number | null;
@@ -190,6 +203,7 @@ export interface VerifyResult {
 
 export interface VerifyOptions {
   fetcher: Fetcher;
+  revocation: RevocationAuthority;
   /** The single, already-fetched narinfo snapshot to verify (used for the
    * signature, the log binding, and by the caller for the NAR bytes too, so
    * every check is against the same document). */
@@ -213,6 +227,115 @@ async function getJson(fetcher: Fetcher, path: string): Promise<unknown> {
  * (nothing to verify); every other failure is reported as a false flag in the
  * result so the caller can render a complete verdict.
  */
+
+/**
+ * How old a signed revocation list may be before it stops counting as an answer.
+ *
+ * The signature proves origin, not recency, so without a bound an attacker who
+ * captured the endpoint before a revocation could replay it for ever. Generous
+ * enough to absorb clock skew and a cache in front of the origin, short enough
+ * that suppressing a revocation means continuously replaying rather than
+ * keeping one artifact.
+ */
+const REVOCATION_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Who to ask about revocation, and with what authority.
+ *
+ * REQUIRED on {@link VerifyOptions}, and that is the whole point. This started
+ * as two optional fields, so a new call site type-checked while silently
+ * degrading to "status unknown", and three separate consumers shipped answering
+ * about revoked builds as though nothing had been withdrawn. A required field
+ * makes a new consumer fail to compile until it decides, and `sharedKey: null`
+ * makes "we cannot ask" an explicit, greppable choice rather than an omission.
+ *
+ * Build it with `revocationAuthority()` rather than by hand: the list is global,
+ * so the fetcher has to be rooted at the cache ORIGIN, and a tenant-scoped base
+ * would 404 it and report every build as unknown.
+ */
+export interface RevocationAuthority {
+  /** Rooted at the cache ORIGIN, never a tenant or view scope. */
+  fetcher: Fetcher;
+  /** The user's pinned shared key, or null when they have pinned none. */
+  sharedKey: NixPublicKey | null;
+}
+
+/** A revocation as the control plane publishes it. */
+interface RevocationEntry {
+  hash: string;
+  storePath: string;
+  fingerprint?: string;
+  reason: string;
+  at: number;
+}
+
+/**
+ * Ask whether this binding has been withdrawn.
+ *
+ * The list is signed over a domain-separated payload with the same key that
+ * signs the tree head, so a cache cannot INVENT a revocation: that needs the
+ * key. What it can do is refuse to answer, which is why an unreachable or
+ * unverified list returns null rather than false.
+ *
+ * Replay and truncation are why `at` and `total` are inside the signature rather
+ * than beside it. Without `at` an older honestly-signed list verifies for ever,
+ * so the signature over the empty list would be a permanent "nothing is
+ * revoked" answer to anyone who captured it; without `total` a list the server
+ * capped still verifies while the entries that fell off read as clean. Both are
+ * checked below, so suppressing a revocation now costs continuous replay inside
+ * the freshness window rather than one pre-captured artifact.
+ *
+ * The residue is the client's own clock: a machine running behind extends that
+ * window by its own error, which no server-side field can fix.
+ *
+ * Not fatal to call on a scoped or upstream path. The list covers shared
+ * bindings, so those simply are not in it, and asking costs one request.
+ */
+async function checkRevoked(
+  fetcher: Fetcher,
+  publicKey: NixPublicKey,
+  storePath: string,
+): Promise<VerifyResult["revocation"]> {
+  let body: { revocations?: unknown; signature?: unknown; at?: unknown; total?: unknown };
+  try {
+    body = (await getJson(fetcher, "/api/revocations")) as typeof body;
+  } catch {
+    return { revoked: null, note: "revocation list unreachable" };
+  }
+  const list = body.revocations;
+  if (!Array.isArray(list)) return { revoked: null, note: "revocation list malformed" };
+  if (typeof body.signature !== "string" || body.signature === "") {
+    return { revoked: null, note: "revocation list is unsigned" };
+  }
+  const at = typeof body.at === "number" ? body.at : NaN;
+  const total = typeof body.total === "number" ? body.total : NaN;
+  if (!Number.isFinite(at) || !Number.isFinite(total)) {
+    return { revoked: null, note: "revocation list carries no freshness or total" };
+  }
+  // Re-serialize exactly what the control plane signed. JSON.parse preserves key
+  // order and JSON.stringify re-emits it, so a list that round-trips unchanged
+  // reproduces the signed bytes.
+  const msg = new TextEncoder().encode(`vega-revocations:v2:${at}:${total}:${JSON.stringify(list)}`);
+  if (!verifyBytes(publicKey, msg, body.signature)) {
+    return { revoked: null, note: "revocation list signature did not verify" };
+  }
+  // A validly-signed answer can still be the wrong answer. Stale means it may
+  // predate the revocation being looked for; truncated means the entry may be
+  // one the cap dropped. Neither is "not revoked".
+  const ageMs = Date.now() - at;
+  if (ageMs > REVOCATION_MAX_AGE_MS) {
+    return { revoked: null, note: `revocation list is stale (${Math.round(ageMs / 3600_000)}h old)` };
+  }
+  if (total !== list.length) {
+    return { revoked: null, note: `revocation list is truncated (${list.length} of ${total})` };
+  }
+  const hit = (list as RevocationEntry[]).find(
+    (e) => e && typeof e === "object" && e.storePath === storePath,
+  );
+  if (hit === undefined) return { revoked: false };
+  return { revoked: true, ...(hit.reason ? { reason: hit.reason } : {}), ...(hit.at ? { at: hit.at } : {}) };
+}
+
 export async function verifyBuild(opts: VerifyOptions): Promise<VerifyResult> {
   const { fetcher, info, publicKey, sharedKeyName } = opts;
 
@@ -237,7 +360,17 @@ export async function verifyBuild(opts: VerifyOptions): Promise<VerifyResult> {
       bindingOk: false,
       scanned: 0,
     },
+    revocation: { revoked: null },
   };
+
+  // Before anything about the log. A withdrawn binding is withdrawn whatever
+  // tier it sits in, and the scoped/upstream return below would otherwise skip
+  // the question entirely.
+  const revKey = opts.revocation.sharedKey;
+  result.revocation =
+    revKey === null
+      ? { revoked: null, note: "no pinned shared key to authenticate the revocation list" }
+      : await checkRevoked(opts.revocation.fetcher, revKey, info.storePath);
 
   // Only the shared tier is promoted into the global transparency log; scoped
   // Vega bindings and upstream mirrors are signature-only by design.
@@ -300,6 +433,10 @@ export function fullyVerified(r: VerifyResult): boolean {
   return (
     r.signature.ok &&
     r.signature.scope === "shared" &&
+    // Strictly false, never merely "not true": a binding whose revocation
+    // status could not be established has not been fully verified, and saying
+    // otherwise is how a cache that withholds the list gets treated as clean.
+    r.revocation.revoked === false &&
     r.transparency.found &&
     r.transparency.sthVerified &&
     r.transparency.leafHashOk &&
