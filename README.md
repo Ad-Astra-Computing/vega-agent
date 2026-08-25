@@ -154,16 +154,26 @@ steps:
 
 Useful action inputs:
 
-- `skip-upstream: "true"` — upload only paths the upstream cache does not already
+- `skip-upstream: "true"`: upload only paths the upstream cache does not already
   serve (recommended for system closures).
-- `reuse-cache: "true"` — substitute this repo's own prior Vega pushes before
+- `reuse-cache: "true"`: substitute this repo's own prior Vega pushes before
   building, so heavy paths are not rebuilt every run. Keep it **off** for any job
   whose attestation feeds the shared tier (that build must stay independent of Vega).
-- `build-timeout-minutes` — explicit per-build cap. Default `0` (disabled): the
+- `build-timeout-minutes`: explicit per-build cap. Default `0` (disabled): the
   job's `timeout-minutes` is the only limit, so a long-but-progressing build is
   never killed.
-- `extra-substituters` / `extra-trusted-public-keys` — pull heavy dependencies
+- `extra-substituters` / `extra-trusted-public-keys`: pull heavy dependencies
   from a trusted upstream cache (e.g. a project's Cachix) instead of from source.
+- `exclude`: store-path name globs to leave unpublished, comma-separated, e.g.
+  `*.erofs`. Matched against the name after the hash, so a pattern survives a
+  rebuild. Use it for output specific to this host that nobody else can
+  substitute: a microVM disk image is gigabytes and changes whenever its guest
+  config does. An excluded path is neither uploaded nor attested, so it counts
+  toward no tier and anything referencing it leaves a consumer a dangling
+  reference to build themselves. Every skip is logged with its size.
+- `max-nar-bytes`: leave any path whose NAR exceeds this many bytes unpublished.
+  A blunt guard against an accidental multi-gigabyte push; prefer `exclude` when
+  you know what you are dropping.
 
 ### Install the GitHub App
 
