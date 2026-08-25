@@ -81,10 +81,17 @@ export function buildToolContext(
     sharedKeyName: SHARED_KEY_NAME,
     ...(opts.maxScan !== undefined ? { maxScan: opts.maxScan } : {}),
     resolveKey: async (sigNames) => flagKey ?? pickTrustedKey(await trustedKeys(), sigNames),
-    // From the user's own trusted keys, never the flag and never the narinfo's
-    // signers, so the global list is authenticated whatever key signed the build.
+    // The user's pinned shared key, else a --public-key they typed that IS the
+    // shared key: the same rule `vega verify` applies, so the two entry points
+    // cannot disagree about whether a build is revoked. Never the narinfo's
+    // signers, and never a flag naming some OTHER key, which says what a BUILD
+    // should carry and must not speak for a global list.
     revocationAuthority: async () =>
-      revocationAuthority(cacheUrl, pickTrustedKey(await trustedKeys(), [SHARED_KEY_NAME])),
+      revocationAuthority(
+        cacheUrl,
+        pickTrustedKey(await trustedKeys(), [SHARED_KEY_NAME]) ??
+          (flagKey && flagKey.name === SHARED_KEY_NAME ? flagKey : null),
+      ),
     // Streaming NAR fetch (decompress + hash), bounded by a timeout rather than a
     // byte cap since a legitimate NAR can be large. A caller may pass a smaller
     // per-call timeout (the change gate does, to keep one in-flight NAR within

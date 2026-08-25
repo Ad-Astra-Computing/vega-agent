@@ -139,14 +139,6 @@ function tick(ok: boolean): string {
 }
 
 /**
- * Whether `vega verify` should exit 0, as a pure decision.
- *
- * Extracted because it was inline in the command action and therefore untested,
- * and a revoked tenant build shipped exiting 0 as a result: the JSON path
- * honoured the decision and the human path fell off the end of a success branch.
- * The shell only sees this function's answer, so this is where it belongs.
- */
-/**
  * The key that authenticates the revocation list: the user's pinned shared key,
  * or a `--public-key` they passed that IS the shared key.
  *
@@ -157,15 +149,30 @@ function tick(ok: boolean): string {
  * A flag naming any OTHER key is ignored: it says which key a BUILD should
  * carry, and must never become the authority on a global list.
  */
-async function sharedKeyForList(
+export async function sharedKeyForList(
   verifyingKey: NixPublicKey,
   flag?: string,
 ): Promise<NixPublicKey | null> {
   const pinned = pickTrustedKey(await trustedKeys(), [SHARED_KEY_NAME]);
   if (pinned) return pinned;
-  return flag !== undefined && verifyingKey.name === SHARED_KEY_NAME ? verifyingKey : null;
+  // Truthiness, matching resolveKey, NOT `!== undefined`. An empty flag (a
+  // `--public-key "$VAR"` whose variable is unset) is not a key the user typed:
+  // resolveKey ignores it too and, on a tenant URL, falls back to the key the
+  // CACHE publishes. Accepting that here would let a hostile origin serve a
+  // self-made key named vega-cache-1, sign its own empty revocation list with
+  // it, and reach a full green "Verified" on a root the user never chose.
+  if (!flag) return null;
+  return verifyingKey.name === SHARED_KEY_NAME ? verifyingKey : null;
 }
 
+/**
+ * Whether `vega verify` should exit 0, as a pure decision.
+ *
+ * Extracted because it was inline in the command action and therefore untested,
+ * and a revoked tenant build shipped exiting 0 as a result: the JSON path
+ * honoured the decision and the human path fell off the end of a success branch.
+ * The shell only sees this function's answer, so this is where it belongs.
+ */
 export function verifyExitOk(
   r: VerifyResult,
   o: { narOk: boolean; narChecked: boolean; tenantScope: boolean; allowSignatureOnly?: boolean },
