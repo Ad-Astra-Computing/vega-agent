@@ -7,7 +7,7 @@
 
 import { parsePublicKey } from "../../src/nix/signing.js";
 import { trustedKeys, pickTrustedKey } from "../keys.js";
-import { withRetry, type Fetcher } from "../verify-core.js";
+import { withRetry, type Fetcher, type RevocationAuthority } from "../verify-core.js";
 import { checkNarHash } from "../nar-check.js";
 import type { ToolContext } from "./tools.js";
 import type { NixPublicKey } from "../../src/nix/types.js";
@@ -16,6 +16,22 @@ export const SHARED_KEY_NAME = "vega-cache-1";
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024; // narinfo/sth/entry/proof are tiny
 const REQUEST_TIMEOUT_MS = 15_000; // small bodies; fail fast on a stalled cache
 const NAR_TIMEOUT_MS = 120_000; // NARs can be large but must still terminate
+
+/**
+ * The revocation authority for a cache URL: a fetcher rooted at its ORIGIN, and
+ * the user's pinned shared key.
+ *
+ * The origin is derived here rather than by callers, because the list is global
+ * and a caller holding a tenant- or view-scoped URL would otherwise ask the
+ * wrong place and get "unknown" for every build. Every consumer goes through
+ * this, so there is one definition of where to ask and who to believe.
+ */
+export function revocationAuthority(cacheUrl: string, sharedKey: NixPublicKey | null): RevocationAuthority {
+  return {
+    fetcher: withRetry(boundedFetcher(new URL(cacheUrl).origin, MAX_RESPONSE_BYTES)),
+    sharedKey,
+  };
+}
 
 /** A fetcher that aborts any response exceeding `maxBytes`, so a hostile cache
  * cannot exhaust memory by returning a giant narinfo/proof/entry body, and times
@@ -65,6 +81,17 @@ export function buildToolContext(
     sharedKeyName: SHARED_KEY_NAME,
     ...(opts.maxScan !== undefined ? { maxScan: opts.maxScan } : {}),
     resolveKey: async (sigNames) => flagKey ?? pickTrustedKey(await trustedKeys(), sigNames),
+    // The user's pinned shared key, else a --public-key they typed that IS the
+    // shared key: the same rule `vega verify` applies, so the two entry points
+    // cannot disagree about whether a build is revoked. Never the narinfo's
+    // signers, and never a flag naming some OTHER key, which says what a BUILD
+    // should carry and must not speak for a global list.
+    revocationAuthority: async () =>
+      revocationAuthority(
+        cacheUrl,
+        pickTrustedKey(await trustedKeys(), [SHARED_KEY_NAME]) ??
+          (flagKey && flagKey.name === SHARED_KEY_NAME ? flagKey : null),
+      ),
     // Streaming NAR fetch (decompress + hash), bounded by a timeout rather than a
     // byte cap since a legitimate NAR can be large. A caller may pass a smaller
     // per-call timeout (the change gate does, to keep one in-flight NAR within
