@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { planUploads } from "../src/agent/upload-plan.js";
+import { planUploads, globMatches, storePathName, parseByteCeiling } from "../src/agent/upload-plan.js";
 import { narObjectExists } from "../src/agent/upstream.js";
 
 // 32-char store hashes (nixbase32 alphabet) for three paths.
@@ -146,5 +146,63 @@ describe("narObjectExists (content-addressed resume probe)", () => {
     const { fetch: f, seen } = fakeNarCache([`${base}/${narUrl}`]);
     expect(await narObjectExists(`${base}/`, narUrl, f)).toBe(true);
     expect(seen).toEqual([`HEAD ${base}/${narUrl}`]);
+  });
+});
+
+describe("globMatches", () => {
+  it("matches a wildcard-heavy pattern in bounded time", () => {
+    // The regex form of this (each * as .*) backtracks catastrophically: minutes
+    // for one 211-character name, once per closure entry, during planning before
+    // the stall watchdog starts, so the job wedges with no diagnostic.
+    const started = process.hrtime.bigint();
+    expect(globMatches("*a*a*a*a*a*a*a*a*a*b", "a".repeat(211))).toBe(false);
+    const ms = Number(process.hrtime.bigint() - started) / 1e6;
+    expect(ms).toBeLessThan(100);
+  });
+
+  it("treats ? as exactly one character", () => {
+    expect(globMatches("hello-?", "hello-1")).toBe(true);
+    expect(globMatches("hello-?", "hello-12")).toBe(false);
+    expect(globMatches("hello-?", "hello-")).toBe(false);
+  });
+
+  it("treats regex metacharacters as literals", () => {
+    expect(globMatches("hello-2.12.1", "hello-2.12.1")).toBe(true);
+    expect(globMatches("hello-2.12.1", "hello-2X12.1")).toBe(false);
+    expect(globMatches("a+b(c)", "a+b(c)")).toBe(true);
+  });
+
+  it("anchors both ends", () => {
+    expect(globMatches("erofs", "microvm-store-disk.erofs")).toBe(false);
+    expect(globMatches("*.erofs", "microvm-store-disk.erofs")).toBe(true);
+  });
+});
+
+describe("storePathName", () => {
+  it("takes everything after the first dash, keeping dashes in the name", () => {
+    expect(storePathName("/nix/store/" + "a".repeat(32) + "-gcc-13.2.0-dev")).toBe("gcc-13.2.0-dev");
+  });
+});
+
+describe("parseByteCeiling", () => {
+  it("is absent for an unset or empty value", () => {
+    expect(parseByteCeiling(undefined, "X")).toBeUndefined();
+    expect(parseByteCeiling("  ", "X")).toBeUndefined();
+  });
+
+  it("throws on a value that is not a positive number", () => {
+    // Silently reading these as "no ceiling" would disable the guard at the
+    // moment the operator believed they had armed it.
+    for (const bad of ["1_000_000_000", "2GB", "-1", "0", "lots"]) {
+      expect(() => parseByteCeiling(bad, "VEGA_MAX_NAR_BYTES")).toThrow(/VEGA_MAX_NAR_BYTES/);
+    }
+  });
+});
+
+describe("planUploads size ceiling", () => {
+  it("keeps a path exactly at the ceiling and drops the one above it", async () => {
+    const plan = await planUploads([e("/nix/store/" + "a".repeat(32) + "-at", 100), e("/nix/store/" + "b".repeat(32) + "-over", 101)], { maxNarBytes: 100 });
+    expect(plan.toUpload).toEqual(["/nix/store/" + "a".repeat(32) + "-at"]);
+    expect(plan.skippedByPolicy.map((s) => s.reason)).toEqual(["too-large"]);
   });
 });

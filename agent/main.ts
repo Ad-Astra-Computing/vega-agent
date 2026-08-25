@@ -18,7 +18,7 @@ import { fetchActionsOidcToken } from "../src/agent/oidc.js";
 import { OidcTokenProvider } from "../src/agent/token-provider.js";
 import { ControlPlaneClient } from "../src/agent/client.js";
 import { buildAttestBody } from "../src/agent/narinfo.js";
-import { planUploads } from "../src/agent/upload-plan.js";
+import { planUploads, parseByteCeiling, globMatches, storePathName } from "../src/agent/upload-plan.js";
 import { narObjectExists } from "../src/agent/upstream.js";
 import { mapConcurrent } from "../src/agent/concurrency.js";
 import { tenantSubstituter, hostConfigBlock, isNixPublicKey } from "../src/agent/substituter.js";
@@ -54,14 +54,6 @@ async function readVegaConfig(flakeDir: string): Promise<VegaConfig | null> {
   }
   // A present-but-invalid vega.yaml is a hard error, not a silent fallback.
   return parseVegaConfig(parseYaml(raw));
-}
-
-/** A positive byte count from the environment, or undefined. Anything else
- * (empty, zero, negative, not a number) means "no ceiling" rather than a
- * ceiling of zero, which would drop every path. */
-function positiveBytes(raw: string | undefined): number | undefined {
-  const n = Number((raw ?? "").trim());
-  return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
 interface CacheOpts {
@@ -135,6 +127,15 @@ async function cacheBuild(
     ...(opts.exclude.length > 0 ? { exclude: opts.exclude } : {}),
     ...(opts.maxNarBytes !== undefined ? { maxNarBytes: opts.maxNarBytes } : {}),
   });
+  for (const p of opts.exclude) {
+    if (!plan.skippedByPolicy.some((e) => e.reason === "excluded" && globMatches(p, storePathName(e.path)))) {
+      ghaWarn(
+        `Exclude pattern ${JSON.stringify(p)} matched no path in this closure. It is matched ` +
+          `against the store path NAME (the part after the hash), so a full /nix/store/... path ` +
+          `never matches. Everything it was meant to skip is being published.`,
+      );
+    }
+  }
   const toUpload = new Set(plan.toUpload);
   const paths = closure.filter((p) => toUpload.has(p.path));
   if (opts.skipUpstream) {
@@ -148,15 +149,29 @@ async function cacheBuild(
     const excluded = plan.skippedByPolicy.filter((e) => e.reason === "excluded").length;
     const tooLarge = plan.skippedByPolicy.length - excluded;
     const parts = [
-      excluded > 0 ? `${excluded} matching VEGA_EXCLUDE` : "",
-      tooLarge > 0 ? `${tooLarge} over VEGA_MAX_NAR_BYTES` : "",
+      excluded > 0 ? `${excluded} matching VEGA_EXCLUDE/exclude` : "",
+      tooLarge > 0 ? `${tooLarge} over VEGA_MAX_NAR_BYTES/max-nar-bytes` : "",
     ].filter(Boolean);
     console.log(
       `Not publishing ${plan.skippedByPolicy.length} path(s) (${parts.join(", ")}), ${human(bytes)} of NAR. ` +
-        `They are neither uploaded nor attested, so nothing else can substitute them.`,
+        `They are neither uploaded nor attested, so Vega cannot serve them and they count ` +
+        `toward no tier. Anything referencing them substitutes from elsewhere or is rebuilt.`,
     );
     for (const e of plan.skippedByPolicy) {
       console.log(`  skipped  ${e.path} (${human(e.narSize)}, ${e.reason})`);
+    }
+    // Skipping a DEPENDENCY leaves a reference for a consumer to build. Skipping
+    // this build's OWN output is different in kind: the attestation that carries
+    // `attr` is never sent, so the build can never be reproduced or promoted.
+    // Nearly always an overbroad pattern, so say it separately and loudly.
+    const skippedTop = plan.skippedByPolicy.filter((e) => topPaths.has(e.path));
+    if (skippedTop.length > 0) {
+      ghaWarn(
+        `Policy skipped ${skippedTop.length} of this build's own output path(s): ` +
+          `${skippedTop.map((e) => e.path).join(", ")}. Those outputs are not published and ` +
+          `cannot be reproduced or promoted, so this run produces no provenance for them. ` +
+          `Check the pattern is not broader than intended.`,
+      );
     }
   }
 
@@ -282,6 +297,9 @@ async function main(): Promise<void> {
   await provider.get();
   const client = new ControlPlaneClient(controlPlane, (force) => provider.get(force));
 
+  // Parsed before anything else: a malformed ceiling throws, and it should do so
+  // before the build rather than after it.
+  const maxNarBytes = parseByteCeiling(process.env.VEGA_MAX_NAR_BYTES, "VEGA_MAX_NAR_BYTES");
   const opts: CacheOpts = {
     skipUpstream: process.env.VEGA_SKIP_UPSTREAM === "true",
     upstreamUrl: process.env.VEGA_UPSTREAM || "https://cache.nixos.org",
@@ -289,9 +307,7 @@ async function main(): Promise<void> {
       .split(",")
       .map((p) => p.trim())
       .filter((p) => p !== ""),
-    ...(positiveBytes(process.env.VEGA_MAX_NAR_BYTES) !== undefined
-      ? { maxNarBytes: positiveBytes(process.env.VEGA_MAX_NAR_BYTES)! }
-      : {}),
+    ...(maxNarBytes !== undefined ? { maxNarBytes } : {}),
     work: await mkdtemp(join(tmpdir(), "vega-agent-")),
     // Honor the vega.yaml opt-out: when continent publishing is off, tell the
     // control plane not to derive/record this build's continent.

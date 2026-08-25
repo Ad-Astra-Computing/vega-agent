@@ -23,7 +23,10 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
   host-specific artifact and wrong for anything another machine might want.
 
   Every skip is logged, with a count, the total NAR bytes and each path: a silent
-  exclusion is indistinguishable from a cache that quietly lost paths.
+  exclusion is indistinguishable from a cache that quietly lost paths. A pattern
+  that matches nothing warns, as does excluding one of the build's own outputs,
+  which forfeits its provenance. A malformed `VEGA_MAX_NAR_BYTES` fails the run
+  rather than quietly reverting to no ceiling.
 
 ## [0.18.1] - 2026-08-23
 

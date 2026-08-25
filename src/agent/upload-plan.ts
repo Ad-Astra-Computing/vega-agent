@@ -23,23 +23,43 @@ export interface UploadPlan {
 }
 
 /**
- * `*` and `?` against a store path's NAME, anchored.
+ * `*` and `?` against a store path's NAME, anchored, matched in linear time.
  *
  * The name, not the whole path: the hash changes on every rebuild, so a pattern
- * written against the full path would match once and never again. Everything
- * else is escaped, so a pattern is a glob and not an accidental regex.
+ * written against the full path would match once and never again.
+ *
+ * Deliberately NOT compiled to a regex. Mapping each `*` to `.*` gives a pattern
+ * whose alternatives multiply, and a wildcard-heavy glob then backtracks
+ * catastrophically: `*a*a*a*a*a*a*a*a*a*b` against a 211-character name (the
+ * store's name limit, so this is reachable) takes minutes for a SINGLE path,
+ * runs once per closure entry, and happens during planning before the stall
+ * watchdog starts, so the job wedges with no diagnostic at all. This is the
+ * standard two-pointer walk instead: it backtracks only to the last `*`, which
+ * is O(name x pattern) worst case and linear in practice.
  */
-function globToRegExp(glob: string): RegExp {
-  // Split on the wildcards so they survive, escape everything else, then map
-  // them. Doing it with placeholder characters instead would break the moment a
-  // pattern contained one.
-  const body = glob
-    .split(/([*?])/)
-    .map((part) =>
-      part === "*" ? ".*" : part === "?" ? "." : part.replace(/[.+^${}()|[\]\\]/g, "\\$&"),
-    )
-    .join("");
-  return new RegExp(`^${body}$`);
+export function globMatches(glob: string, name: string): boolean {
+  let g = 0;
+  let n = 0;
+  let starG = -1;
+  let starN = 0;
+  while (n < name.length) {
+    if (g < glob.length && (glob[g] === "?" || glob[g] === name[n])) {
+      g++;
+      n++;
+    } else if (g < glob.length && glob[g] === "*") {
+      // Remember where to resume, then try matching the star against nothing.
+      starG = g++;
+      starN = n;
+    } else if (starG !== -1) {
+      // Mismatch after a star: give the star one more character and retry.
+      g = starG + 1;
+      n = ++starN;
+    } else {
+      return false;
+    }
+  }
+  while (g < glob.length && glob[g] === "*") g++;
+  return g === glob.length;
 }
 
 /** The part of a store path after `<hash>-`, e.g. `microvm-store-disk.erofs`. */
@@ -84,13 +104,13 @@ export async function planUploads(
   opts: { upstreamUrl?: string; exclude?: readonly string[]; maxNarBytes?: number },
   fetchImpl: typeof fetch = fetch,
 ): Promise<UploadPlan> {
-  const patterns = (opts.exclude ?? []).filter((p) => p.trim() !== "").map(globToRegExp);
+  const patterns = (opts.exclude ?? []).filter((p) => p.trim() !== "");
   const cap = opts.maxNarBytes !== undefined && opts.maxNarBytes > 0 ? opts.maxNarBytes : undefined;
 
   const skippedByPolicy: SkippedPath[] = [];
   let remaining: PlanEntry[] = [];
   for (const e of closure) {
-    if (patterns.some((re) => re.test(storePathName(e.path)))) {
+    if (patterns.some((p) => globMatches(p, storePathName(e.path)))) {
       skippedByPolicy.push({ path: e.path, narSize: e.narSize, reason: "excluded" });
     } else if (cap !== undefined && e.narSize > cap) {
       skippedByPolicy.push({ path: e.path, narSize: e.narSize, reason: "too-large" });
@@ -107,4 +127,28 @@ export async function planUploads(
     skippedUpstream = upstream;
   }
   return { toUpload: paths, skippedUpstream, skippedByPolicy };
+}
+
+/**
+ * A NAR size ceiling from an operator-supplied string. Empty or absent means no
+ * ceiling.
+ *
+ * Anything non-empty that is not a positive number THROWS rather than falling
+ * back to "no ceiling". This knob exists to prevent an accidental multi-gigabyte
+ * push, and `max-nar-bytes: 1_000_000_000` (or `2GB`, both natural ways to write
+ * it) parses as NaN. Silently treating that as "no limit" would disable the
+ * guard at exactly the moment the operator believed they had armed it, and the
+ * only evidence would be the very push they were trying to prevent.
+ */
+export function parseByteCeiling(raw: string | undefined, envName: string): number | undefined {
+  const text = (raw ?? "").trim();
+  if (text === "") return undefined;
+  const n = Number(text);
+  if (!Number.isFinite(n) || n <= 0) {
+    throw new Error(
+      `${envName} must be a positive number of bytes, got ${JSON.stringify(text)}. ` +
+        `Digits only: use 1000000000, not 1_000_000_000 or 2GB.`,
+    );
+  }
+  return n;
 }
