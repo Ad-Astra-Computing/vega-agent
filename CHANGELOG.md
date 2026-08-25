@@ -6,6 +6,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-08-25
+
 ### Added
 
 - `VEGA_EXCLUDE` leaves matching store paths unpublished, as comma-separated
@@ -28,26 +30,6 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
   which forfeits its provenance. A malformed `VEGA_MAX_NAR_BYTES` fails the run
   rather than quietly reverting to no ceiling.
 
-### Fixed
-
-- `vega verify` checks whether Vega has withdrawn a binding. It verified the
-  signature, the signed tree head and log inclusion, and never asked, so a path
-  whose shared signature had been revoked still reported a clean pass, which is
-  the one answer a verifier must not give. The revocation list is fetched from
-  the cache origin (it is global, not per-tenant) and authenticated with the
-  user's pinned shared key, never one the same cache served. A revoked binding
-  now fails by every route, including the tenant and signature-only ones and the
-  MCP risk gate an agent acts on, whatever key signed the build, since "Vega withdrew this" is a different
-  answer rather than weaker evidence. A status that cannot be established is
-  reported as unknown and is not treated as clean, so a cache that withholds the
-  list is distinguishable from one with nothing to hide. The list carries a
-  signed timestamp and total, both checked, so a stale replay or a truncated
-  answer is unknown rather than clean.
-
-## [0.18.1] - 2026-08-23
-
-### Added
-
 - The builder gives its store a free-space floor, so a build collects garbage
   instead of taking the host's disk to zero. The image shipped only a periodic
   GC, which runs between builds and therefore cannot help when one build cycle
@@ -67,6 +49,22 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
   That file belongs to the operator and the entrypoint does not edit it, so the
   floor is theirs to set; the failure mode is a full host rather than a failed
   build, and it is invisible until it happens.
+
+### Fixed
+
+- `vega verify` checks whether Vega has withdrawn a binding. It verified the
+  signature, the signed tree head and log inclusion, and never asked, so a path
+  whose shared signature had been revoked still reported a clean pass, which is
+  the one answer a verifier must not give. The revocation list is fetched from
+  the cache origin (it is global, not per-tenant) and authenticated with the
+  user's pinned shared key, never one the same cache served. A revoked binding
+  now fails by every route, including the tenant and signature-only ones and the
+  MCP risk gate an agent acts on, whatever key signed the build, since "Vega withdrew this" is a different
+  answer rather than weaker evidence. A status that cannot be established is
+  reported as unknown and is not treated as clean, so a cache that withholds the
+  list is distinguishable from one with nothing to hide. The list carries a
+  signed timestamp and total, both checked, so a stale replay or a truncated
+  answer is unknown rather than clean.
 
 ## [0.18.0] - 2026-08-17
 
