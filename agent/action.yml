@@ -34,6 +34,14 @@ inputs:
     description: "Trusted public keys for extra-substituters (space-separated), matching the order/contents of those caches."
     required: false
     default: ""
+  exclude:
+    description: "Store-path name globs to leave unpublished (comma-separated), e.g. '*.erofs'. Matched against the name after the hash, so a pattern survives a rebuild. An excluded path is neither uploaded nor attested, and anything referencing it gets a dangling reference a consumer must build itself, so use it for outputs specific to this host that nobody else can substitute. Every skip is logged with its size."
+    required: false
+    default: ""
+  max-nar-bytes:
+    description: "Leave any path whose NAR exceeds this many bytes unpublished. A blunt guard against an accidental multi-gigabyte push; prefer 'exclude' when you know what you are dropping. Skips are logged."
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -68,4 +76,6 @@ runs:
         VEGA_BUILD_TIMEOUT_MINUTES: ${{ inputs.build-timeout-minutes }}
         VEGA_EXTRA_SUBSTITUTERS: ${{ inputs.extra-substituters }}
         VEGA_EXTRA_TRUSTED_PUBLIC_KEYS: ${{ inputs.extra-trusted-public-keys }}
+        VEGA_EXCLUDE: ${{ inputs.exclude }}
+        VEGA_MAX_NAR_BYTES: ${{ inputs.max-nar-bytes }}
       run: node_modules/.bin/tsx agent/main.ts "$VEGA_INSTALLABLE"

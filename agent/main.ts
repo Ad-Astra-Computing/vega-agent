@@ -29,7 +29,7 @@ import { workflowWarning } from "../src/agent/gha.js";
 import { sha256NixHashToBase64 } from "../src/nix/hash.js";
 import { nixBuild, pathInfoClosure, pathInfoOutputs, makeNar, currentSystem, flakeShow } from "./nix.js";
 import { flattenFlakeShow } from "../src/agent/outputs.js";
-import { StallWatchdog } from "../src/agent/stall-watchdog.js";
+import { StallWatchdog, human } from "../src/agent/stall-watchdog.js";
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -56,9 +56,27 @@ async function readVegaConfig(flakeDir: string): Promise<VegaConfig | null> {
   return parseVegaConfig(parseYaml(raw));
 }
 
+/** A positive byte count from the environment, or undefined. Anything else
+ * (empty, zero, negative, not a number) means "no ceiling" rather than a
+ * ceiling of zero, which would drop every path. */
+function positiveBytes(raw: string | undefined): number | undefined {
+  const n = Number((raw ?? "").trim());
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
 interface CacheOpts {
   skipUpstream: boolean;
   upstreamUrl: string;
+  /**
+   * Store-path NAME globs the operator does not want published, and a NAR size
+   * ceiling. Both drop a path from upload AND attestation, so what they are
+   * really for is output nobody else can use: a host-specific microVM disk image
+   * is gigabytes, changes whenever its guest config does, and no other machine
+   * will ever substitute it, so publishing it spends the run's upload budget on
+   * nothing. Anything another machine might want does not belong here.
+   */
+  exclude: string[];
+  maxNarBytes?: number;
   work: string;
   /** Extra substituters (Vega's own tenant cache) so cold builds reuse prior pushes. */
   substituters?: string[];
@@ -112,13 +130,34 @@ async function cacheBuild(
   // Decide what needs processing: drop only paths upstream already serves.
   // Resumability is handled per-path below (skip the redundant PUT, always
   // attest), so it can key on exact bytes and never drops a path's evidence.
-  const plan = await planUploads(closure.map((p) => p.path), {
+  const plan = await planUploads(closure, {
     upstreamUrl: opts.skipUpstream ? opts.upstreamUrl : undefined,
+    ...(opts.exclude.length > 0 ? { exclude: opts.exclude } : {}),
+    ...(opts.maxNarBytes !== undefined ? { maxNarBytes: opts.maxNarBytes } : {}),
   });
   const toUpload = new Set(plan.toUpload);
   const paths = closure.filter((p) => toUpload.has(p.path));
   if (opts.skipUpstream) {
     console.log(`Skipping ${plan.skippedUpstream.length} path(s) in ${opts.upstreamUrl}.`);
+  }
+  // Say what policy dropped, and how much of it. A silent exclusion is
+  // indistinguishable from a cache that quietly lost paths, and the operator
+  // asking for this feature lost ten days to exactly that ambiguity once.
+  if (plan.skippedByPolicy.length > 0) {
+    const bytes = plan.skippedByPolicy.reduce((n, e) => n + e.narSize, 0);
+    const excluded = plan.skippedByPolicy.filter((e) => e.reason === "excluded").length;
+    const tooLarge = plan.skippedByPolicy.length - excluded;
+    const parts = [
+      excluded > 0 ? `${excluded} matching VEGA_EXCLUDE` : "",
+      tooLarge > 0 ? `${tooLarge} over VEGA_MAX_NAR_BYTES` : "",
+    ].filter(Boolean);
+    console.log(
+      `Not publishing ${plan.skippedByPolicy.length} path(s) (${parts.join(", ")}), ${human(bytes)} of NAR. ` +
+        `They are neither uploaded nor attested, so nothing else can substitute them.`,
+    );
+    for (const e of plan.skippedByPolicy) {
+      console.log(`  skipped  ${e.path} (${human(e.narSize)}, ${e.reason})`);
+    }
   }
 
   // Compress + upload + attest each path with bounded concurrency, so a large
@@ -246,6 +285,13 @@ async function main(): Promise<void> {
   const opts: CacheOpts = {
     skipUpstream: process.env.VEGA_SKIP_UPSTREAM === "true",
     upstreamUrl: process.env.VEGA_UPSTREAM || "https://cache.nixos.org",
+    exclude: (process.env.VEGA_EXCLUDE ?? "")
+      .split(",")
+      .map((p) => p.trim())
+      .filter((p) => p !== ""),
+    ...(positiveBytes(process.env.VEGA_MAX_NAR_BYTES) !== undefined
+      ? { maxNarBytes: positiveBytes(process.env.VEGA_MAX_NAR_BYTES)! }
+      : {}),
     work: await mkdtemp(join(tmpdir(), "vega-agent-")),
     // Honor the vega.yaml opt-out: when continent publishing is off, tell the
     // control plane not to derive/record this build's continent.
