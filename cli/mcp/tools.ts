@@ -34,15 +34,6 @@ export interface ToolContext {
   /** The global shared key name (e.g. `vega-cache-1`). */
   sharedKeyName: string;
   /**
-   * The user's PINNED shared key, and a fetcher rooted at the cache ORIGIN.
-   *
-   * Both exist for the revocation list, which is global and signed by the shared
-   * key whatever tier a path sits in. Without them the list can only be
-   * authenticated when the verifying key HAPPENS to be the shared key, so a
-   * revoked path signed by a tenant or upstream key reads as status-unknown and
-   * the risk gate answers about it as though nothing were withdrawn.
-   */
-  /**
    * Where to ask about revocation and whose word to take. REQUIRED, not
    * optional: an optional one is how three consumers shipped silently reporting
    * revoked builds as status-unknown. Deliberately separate from
