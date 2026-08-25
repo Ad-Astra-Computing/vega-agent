@@ -9,7 +9,7 @@
  * culprit stage in the job log instead of needing on-host forensics.
  */
 /** Bytes as a human reads them, so a log line is scannable at a glance. */
-function human(bytes: number): string {
+export function human(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   const units = ["KiB", "MiB", "GiB", "TiB"];
   let v = bytes / 1024;

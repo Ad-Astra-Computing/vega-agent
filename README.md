@@ -87,7 +87,7 @@ Add `--hash` for an output and its verdict, and `--error` to quote text yourself
 
 `vega verify` checks the cache's signature against a key you already trust, the
 signed tree head, the build's RFC 9162 inclusion proof, and re-derives the NAR
-hash — proof, not trust. It also asks whether Vega has since revoked the build:
+hash: proof, not trust. It also asks whether Vega has since revoked the build:
 a signature and a log proof say a binding was made and recorded, neither says it
 still stands. A revoked build fails whatever tier it sits in. The revocation
 list is signed, and carries the time it was produced and how many entries exist,

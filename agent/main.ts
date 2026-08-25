@@ -18,7 +18,7 @@ import { fetchActionsOidcToken } from "../src/agent/oidc.js";
 import { OidcTokenProvider } from "../src/agent/token-provider.js";
 import { ControlPlaneClient } from "../src/agent/client.js";
 import { buildAttestBody } from "../src/agent/narinfo.js";
-import { planUploads } from "../src/agent/upload-plan.js";
+import { planUploads, parseByteCeiling, matchedPatterns, unmatchedPatterns } from "../src/agent/upload-plan.js";
 import { narObjectExists } from "../src/agent/upstream.js";
 import { mapConcurrent } from "../src/agent/concurrency.js";
 import { tenantSubstituter, hostConfigBlock, isNixPublicKey } from "../src/agent/substituter.js";
@@ -29,7 +29,7 @@ import { workflowWarning } from "../src/agent/gha.js";
 import { sha256NixHashToBase64 } from "../src/nix/hash.js";
 import { nixBuild, pathInfoClosure, pathInfoOutputs, makeNar, currentSystem, flakeShow } from "./nix.js";
 import { flattenFlakeShow } from "../src/agent/outputs.js";
-import { StallWatchdog } from "../src/agent/stall-watchdog.js";
+import { StallWatchdog, human } from "../src/agent/stall-watchdog.js";
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -59,6 +59,16 @@ async function readVegaConfig(flakeDir: string): Promise<VegaConfig | null> {
 interface CacheOpts {
   skipUpstream: boolean;
   upstreamUrl: string;
+  /**
+   * Store-path NAME globs the operator does not want published, and a NAR size
+   * ceiling. Both drop a path from upload AND attestation, so what they are
+   * really for is output nobody else can use: a host-specific microVM disk image
+   * is gigabytes, changes whenever its guest config does, and no other machine
+   * will ever substitute it, so publishing it spends the run's upload budget on
+   * nothing. Anything another machine might want does not belong here.
+   */
+  exclude: string[];
+  maxNarBytes?: number;
   work: string;
   /** Extra substituters (Vega's own tenant cache) so cold builds reuse prior pushes. */
   substituters?: string[];
@@ -82,6 +92,7 @@ async function cacheBuild(
   attr: string,
   dir: string | undefined,
   opts: CacheOpts,
+  matchedExclude: Set<string>,
 ): Promise<{ promoted: number; total: number }> {
   console.log(`Building ${installable} ...`);
   await nixBuild(installable, { substituters: opts.substituters, trustedKeys: opts.trustedKeys });
@@ -112,13 +123,49 @@ async function cacheBuild(
   // Decide what needs processing: drop only paths upstream already serves.
   // Resumability is handled per-path below (skip the redundant PUT, always
   // attest), so it can key on exact bytes and never drops a path's evidence.
-  const plan = await planUploads(closure.map((p) => p.path), {
+  const plan = await planUploads(closure, {
     upstreamUrl: opts.skipUpstream ? opts.upstreamUrl : undefined,
+    ...(opts.exclude.length > 0 ? { exclude: opts.exclude } : {}),
+    ...(opts.maxNarBytes !== undefined ? { maxNarBytes: opts.maxNarBytes } : {}),
   });
+  for (const p of matchedPatterns(opts.exclude, plan)) matchedExclude.add(p);
   const toUpload = new Set(plan.toUpload);
   const paths = closure.filter((p) => toUpload.has(p.path));
   if (opts.skipUpstream) {
     console.log(`Skipping ${plan.skippedUpstream.length} path(s) in ${opts.upstreamUrl}.`);
+  }
+  // Say what policy dropped, and how much of it. A silent exclusion is
+  // indistinguishable from a cache that quietly lost paths, and the operator
+  // asking for this feature lost ten days to exactly that ambiguity once.
+  if (plan.skippedByPolicy.length > 0) {
+    const bytes = plan.skippedByPolicy.reduce((n, e) => n + e.narSize, 0);
+    const excluded = plan.skippedByPolicy.filter((e) => e.reason === "excluded").length;
+    const tooLarge = plan.skippedByPolicy.length - excluded;
+    const parts = [
+      excluded > 0 ? `${excluded} matching VEGA_EXCLUDE/exclude` : "",
+      tooLarge > 0 ? `${tooLarge} over VEGA_MAX_NAR_BYTES/max-nar-bytes` : "",
+    ].filter(Boolean);
+    console.log(
+      `Not publishing ${plan.skippedByPolicy.length} path(s) (${parts.join(", ")}), ${human(bytes)} of NAR. ` +
+        `They are neither uploaded nor attested, so Vega cannot serve them and they count ` +
+        `toward no tier. Anything referencing them substitutes from elsewhere or is rebuilt.`,
+    );
+    for (const e of plan.skippedByPolicy) {
+      console.log(`  skipped  ${e.path} (${human(e.narSize)}, ${e.reason})`);
+    }
+    // Skipping a DEPENDENCY leaves a reference for a consumer to build. Skipping
+    // this build's OWN output is different in kind: the attestation that carries
+    // `attr` is never sent, so the build can never be reproduced or promoted.
+    // Nearly always an overbroad pattern, so say it separately and loudly.
+    const skippedTop = plan.skippedByPolicy.filter((e) => topPaths.has(e.path));
+    if (skippedTop.length > 0) {
+      ghaWarn(
+        `Policy skipped ${skippedTop.length} of this build's own output path(s): ` +
+          `${skippedTop.map((e) => e.path).join(", ")}. Those outputs are not published and ` +
+          `cannot be reproduced or promoted, so this run produces no provenance for them. ` +
+          `Check the pattern is not broader than intended.`,
+      );
+    }
   }
 
   // Compress + upload + attest each path with bounded concurrency, so a large
@@ -243,9 +290,17 @@ async function main(): Promise<void> {
   await provider.get();
   const client = new ControlPlaneClient(controlPlane, (force) => provider.get(force));
 
+  // Parsed before anything else: a malformed ceiling throws, and it should do so
+  // before the build rather than after it.
+  const maxNarBytes = parseByteCeiling(process.env.VEGA_MAX_NAR_BYTES, "VEGA_MAX_NAR_BYTES");
   const opts: CacheOpts = {
     skipUpstream: process.env.VEGA_SKIP_UPSTREAM === "true",
     upstreamUrl: process.env.VEGA_UPSTREAM || "https://cache.nixos.org",
+    exclude: (process.env.VEGA_EXCLUDE ?? "")
+      .split(",")
+      .map((p) => p.trim())
+      .filter((p) => p !== ""),
+    ...(maxNarBytes !== undefined ? { maxNarBytes } : {}),
     work: await mkdtemp(join(tmpdir(), "vega-agent-")),
     // Honor the vega.yaml opt-out: when continent publishing is off, tell the
     // control plane not to derive/record this build's continent.
@@ -303,16 +358,27 @@ async function main(): Promise<void> {
 
   let promoted = 0;
   let total = 0;
+  // Accumulated across every build: a pattern aimed at one output must not warn
+  // just because another output's closure does not contain it.
+  const matchedExclude = new Set<string>();
   try {
     for (const { b, dir } of targets) {
       // A foreign flake (dir === null) still caches to the tenant tier, just
       // without a reproducible subflake dir.
-      const r = await cacheBuild(client, b.installable, b.attr, dir ?? undefined, opts);
+      const r = await cacheBuild(client, b.installable, b.attr, dir ?? undefined, opts, matchedExclude);
       promoted += r.promoted;
       total += r.total;
     }
   } finally {
     await rm(opts.work, { recursive: true, force: true });
+  }
+
+  for (const p of unmatchedPatterns(opts.exclude, matchedExclude)) {
+    ghaWarn(
+      `Exclude pattern ${JSON.stringify(p)} matched no path in any build this run. It is ` +
+        `matched against the store path NAME (the part after the hash), so a full ` +
+        `/nix/store/... path never matches. Nothing was skipped for it.`,
+    );
   }
 
   console.log(`Done. ${promoted}/${total} published to the shared cache.`);

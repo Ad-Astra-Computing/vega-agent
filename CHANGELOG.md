@@ -6,6 +6,28 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+### Added
+
+- `VEGA_EXCLUDE` leaves matching store paths unpublished, as comma-separated
+  globs over the path NAME (the part after the hash, so a pattern survives a
+  rebuild): `VEGA_EXCLUDE='*.erofs'`. `VEGA_MAX_NAR_BYTES` does the same by size,
+  as a blunt guard against an accidental multi-gigabyte push. Both are exposed on
+  the Action as `exclude` and `max-nar-bytes`.
+
+  This is for output no other machine can use. A host-specific microVM disk image
+  is one to two gigabytes, changes whenever its guest config does, and nobody
+  else will ever substitute it; on the deployment that asked for this, such paths
+  were 40 of 49 publish minutes. An excluded path is neither uploaded nor
+  attested, so it contributes to no tier, and anything referencing it leaves a
+  consumer a dangling reference to build themselves. That is right for a
+  host-specific artifact and wrong for anything another machine might want.
+
+  Every skip is logged, with a count, the total NAR bytes and each path: a silent
+  exclusion is indistinguishable from a cache that quietly lost paths. A pattern
+  that matches nothing warns, as does excluding one of the build's own outputs,
+  which forfeits its provenance. A malformed `VEGA_MAX_NAR_BYTES` fails the run
+  rather than quietly reverting to no ceiling.
+
 ### Fixed
 
 - `vega verify` checks whether Vega has withdrawn a binding. It verified the
