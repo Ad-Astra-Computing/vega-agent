@@ -1,0 +1,60 @@
+name: Approve flake.lock runs
+
+# A pull request opened with the default GITHUB_TOKEN cannot trigger workflow
+# runs: GitHub blocks that to stop a workflow from recursively triggering itself.
+# The runs are created in `action_required` instead, so the weekly flake.lock pull
+# request sits with NO checks at all, neither green nor red, and reads as merely
+# unreviewed rather than unrunnable. One sat that way for a day and would have
+# been carried straight past the pre-release check for open pull requests.
+#
+# The durable fix is to open that pull request with a GitHub App token, so its
+# author is a real identity and runs start normally. That needs App credentials
+# this repository does not have. Until it does, approve those runs here.
+#
+# Deliberately narrow, because approving a run means executing its code: only the
+# branch the update workflow itself creates, only when that branch lives in THIS
+# repository (never a fork, whose code an outside contributor controls), and only
+# runs the actions bot queued. Anything else is left for a human.
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+concurrency:
+  group: approve-flake-lock-runs
+  cancel-in-progress: false
+
+jobs:
+  approve:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Approve pending flake.lock runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # --jq filters server-side on the fields that carry the trust decision.
+          # head_repository.full_name is the one that matters: a fork PR shares the
+          # branch NAME freely, so matching the name alone would approve a stranger's
+          # code. Comparing the full name to this repository excludes every fork.
+          runs=$(gh api "repos/$REPO/actions/runs?status=action_required&per_page=100" \
+            --jq ".workflow_runs[]
+                  | select(.head_branch == \"update_flake_lock_action\")
+                  | select(.head_repository.full_name == \"$REPO\")
+                  | select(.actor.login == \"github-actions[bot]\")
+                  | .id")
+
+          if [ -z "$runs" ]; then
+            echo "No pending flake.lock runs to approve."
+            exit 0
+          fi
+
+          for id in $runs; do
+            echo "Approving run $id"
+            gh api -X POST "repos/$REPO/actions/runs/$id/approve"
+          done
