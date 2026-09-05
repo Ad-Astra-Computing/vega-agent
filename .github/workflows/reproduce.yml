@@ -31,6 +31,10 @@ on:
         description: "Expected narHash, sha256:... (optional)"
         required: false
         default: ""
+      hash:
+        description: "Candidate store-path hash, so a FAILED reproduction can be reported against it (optional)"
+        required: false
+        default: ""
       runner:
         description: "Runner to reproduce on"
         required: false
@@ -45,6 +49,7 @@ on:
       dir: { required: false, type: string, default: "" }
       expect_store_path: { required: false, type: string, default: "" }
       expect_narhash: { required: false, type: string, default: "" }
+      hash: { required: false, type: string, default: "" }
       runner: { required: false, type: string, default: "ubuntu-latest" }
 
 permissions:
@@ -115,4 +120,8 @@ jobs:
           VEGA_DIR: ${{ inputs.dir }}
           VEGA_EXPECT_STORE_PATH: ${{ inputs.expect_store_path }}
           VEGA_EXPECT_NARHASH: ${{ inputs.expect_narhash }}
+          # Names the candidate, so a reproduction that FAILS can say which one.
+          # Without it a failure is anonymous and the queue keeps re-dispatching
+          # work that can never succeed.
+          VEGA_HASH: ${{ inputs.hash }}
         run: node_modules/.bin/tsx agent/reproduce.ts
