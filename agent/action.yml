@@ -59,7 +59,9 @@ runs:
     - name: Install agent deps
       shell: bash
       working-directory: ${{ github.action_path }}/..
-      run: npm ci
+      # No install script, because this step holds an OIDC token. The binary
+      # esbuild's script fetches is already an optional dependency here.
+      run: npm ci --omit=dev --ignore-scripts
     - name: Build and publish to vega cache
       shell: bash
       working-directory: ${{ github.action_path }}/..
