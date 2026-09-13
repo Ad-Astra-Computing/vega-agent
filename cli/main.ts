@@ -24,6 +24,7 @@ import { registerGate } from "./commands/gate.js";
 import { registerAssess } from "./commands/assess.js";
 import { registerMcp } from "./commands/mcp.js";
 import { registerInit } from "./commands/init.js";
+import { registerDiagnose } from "./commands/diagnose.js";
 
 const program = new Command();
 
@@ -64,6 +65,7 @@ registerGate(program);
 registerAssess(program);
 registerMcp(program);
 registerInit(program);
+registerDiagnose(program);
 
 async function run(): Promise<void> {
   // Bare `vega` shows an animated brand splash, then help (not an error).
