@@ -204,6 +204,15 @@ credential either. The control-plane URL is fixed in the workflow, not an input,
 so a caller cannot redirect the token. A self-hosted reproducer must still use
 ephemeral, per-job-isolated runners, never a long-lived host.
 
+On the publishing side, the agent scans each build's own output for credentials
+before upload and warns about anything it recognises. A cache entry is
+content-addressed and append-only, so a key published once cannot be withdrawn.
+Detection is by specific credential formats, never by measuring randomness,
+because a NAR is full of high-entropy store-path hashes. A finding warns and the
+upload continues, since a false positive that blocks a deploy teaches people to
+switch the scan off. Set `secret-scan: false` in `vega.yaml` to disable it. See
+[Caching your builds](https://docs.vega-cache.dev/caching#secret-scan).
+
 ## Run with Nix
 
 ```
