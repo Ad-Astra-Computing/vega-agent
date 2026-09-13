@@ -17,13 +17,21 @@ import { join } from "node:path";
 import { fetchActionsOidcToken } from "../src/agent/oidc.js";
 import { OidcTokenProvider } from "../src/agent/token-provider.js";
 import { unresolvableProvenance } from "../src/agent/repro-failure.js";
+import { classifyFailure } from "../src/agent/failure-diagnosis.js";
 import { ControlPlaneClient } from "../src/agent/client.js";
 import { buildAttestBody } from "../src/agent/narinfo.js";
 import { lockedInstallable } from "../src/agent/reproduce.js";
 import { sanitizeFlakeDir, sanitizeFlakeAttr } from "../src/nix/flake-dir.js";
 import type { BuildProvenance } from "../src/trust/policy.js";
 import { sha256NixHashToBase64 } from "../src/nix/hash.js";
-import { nixBuild, pathInfoOutputs, makeNar, assertSubflakeDirContained, evalOutputPathError } from "./nix.js";
+import {
+  nixBuild,
+  pathInfoOutputs,
+  makeNar,
+  assertSubflakeDirContained,
+  evalOutputPathError,
+  NixBuildError,
+} from "./nix.js";
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -121,7 +129,15 @@ async function main(): Promise<void> {
       // build", and those two mean different things to the queue.
       const probe = await evalOutputPathError(installable).catch(() => "");
       const reason = unresolvableProvenance(probe) ? "unresolvable" : "build-failed";
-      const sent = await client.reportReproFailure(candidateHash, reason);
+      // Classify from nix's own captured stderr, when there is any (a build
+      // that never started, e.g. a dead runner, has none). The classifier
+      // treats this text as hostile input; a wrong label is worse than none,
+      // so this is best-effort and never blocks the report.
+      const diagnosis =
+        e instanceof NixBuildError && e.capturedStderr !== ""
+          ? classifyFailure(e.capturedStderr, e.exitCode)
+          : undefined;
+      const sent = await client.reportReproFailure(candidateHash, reason, diagnosis);
       console.log(`Reported ${reason} for ${candidateHash}${sent ? "" : " (report failed to send)"}`);
     }
     throw e;

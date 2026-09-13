@@ -1,6 +1,7 @@
 import { openAsBlob } from "node:fs";
 import { envSeconds } from "./env.js";
 import type { PromotionDecision } from "../trust/policy.js";
+import type { FailureDiagnosis } from "./failure-diagnosis.js";
 
 /** Attest request body — the narinfo fields the runner claims for an output. */
 export interface AttestBody {
@@ -538,15 +539,28 @@ export class ControlPlaneClient {
    *
    * Best-effort by design: the job has already failed, and failing to report the
    * failure must not change that outcome or mask the original error.
+   *
+   * `diagnosis` is the agent's own classification of the failed build's
+   * output (see `failure-diagnosis.ts`); every field on it is optional, and a
+   * control plane that does not understand them still gets `hash` and
+   * `reason` exactly as before.
    */
-  async reportReproFailure(hash: string, reason: ReproFailure): Promise<boolean> {
+  async reportReproFailure(
+    hash: string,
+    reason: ReproFailure,
+    diagnosis?: FailureDiagnosis,
+  ): Promise<boolean> {
     try {
+      const body: { hash: string; reason: ReproFailure } & Partial<FailureDiagnosis> = { hash, reason };
+      if (diagnosis?.drv !== undefined) body.drv = diagnosis.drv;
+      if (diagnosis?.diagnosis !== undefined) body.diagnosis = diagnosis.diagnosis;
+      if (diagnosis?.excerpt !== undefined) body.excerpt = diagnosis.excerpt;
       await this.authedFetch(
         `${this.baseUrl}/api/repro/dispatch-failed`,
         {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ hash, reason }),
+          body: JSON.stringify(body),
         },
         "report reproduction failure",
         async () => undefined,
