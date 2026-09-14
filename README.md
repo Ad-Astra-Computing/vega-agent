@@ -72,6 +72,7 @@ vega assess --added-paths - # gate a change's added store paths on their trust s
 vega mcp                    # read-only MCP server for AI agents (verify, risk, reproduce, assess_change)
 vega view                   # print the nix.conf substituter + keys for your view
 vega trust add github:alice # trust a builder (scoped --package/--flake/--org, revocable)
+vega diagnose               # which derivations block your candidates, and why
 vega status                 # auth + connectivity
 vega doctor                 # diagnose nix / zstd / auth, and check for a newer release
 vega report                 # compose a problem report and open a prefilled GitHub issue

@@ -137,10 +137,31 @@ const BUILD_TIMEOUT_MS =
   Number(process.env.VEGA_BUILD_TIMEOUT_MS) ||
   0;
 
+// Bound how much of a build's stderr is retained for diagnosis. `-L` can be
+// extremely chatty on a heavy closure; keeping only the tail is enough (nix's
+// own failure line is always near the end) and keeps memory flat regardless
+// of how long the build runs.
+const MAX_CAPTURED_STDERR = 512 * 1024;
+
+/** Raised when `nix build` exits non-zero or is killed for a timeout, carrying
+ * the exit code and a bounded tail of the build's stderr for classification
+ * (see `../src/agent/failure-diagnosis.ts`). */
+export class NixBuildError extends Error {
+  readonly exitCode: number | undefined;
+  readonly capturedStderr: string;
+  constructor(message: string, exitCode: number | undefined, capturedStderr: string) {
+    super(message);
+    this.name = "NixBuildError";
+    this.exitCode = exitCode;
+    this.capturedStderr = capturedStderr;
+  }
+}
+
 /**
  * Build an installable, STREAMING nix's build logs to stderr so CI shows live
  * progress (a buffered exec would make a long build look hung). Throws on a
- * non-zero exit or if the build exceeds the timeout.
+ * non-zero exit or if the build exceeds the timeout, with a bounded capture of
+ * the same stderr attached so a caller can classify why.
  */
 export function nixBuild(
   installable: string,
@@ -149,7 +170,7 @@ export function nixBuild(
   return new Promise((resolve, reject) => {
     // `--` terminates option parsing (installable is attacker-controlled, so a
     // value like `--store ...` must not be read as a flag). `-L` prints build
-    // logs so progress is visible; inherit stderr so they reach the CI console.
+    // logs so progress is visible.
     const args = ["build", "--no-link", "-L"];
     // Register extra substituters/keys (e.g. Vega's own tenant cache) so a cold
     // runner pulls previously-pushed paths instead of rebuilding them.
@@ -158,16 +179,43 @@ export function nixBuild(
       args.push("--extra-trusted-public-keys", opts.trustedKeys.join(" "));
     }
     args.push("--", installable);
+    // stderr is piped rather than inherited so it can be tee'd: written
+    // straight through to the CI console for live progress, and also kept
+    // (bounded) in case the build fails and something downstream needs to say
+    // why.
     const child = spawn("nix", args, {
-      stdio: ["ignore", "ignore", "inherit"],
+      stdio: ["ignore", "ignore", "pipe"],
     });
+    // Held as a list and joined once at the end. Concatenating on every chunk
+    // would copy the whole retained tail per line of output, which on a build
+    // that logs for an hour is most of what the process does.
+    const chunks: Buffer[] = [];
+    let capturedBytes = 0;
+    child.stderr.on("data", (chunk: Buffer) => {
+      process.stderr.write(chunk);
+      chunks.push(chunk);
+      capturedBytes += chunk.length;
+      while (chunks.length > 1 && capturedBytes - chunks[0]!.length >= MAX_CAPTURED_STDERR) {
+        capturedBytes -= chunks.shift()!.length;
+      }
+    });
+    const captured = (): string => {
+      const all = Buffer.concat(chunks);
+      return all.subarray(Math.max(0, all.length - MAX_CAPTURED_STDERR)).toString("utf8");
+    };
     // Only arm a timer when a timeout is explicitly configured; otherwise the CI
     // job timeout governs and a long-but-progressing build is never killed.
     const timer =
       BUILD_TIMEOUT_MS > 0
         ? setTimeout(() => {
             child.kill("SIGTERM");
-            reject(new Error(`nix build timed out after ${Math.round(BUILD_TIMEOUT_MS / 60000)}m`));
+            reject(
+              new NixBuildError(
+                `nix build timed out after ${Math.round(BUILD_TIMEOUT_MS / 60000)}m`,
+                undefined,
+                captured(),
+              ),
+            );
           }, BUILD_TIMEOUT_MS)
         : undefined;
     child.on("error", (e) => {
@@ -177,7 +225,7 @@ export function nixBuild(
     child.on("close", (code) => {
       if (timer) clearTimeout(timer);
       if (code === 0) resolve();
-      else reject(new Error(`nix build exited with code ${code}`));
+      else reject(new NixBuildError(`nix build exited with code ${code}`, code ?? undefined, captured()));
     });
   });
 }
