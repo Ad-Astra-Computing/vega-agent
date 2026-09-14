@@ -48,4 +48,18 @@ describe("teeing a build's stderr", () => {
     expect(Buffer.byteLength(kept)).toBeLessThanOrEqual(32);
     expect(kept.endsWith("line 49\n")).toBe(true);
   });
+
+  it("starts the tail at a line boundary", async () => {
+    // Redaction runs over what is captured, and it recognises a credential by
+    // its prefix. A cut in the middle of a line would drop that prefix and leave
+    // the rest of the secret looking like ordinary text, so the tail begins at
+    // the first whole line rather than wherever the byte bound happens to land.
+    const source = new PassThrough();
+    const sink = slowSink();
+    const tee = teeStderr(source, sink as never, 40);
+    source.write(Buffer.from("secret " + "A".repeat(30) + "\ntrailing\n"));
+    await new Promise((r) => setImmediate(r));
+    const kept = tee.captured();
+    expect(kept, "a partial line survived the cut").toBe("trailing\n");
+  });
 });

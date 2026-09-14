@@ -197,7 +197,13 @@ export function teeStderr(
   return {
     captured: () => {
       const all = Buffer.concat(chunks);
-      return all.subarray(Math.max(0, all.length - maxBytes)).toString("utf8");
+      if (all.length <= maxBytes) return all.toString("utf8");
+      const tail = all.subarray(all.length - maxBytes);
+      // Drop the partial first line. Redaction recognises a credential by its
+      // prefix, so a cut inside one would take the prefix away and leave the
+      // rest of the secret in the excerpt as ordinary-looking text.
+      const boundary = tail.indexOf(0x0a);
+      return (boundary === -1 ? tail : tail.subarray(boundary + 1)).toString("utf8");
     },
   };
 }
