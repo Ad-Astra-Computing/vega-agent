@@ -6,6 +6,42 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-09-14
+
+### Added
+
+- A failed reproduction now says why it failed. The agent classifies the build's
+  own output into one diagnosis (an impure host path, a sandbox refusal, a
+  network or disk failure, an evaluation error, a timeout, a divergence or
+  none of these), names the derivation nix itself reported as failing and sends
+  a bounded, redacted excerpt. The control plane groups these per owner, so a
+  candidate that can never build is visible instead of being re-dispatched for
+  ever.
+
+- `vega diagnose` reports the reproductions currently blocked for an owner, and
+  exits non-zero for a blocking one under `--fail-on-blocking`, so a pipeline
+  can act on it.
+
+### Fixed
+
+- The agent kept a build's log for diagnosis by reading the child's stderr
+  rather than letting it write to the console directly, which put the agent in
+  the middle of a stream the kernel used to throttle. A console that could not
+  keep up left the unwritten output queued in memory without bound. The build
+  now waits for the console.
+
+- The retained tail of a log began wherever its byte bound landed, which can be
+  inside a line. Redaction recognises a credential by its prefix, so a cut there
+  would leave the rest of a secret in an excerpt as ordinary text. The tail
+  starts at the first whole line.
+
+### Security
+
+- The reusable reproduction workflow installed its dependencies with their
+  install scripts in the job that holds the OIDC token that gates signing. It
+  now installs without them, and a test holds the workflow to the variables the
+  agent actually reads so it cannot drift from them again.
+
 ## [0.19.0] - 2026-08-25
 
 ### Added
