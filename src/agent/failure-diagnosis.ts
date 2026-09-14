@@ -54,9 +54,8 @@ const BUILD_FAILURE_PHRASE = /\b(?:builder for|build of) '[^']+' failed/i;
 const HOST_EXEC = /(?:^|[\s'"(=:>])(?:\/usr\/bin\/|\/usr\/libexec\/|\/usr\/sbin\/|\/bin\/|\/sbin\/)[^\s'":]+/m;
 const HOST_DENIAL = /(no such file or directory|permission denied|operation not permitted|command not found)/i;
 
-function isImpureHostPath(text: string, exitCode?: number): boolean {
+function isImpureHostPath(text: string): boolean {
   if (!HOST_EXEC.test(text)) return false;
-  if (exitCode === 126) return true;
   // The denial has to be about the host path, not anywhere in the log. A
   // missing header file reported three hundred lines earlier is not evidence
   // that a build reached outside the store.
@@ -107,8 +106,8 @@ function isEval(text: string): boolean {
   return EVAL_PATTERNS.some((re) => re.test(text));
 }
 
-function detectDiagnosis(text: string, exitCode?: number): Diagnosis {
-  if (isImpureHostPath(text, exitCode)) return "impure-host-path";
+function detectDiagnosis(text: string): Diagnosis {
+  if (isImpureHostPath(text)) return "impure-host-path";
   if (SANDBOX_PATTERNS.some((re) => re.test(text))) return "sandbox-denied";
   if (NETWORK_PATTERNS.some((re) => re.test(text))) return "network";
   if (SPACE_PATTERNS.some((re) => re.test(text))) return "out-of-space";
@@ -205,13 +204,16 @@ export function buildExcerpt(rawOutput: string): string | undefined {
  * Classify a failed build's captured output into what the control plane
  * expects on `/api/repro/dispatch-failed`: a diagnosis label, the failing
  * derivation when one can be identified, and a bounded, redacted excerpt.
- * `exitCode` is nix's own exit status, when available, and disambiguates the
- * host-path incident this spec exists for from an ordinary compiler error that
- * happens to mention a `/usr` path.
+ *
+ * The log is the only evidence. Nix reports a build failure as its own exit
+ * code 100 whatever the builder did, so the builder's status is readable only
+ * in the text, and reading a host-path incident out of an exit code would just
+ * be a way to skip the check that keeps an ordinary compiler error mentioning
+ * a `/usr` path from being called impure.
  */
-export function classifyFailure(output: string, exitCode?: number): FailureDiagnosis {
+export function classifyFailure(output: string): FailureDiagnosis {
   const bounded = boundInput(output);
-  const diagnosis = detectDiagnosis(bounded, exitCode);
+  const diagnosis = detectDiagnosis(bounded);
   const drv = extractDrv(bounded);
   const excerpt = buildExcerpt(output);
   const result: FailureDiagnosis = { diagnosis };

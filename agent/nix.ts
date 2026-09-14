@@ -157,6 +157,57 @@ export class NixBuildError extends Error {
   }
 }
 
+/** Where a build's stderr is copied to. Narrower than a full stream so a test
+ * can supply one that reports itself full. */
+interface Sink {
+  write(chunk: Buffer): boolean;
+  once(event: "drain", fn: () => void): unknown;
+}
+
+/**
+ * Copy a build's stderr to `sink` while keeping the tail of it for diagnosis.
+ *
+ * Honours the sink's backpressure: with `stdio: inherit` the child wrote to the
+ * console itself and the kernel slowed it down when the reader could not keep
+ * up. Reading it here puts this process in the middle, so a sink that says it
+ * is full has to stop the build rather than let the unwritten output pile up in
+ * memory, which would be a worse leak than the one the tail bound prevents.
+ */
+export function teeStderr(
+  source: NodeJS.ReadableStream,
+  sink: Sink,
+  maxBytes = MAX_CAPTURED_STDERR,
+): { captured: () => string } {
+  // Held as a list and joined once at the end. Concatenating on every chunk
+  // would copy the whole retained tail per line of output, which on a build
+  // that logs for an hour is most of what the process does.
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  source.on("data", (chunk: Buffer) => {
+    if (!sink.write(chunk)) {
+      source.pause();
+      sink.once("drain", () => source.resume());
+    }
+    chunks.push(chunk);
+    bytes += chunk.length;
+    while (chunks.length > 1 && bytes - chunks[0]!.length >= maxBytes) {
+      bytes -= chunks.shift()!.length;
+    }
+  });
+  return {
+    captured: () => {
+      const all = Buffer.concat(chunks);
+      if (all.length <= maxBytes) return all.toString("utf8");
+      const tail = all.subarray(all.length - maxBytes);
+      // Drop the partial first line. Redaction recognises a credential by its
+      // prefix, so a cut inside one would take the prefix away and leave the
+      // rest of the secret in the excerpt as ordinary-looking text.
+      const boundary = tail.indexOf(0x0a);
+      return (boundary === -1 ? tail : tail.subarray(boundary + 1)).toString("utf8");
+    },
+  };
+}
+
 /**
  * Build an installable, STREAMING nix's build logs to stderr so CI shows live
  * progress (a buffered exec would make a long build look hung). Throws on a
@@ -186,23 +237,7 @@ export function nixBuild(
     const child = spawn("nix", args, {
       stdio: ["ignore", "ignore", "pipe"],
     });
-    // Held as a list and joined once at the end. Concatenating on every chunk
-    // would copy the whole retained tail per line of output, which on a build
-    // that logs for an hour is most of what the process does.
-    const chunks: Buffer[] = [];
-    let capturedBytes = 0;
-    child.stderr.on("data", (chunk: Buffer) => {
-      process.stderr.write(chunk);
-      chunks.push(chunk);
-      capturedBytes += chunk.length;
-      while (chunks.length > 1 && capturedBytes - chunks[0]!.length >= MAX_CAPTURED_STDERR) {
-        capturedBytes -= chunks.shift()!.length;
-      }
-    });
-    const captured = (): string => {
-      const all = Buffer.concat(chunks);
-      return all.subarray(Math.max(0, all.length - MAX_CAPTURED_STDERR)).toString("utf8");
-    };
+    const { captured } = teeStderr(child.stderr, process.stderr);
     // Only arm a timer when a timeout is explicitly configured; otherwise the CI
     // job timeout governs and a long-but-progressing build is never killed.
     const timer =
