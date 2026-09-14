@@ -35,6 +35,10 @@ on:
         description: "Candidate store-path hash, so a FAILED reproduction can be reported against it (optional)"
         required: false
         default: ""
+      attempt:
+        description: "Dispatch attempt id, so a failure report is applied only to the dispatch it answers (optional)"
+        required: false
+        default: ""
       runner:
         description: "Runner to reproduce on"
         required: false
@@ -50,6 +54,7 @@ on:
       expect_store_path: { required: false, type: string, default: "" }
       expect_narhash: { required: false, type: string, default: "" }
       hash: { required: false, type: string, default: "" }
+      attempt: { required: false, type: string, default: "" }
       runner: { required: false, type: string, default: "ubuntu-latest" }
 
 permissions:
@@ -108,7 +113,10 @@ jobs:
         with:
           node-version: "24"
       - name: Install agent deps
-        run: npm ci
+        # No install script, because this job holds the OIDC token that gates
+        # signing. The binary esbuild's script fetches is already an optional
+        # dependency here.
+        run: npm ci --omit=dev --ignore-scripts
       - name: Reproduce and attest
         env:
           # Hardcoded, not an input: the agent must only ever send its OIDC token
@@ -124,4 +132,8 @@ jobs:
           # Without it a failure is anonymous and the queue keeps re-dispatching
           # work that can never succeed.
           VEGA_HASH: ${{ inputs.hash }}
+          # The dispatch this job answers. A failure report carrying it is applied
+          # only to that dispatch, so one arriving after the candidate was
+          # re-dispatched changes nothing.
+          VEGA_ATTEMPT: ${{ inputs.attempt }}
         run: node_modules/.bin/tsx agent/reproduce.ts
