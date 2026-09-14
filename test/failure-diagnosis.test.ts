@@ -9,7 +9,8 @@ const HASH = "0123456789abcdfghijklmnpqrsvwxyz";
 describe("classifyFailure: recognized diagnoses", () => {
   it("labels a host executable outside /nix/store called from a sandboxed build", () => {
     // The incident the spec exists for: nix-update-notifier calling macOS
-    // system tools, sandbox=true, exit 126.
+    // system tools under sandbox=true. 126 is the builder's own status, which
+    // nix reports in the text; nix itself exits 100.
     const output = [
       `building '/nix/store/${HASH}-nix-update-notifier.drv'...`,
       `error: builder for '/nix/store/${HASH}-nix-update-notifier.drv' failed with exit code 126;`,
@@ -17,7 +18,7 @@ describe("classifyFailure: recognized diagnoses", () => {
       "       > /usr/bin/sips: No such file or directory",
       "       > /usr/libexec/PlistBuddy: Permission denied",
     ].join("\n");
-    const r = classifyFailure(output, 126);
+    const r = classifyFailure(output);
     expect(r.diagnosis).toBe("impure-host-path");
     expect(r.drv).toBe(`/nix/store/${HASH}-nix-update-notifier.drv`);
   });

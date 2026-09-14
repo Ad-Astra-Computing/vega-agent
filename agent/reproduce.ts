@@ -139,7 +139,7 @@ async function main(): Promise<void> {
       // so this is best-effort and never blocks the report.
       const diagnosis =
         e instanceof NixBuildError && e.capturedStderr !== ""
-          ? classifyFailure(e.capturedStderr, e.exitCode)
+          ? classifyFailure(e.capturedStderr)
           : undefined;
       const sent = await client.reportReproFailure(candidateHash, reason, diagnosis, attempt);
       console.log(`Reported ${reason} for ${candidateHash}${sent ? "" : " (report failed to send)"}`);
