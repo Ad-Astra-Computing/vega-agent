@@ -38,3 +38,26 @@ describe("classifying why a reproduction failed", () => {
     expect(unresolvableProvenance("error: writing to file: No space left on device")).toBe(false);
   });
 });
+
+describe("the dispatch attempt a failure report carries", () => {
+  it("sends the attempt the dispatch handed out, and omits an empty one", async () => {
+    // The workflow input defaults to the empty string, so a hand-run
+    // reproduction and one dispatched before the input existed both arrive
+    // with nothing. Sending "" would be an id that matches no dispatch, and
+    // the control plane would drop a report that is perfectly good.
+    const { ControlPlaneClient } = await import("../src/agent/client.js");
+    const bodies: string[] = [];
+    const fetchImpl = (async (_u: string, init?: RequestInit) => {
+      bodies.push(String(init?.body ?? ""));
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    const client = new ControlPlaneClient("https://cache.example", {
+      token: async () => "t",
+    } as never, fetchImpl);
+    const id = "1b4e28ba-2fa1-4d3b-a3f5-ccbe1b4e28ba";
+    await client.reportReproFailure("h".repeat(32), "build-failed", undefined, id);
+    await client.reportReproFailure("h".repeat(32), "build-failed", undefined, "");
+    expect(JSON.parse(bodies[0]!).attempt).toBe(id);
+    expect(JSON.parse(bodies[1]!)).not.toHaveProperty("attempt");
+  });
+});

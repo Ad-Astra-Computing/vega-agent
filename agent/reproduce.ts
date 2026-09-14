@@ -112,6 +112,10 @@ async function main(): Promise<void> {
   // dispatcher supplies it; a hand-run reproduction has none, and then a failure
   // is simply not reported rather than reported against the wrong thing.
   const candidateHash = (process.env.VEGA_HASH ?? "").trim();
+  // The dispatch this job answers, echoed back on a failure report so the
+  // control plane applies it only to that dispatch. Empty when the job was
+  // run by hand, or dispatched before the input existed.
+  const attempt = (process.env.VEGA_ATTEMPT ?? "").trim();
   let outputs;
   try {
     await nixBuild(installable);
@@ -137,7 +141,7 @@ async function main(): Promise<void> {
         e instanceof NixBuildError && e.capturedStderr !== ""
           ? classifyFailure(e.capturedStderr, e.exitCode)
           : undefined;
-      const sent = await client.reportReproFailure(candidateHash, reason, diagnosis);
+      const sent = await client.reportReproFailure(candidateHash, reason, diagnosis, attempt);
       console.log(`Reported ${reason} for ${candidateHash}${sent ? "" : " (report failed to send)"}`);
     }
     throw e;

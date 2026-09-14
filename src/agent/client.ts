@@ -540,6 +540,9 @@ export class ControlPlaneClient {
    * Best-effort by design: the job has already failed, and failing to report the
    * failure must not change that outcome or mask the original error.
    *
+   * `attempt` is the dispatch identifier the control plane issued, echoed back
+   * so the report is applied only to the dispatch it answers.
+   *
    * `diagnosis` is the agent's own classification of the failed build's
    * output (see `failure-diagnosis.ts`); every field on it is optional, and a
    * control plane that does not understand them still gets `hash` and
@@ -549,9 +552,17 @@ export class ControlPlaneClient {
     hash: string,
     reason: ReproFailure,
     diagnosis?: FailureDiagnosis,
+    attempt?: string,
   ): Promise<boolean> {
     try {
-      const body: { hash: string; reason: ReproFailure } & Partial<FailureDiagnosis> = { hash, reason };
+      const body: { hash: string; reason: ReproFailure; attempt?: string } & Partial<FailureDiagnosis> = {
+        hash,
+        reason,
+      };
+      // An empty value means this job was not dispatched with one, which is
+      // what a hand-run reproduction looks like. Sending it would be an id
+      // matching no dispatch, and a good report would be dropped for it.
+      if (attempt !== undefined && attempt !== "") body.attempt = attempt;
       if (diagnosis?.drv !== undefined) body.drv = diagnosis.drv;
       if (diagnosis?.diagnosis !== undefined) body.diagnosis = diagnosis.diagnosis;
       if (diagnosis?.excerpt !== undefined) body.excerpt = diagnosis.excerpt;
