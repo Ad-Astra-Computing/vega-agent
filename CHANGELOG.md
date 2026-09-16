@@ -11,12 +11,25 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 ### Fixed
 
 - A failed reproduction reports which derivation failed again. The agent reads
-  that from nix's own failure line, and it recognised only the older wording,
+  that from nix's own failure line and recognised only the older wording,
   `builder for '<drv>' failed`. Nix 2.34 and 3.21, the version the reproducer
   pins, say `Cannot build '<drv>'.` instead, so the field was empty on every real
-  failure and per-derivation grouping had nothing to group by. The newer wording
-  is matched only at the start of an `error:` line, because a build controls its
-  own output and this value is a grouping key.
+  failure and per-derivation grouping had nothing to group by.
+
+### Security
+
+- A failing build can no longer name a different derivation as the one that
+  failed. The older wording was matched anywhere in the captured output, and a
+  build controls what it writes, so printing that phrase against another
+  derivation was enough to be believed. On current nix, where nix itself no
+  longer writes that phrase, every such match would have come from the build.
+  A regular expression returns its earliest match and nix quotes a build's log
+  lines before its own error, so a forged line would have been preferred to the
+  real one.
+
+  Both wordings are now taken only from the start of nix's own `error:` line,
+  which quoted build output cannot begin. This is a grouping key shown to
+  producers in a lane that gates signing, not only a display value.
 
 ## [0.20.0] - 2026-09-14
 
