@@ -205,3 +205,30 @@ describe("bounded parsing", () => {
     expect(Buffer.byteLength(r.excerpt!, "utf8")).toBeLessThanOrEqual(2048);
   });
 });
+
+describe("classifyFailure: the derivation nix names", () => {
+  // Captured from a real reproducer run on the pinned Nix 3.21.0, and the same
+  // wording appears on 2.34. The classifier only accepted the older "builder
+  // for '...' failed", so every real failure reported no derivation at all.
+  const REAL = [
+    "building '/nix/store/" + HASH + "-vega-impure-probe.drv'...",
+    "vega-impure-probe> /build/.attr-0l2: line 2: /usr/bin/sw_vers: No such file or directory",
+    "error: Cannot build '/nix/store/" + HASH + "-vega-impure-probe.drv'.",
+    "       Reason: builder failed with exit code 127.",
+  ].join("\n");
+
+  it("reads the derivation out of nix's own failure line", () => {
+    expect(classifyFailure(REAL).drv).toBe(`/nix/store/${HASH}-vega-impure-probe.drv`);
+  });
+
+  it("still reads the older wording", () => {
+    const old = `error: builder for '/nix/store/${HASH}-x.drv' failed with exit code 1;`;
+    expect(classifyFailure(old).drv).toBe(`/nix/store/${HASH}-x.drv`);
+  });
+
+  it("ignores the line a build printed itself", () => {
+    // A build controls its stderr, and this value becomes a grouping key.
+    const forged = `some-build> Cannot build '/nix/store/${HASH}-not-really.drv'.`;
+    expect(classifyFailure(forged).drv).toBeUndefined();
+  });
+});
