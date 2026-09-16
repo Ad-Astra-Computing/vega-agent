@@ -6,6 +6,18 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-09-16
+
+### Fixed
+
+- A failed reproduction reports which derivation failed again. The agent reads
+  that from nix's own failure line, and it recognised only the older wording,
+  `builder for '<drv>' failed`. Nix 2.34 and 3.21, the version the reproducer
+  pins, say `Cannot build '<drv>'.` instead, so the field was empty on every real
+  failure and per-derivation grouping had nothing to group by. The newer wording
+  is matched only at the start of an `error:` line, because a build controls its
+  own output and this value is a grouping key.
+
 ## [0.20.0] - 2026-09-14
 
 ### Added
