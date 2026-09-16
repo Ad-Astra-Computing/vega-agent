@@ -21,6 +21,9 @@ function isTransient(status: number): boolean {
 
 const ATTEMPTS = 4;
 const BACKOFF_MS = [500, 1000, 2000];
+// Every pipeline worker shares one token service, so a fixed wait sends all of
+// them back at the same instant after a single outage.
+const JITTER = 0.5;
 
 export async function fetchActionsOidcToken(
   env: ActionsOidcEnv,
@@ -28,6 +31,7 @@ export async function fetchActionsOidcToken(
   fetchImpl: typeof fetch = fetch,
   timeoutMs = 60_000,
   sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+  random: () => number = Math.random,
 ): Promise<string> {
   if (!env.requestUrl || !env.requestToken) {
     throw new Error(
@@ -37,8 +41,12 @@ export async function fetchActionsOidcToken(
   const url = new URL(env.requestUrl);
   url.searchParams.set("audience", audience);
   let last: Error | undefined;
+  const seen: string[] = [];
   for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
-    if (attempt > 0) await sleep(BACKOFF_MS[attempt - 1]!);
+    if (attempt > 0) {
+      const base = BACKOFF_MS[attempt - 1]!;
+      await sleep(Math.round(base * (1 - JITTER + 2 * JITTER * random())));
+    }
     let res: Response;
     try {
       // Deadline per attempt: the token service is shared across every pipeline
@@ -54,6 +62,7 @@ export async function fetchActionsOidcToken(
       // re-mints on demand, so giving up here throws away however long the
       // build and upload already took.
       last = e instanceof Error ? e : new Error(String(e));
+      seen.push(last.message);
       continue;
     }
     if (res.ok) {
@@ -64,7 +73,10 @@ export async function fetchActionsOidcToken(
       return value;
     }
     last = new Error(`OIDC token request failed: ${res.status}`);
+    seen.push(String(res.status));
     if (!isTransient(res.status)) throw last;
   }
-  throw last ?? new Error("OIDC token request failed");
+  // Every attempt, not just the last: an outage should read as one failure with
+  // a history rather than a single mysterious status.
+  throw new Error(`OIDC token request failed after ${ATTEMPTS} attempts: ${seen.join(", ")}`);
 }

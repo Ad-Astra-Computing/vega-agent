@@ -901,3 +901,33 @@ describe("fetchActionsOidcToken: a transient failure is not the end of the build
     expect(n).toBe(4);
   });
 });
+
+describe("fetchActionsOidcToken: retries do not move in lockstep", () => {
+  const env = { requestUrl: "https://token.svc/x", requestToken: "t" };
+  const ok = () =>
+    new Response(JSON.stringify({ value: "jwt" }), { status: 200, headers: { "content-type": "application/json" } });
+
+  it("spreads the wait so concurrent jobs do not retry in the same instant", async () => {
+    // Every pipeline worker shares one token service. A fixed backoff means a
+    // single 504 sends all of them back at the same moment.
+    const waits: number[] = [];
+    const sleep = async (ms: number) => void waits.push(ms);
+    const fn = (async () => new Response("", { status: 504 })) as unknown as typeof fetch;
+    await expect(fetchActionsOidcToken(env, "aud", fn, 20, sleep, () => 0)).rejects.toThrow();
+    const low = [...waits];
+    waits.length = 0;
+    await expect(fetchActionsOidcToken(env, "aud", fn, 20, sleep, () => 0.999)).rejects.toThrow();
+    for (let i = 0; i < low.length; i++) expect(waits[i]!).toBeGreaterThan(low[i]!);
+  });
+
+  it("says what it saw on every attempt, not just the last", async () => {
+    // A genuine outage should read as one failure with a history, not as a
+    // single mysterious status.
+    const codes = [504, 502, 500, 503];
+    let n = 0;
+    const fn = (async () => new Response("", { status: codes[n++]! })) as unknown as typeof fetch;
+    await expect(fetchActionsOidcToken(env, "aud", fn, 20, async () => {}, () => 0.5)).rejects.toThrow(
+      /4 attempts.*504.*502.*500.*503/s,
+    );
+  });
+});
