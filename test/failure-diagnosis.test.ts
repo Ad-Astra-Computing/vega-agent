@@ -232,3 +232,54 @@ describe("classifyFailure: the derivation nix names", () => {
     expect(classifyFailure(forged).drv).toBeUndefined();
   });
 });
+
+describe("classifyFailure: a build cannot blame another derivation", () => {
+  const VICTIM = `/nix/store/${HASH}-victim.drv`;
+  const REAL = `/nix/store/${"b".repeat(32)}-real.drv`;
+
+  it("ignores the old wording quoted back inside build output", () => {
+    // Nix prefixes quoted build output with "> " or "<name>> ", so nothing a
+    // build prints can begin a line with error:. The pattern for the old
+    // wording was unanchored and matched this anywhere.
+    const forged = `       > builder for '${VICTIM}' failed with exit code 1;`;
+    expect(classifyFailure(forged).drv).toBeUndefined();
+  });
+
+  it("ignores the new wording quoted back inside build output", () => {
+    expect(classifyFailure(`some-build> error: Cannot build '${VICTIM}'.`).drv).toBeUndefined();
+  });
+
+  it("takes nix's own line even when a forged one comes first", () => {
+    // Nix prints the quoted log lines BEFORE its final error, and a regex
+    // returns the earliest match in the text, so an unanchored alternative
+    // would hand the attacker the answer.
+    const log = [
+      `building '${REAL}'...`,
+      "       Last 2 log lines:",
+      `       > builder for '${VICTIM}' failed with exit code 1;`,
+      `       > build of '${VICTIM}' failed`,
+      `error: Cannot build '${REAL}'.`,
+      "       Reason: builder failed with exit code 127.",
+    ].join("\n");
+    expect(classifyFailure(log).drv).toBe(REAL);
+  });
+});
+
+describe("classifyFailure: only a newline starts nix's line", () => {
+  const VICTIM = `/nix/store/${HASH}-victim.drv`;
+
+  // JavaScript's ^ under the m flag also matches after a carriage return and
+  // the two Unicode line separators, so a builder emitting one mid-line could
+  // begin what looks like nix's own error line inside its own quoted output.
+  it.each([
+    ["carriage return", "\r"],
+    ["line separator", "\u2028"],
+    ["paragraph separator", "\u2029"],
+  ])("ignores a forged line begun with a %s", (_name, sep) => {
+    expect(classifyFailure(`some-build> junk${sep}error: Cannot build '${VICTIM}'.`).drv).toBeUndefined();
+  });
+
+  it("still reads a line that a real newline begins", () => {
+    expect(classifyFailure(`building...\nerror: Cannot build '${VICTIM}'.`).drv).toBe(VICTIM);
+  });
+});

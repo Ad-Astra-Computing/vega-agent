@@ -116,12 +116,18 @@ function detectDiagnosis(text: string): Diagnosis {
   return "other";
 }
 
-// Nix's own base32 store-hash alphabet (matches src/nix/store-path.ts). Nix has
-// worded this failure two ways: older releases say "builder for '<drv>' failed",
-// and 2.34 and 3.21 (the version the reproducer pins) say "Cannot build
-// '<drv>'." on an error: line, which is why the newer wording is anchored there.
-const DRV_ATTRIBUTED =
-  /(?:(?:builder for|build of) '(\/nix\/store\/[0-9abcdfghijklmnpqrsvwxyz]{32}-[^'\n]+\.drv)'|^\s*error: Cannot build '(\/nix\/store\/[0-9abcdfghijklmnpqrsvwxyz]{32}-[^'\n]+\.drv)')/m;
+// Nix's own base32 store-hash alphabet (matches src/nix/store-path.ts). Both of
+// nix's wordings are anchored to the start of its own error: line. This rests on
+// nix quoting build output with a "> " or "<name>> " prefix, so a build can
+// never begin such a line. A log format that dropped that prefix would reopen
+// the forgery, so check this when changing how the reproducer invokes nix.
+const DRV = "(\\/nix\\/store\\/[0-9abcdfghijklmnpqrsvwxyz]{32}-[^'\\n]+\\.drv)";
+// No m flag: its ^ also matches after a carriage return and the two Unicode
+// line separators, any of which a builder can emit mid-line to begin what looks
+// like nix's own error line inside its own quoted output.
+const DRV_ATTRIBUTED = new RegExp(
+  `(?:^|\\n)[ \\t]*error: (?:(?:builder for|build of) '${DRV}'|Cannot build '${DRV}')`,
+);
 
 /**
  * The failing derivation, taken only from nix's own failure line. A build
