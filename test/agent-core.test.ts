@@ -853,3 +853,81 @@ describe("ownRepoSubflakeDir", () => {
     expect(ownRepoSubflakeDir("github:Ad-Astra-Computing/vega-cache-example?dir=%E0%A4%A#x", "/repo", repo)).toBeNull();
   });
 });
+
+describe("fetchActionsOidcToken: a transient failure is not the end of the build", () => {
+  const env = { requestUrl: "https://token.svc/x", requestToken: "t" };
+  const ok = () =>
+    new Response(JSON.stringify({ value: "jwt" }), { status: 200, headers: { "content-type": "application/json" } });
+  const sleep = async () => {};
+
+  it("retries a gateway error and succeeds", async () => {
+    // A publish re-mints on demand, so an hour of uploading died on one 504
+    // from GitHub's own token service.
+    let n = 0;
+    const fn = (async () => (++n < 3 ? new Response("", { status: 504 }) : ok())) as unknown as typeof fetch;
+    expect(await fetchActionsOidcToken(env, "aud", fn, 20, sleep)).toBe("jwt");
+    expect(n).toBe(3);
+  });
+
+  it("retries a request that never answered", async () => {
+    let n = 0;
+    const fn = (async () => {
+      if (++n < 2) throw new Error("terminated");
+      return ok();
+    }) as unknown as typeof fetch;
+    expect(await fetchActionsOidcToken(env, "aud", fn, 20, sleep)).toBe("jwt");
+  });
+
+  it.each([429, 408, 500, 502, 503])("retries %i", async (status) => {
+    let n = 0;
+    const fn = (async () => (++n < 2 ? new Response("", { status }) : ok())) as unknown as typeof fetch;
+    await fetchActionsOidcToken(env, "aud", fn, 20, sleep);
+    expect(n).toBe(2);
+  });
+
+  it.each([401, 403, 404])("does not retry %i", async (status) => {
+    // These say the job lacks id-token: write or is pointed at the wrong
+    // service. Retrying wastes the build's time and hides the real cause.
+    let n = 0;
+    const fn = (async () => (n++, new Response("", { status }))) as unknown as typeof fetch;
+    await expect(fetchActionsOidcToken(env, "aud", fn, 20, sleep)).rejects.toThrow(String(status));
+    expect(n).toBe(1);
+  });
+
+  it("gives up rather than retrying for ever, and says what it saw", async () => {
+    let n = 0;
+    const fn = (async () => (n++, new Response("", { status: 504 }))) as unknown as typeof fetch;
+    await expect(fetchActionsOidcToken(env, "aud", fn, 20, sleep)).rejects.toThrow(/504/);
+    expect(n).toBe(4);
+  });
+});
+
+describe("fetchActionsOidcToken: retries do not move in lockstep", () => {
+  const env = { requestUrl: "https://token.svc/x", requestToken: "t" };
+  const ok = () =>
+    new Response(JSON.stringify({ value: "jwt" }), { status: 200, headers: { "content-type": "application/json" } });
+
+  it("spreads the wait so concurrent jobs do not retry in the same instant", async () => {
+    // Every pipeline worker shares one token service. A fixed backoff means a
+    // single 504 sends all of them back at the same moment.
+    const waits: number[] = [];
+    const sleep = async (ms: number) => void waits.push(ms);
+    const fn = (async () => new Response("", { status: 504 })) as unknown as typeof fetch;
+    await expect(fetchActionsOidcToken(env, "aud", fn, 20, sleep, () => 0)).rejects.toThrow();
+    const low = [...waits];
+    waits.length = 0;
+    await expect(fetchActionsOidcToken(env, "aud", fn, 20, sleep, () => 0.999)).rejects.toThrow();
+    for (let i = 0; i < low.length; i++) expect(waits[i]!).toBeGreaterThan(low[i]!);
+  });
+
+  it("says what it saw on every attempt, not just the last", async () => {
+    // A genuine outage should read as one failure with a history, not as a
+    // single mysterious status.
+    const codes = [504, 502, 500, 503];
+    let n = 0;
+    const fn = (async () => new Response("", { status: codes[n++]! })) as unknown as typeof fetch;
+    await expect(fetchActionsOidcToken(env, "aud", fn, 20, async () => {}, () => 0.5)).rejects.toThrow(
+      /4 attempts.*504.*502.*500.*503/s,
+    );
+  });
+});
