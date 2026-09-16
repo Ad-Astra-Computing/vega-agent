@@ -116,8 +116,12 @@ function detectDiagnosis(text: string): Diagnosis {
   return "other";
 }
 
-// Nix's own base32 store-hash alphabet (matches src/nix/store-path.ts).
-const DRV_ATTRIBUTED = /(?:builder for|build of) '(\/nix\/store\/[0-9abcdfghijklmnpqrsvwxyz]{32}-[^'\n]+\.drv)'/;
+// Nix's own base32 store-hash alphabet (matches src/nix/store-path.ts). Nix has
+// worded this failure two ways: older releases say "builder for '<drv>' failed",
+// and 2.34 and 3.21 (the version the reproducer pins) say "Cannot build
+// '<drv>'." on an error: line, which is why the newer wording is anchored there.
+const DRV_ATTRIBUTED =
+  /(?:(?:builder for|build of) '(\/nix\/store\/[0-9abcdfghijklmnpqrsvwxyz]{32}-[^'\n]+\.drv)'|^\s*error: Cannot build '(\/nix\/store\/[0-9abcdfghijklmnpqrsvwxyz]{32}-[^'\n]+\.drv)')/m;
 
 /**
  * The failing derivation, taken only from nix's own failure line. A build
@@ -126,7 +130,8 @@ const DRV_ATTRIBUTED = /(?:builder for|build of) '(\/nix\/store\/[0-9abcdfghijkl
  * is left out.
  */
 function extractDrv(text: string): string | undefined {
-  return DRV_ATTRIBUTED.exec(text)?.[1];
+  const m = DRV_ATTRIBUTED.exec(text);
+  return m === null ? undefined : (m[1] ?? m[2]);
 }
 
 const EXCERPT_MAX_BYTES = 2048;
