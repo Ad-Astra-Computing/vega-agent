@@ -83,7 +83,7 @@ jobs:
           RUNNER_INPUT: ${{ inputs.runner }}
         run: |
           case "$RUNNER_INPUT" in
-            ubuntu-latest|ubuntu-24.04|ubuntu-22.04|macos-latest|macos-15|macos-14|macos-13) ;;
+            ubuntu-latest|ubuntu-24.04|ubuntu-22.04|macos-latest|macos-15|macos-13) ;;
             *) echo "refusing to reproduce on non-allowlisted runner '$RUNNER_INPUT'" >&2; exit 1 ;;
           esac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
