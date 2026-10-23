@@ -20,6 +20,12 @@ describe("VERSION", () => {
     const m = /pname = "vega-agent";\s*\n\s*version = "([^"]+)"/.exec(flake);
     expect(m?.[1]).toBe(VERSION);
   });
+
+  it("matches the example flake pin in the README, so a copy-pasted input never points at a stale release", () => {
+    const readme = readFileSync(join(root, "README.md"), "utf8");
+    const m = /inputs\.vega\.url = "github:Ad-Astra-Computing\/vega-agent\/v([^"]+)"/.exec(readme);
+    expect(m?.[1]).toBe(VERSION);
+  });
 });
 
 describe("compareVersions", () => {
