@@ -2,11 +2,12 @@ import type { Command } from "commander";
 import pc from "picocolors";
 import { loadCredentialMaybe, DEFAULT_CONTROL_PLANE } from "../context.js";
 import { star, info, keyValues, jsonEvent } from "../ui.js";
+import { fetchUncompressed } from "../../src/http/no-compression.js";
 
 async function reachable(url: string): Promise<{ ok: boolean; ms: number }> {
   const t0 = Date.now();
   try {
-    const res = await fetch(`${url}/nix-cache-info`, { method: "GET" });
+    const res = await fetchUncompressed(`${url}/nix-cache-info`, { method: "GET" });
     return { ok: res.ok, ms: Date.now() - t0 };
   } catch {
     return { ok: false, ms: Date.now() - t0 };

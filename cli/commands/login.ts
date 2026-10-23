@@ -7,6 +7,7 @@ import {
 } from "../../src/agent/device-flow.js";
 import { controlPlaneFor, saveCredential, credentialPath, safeError } from "../context.js";
 import { success, info, keyValues, fail } from "../ui.js";
+import { fetchUncompressed } from "../../src/http/no-compression.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -43,7 +44,7 @@ export function registerLogin(program: Command): void {
       }
       if (ghToken === undefined) fail("device code expired before authorization.", ["vega login"]);
 
-      const res = await fetch(`${url}/api/owner/enroll`, {
+      const res = await fetchUncompressed(`${url}/api/owner/enroll`, {
         method: "POST",
         headers: { authorization: `Bearer ${ghToken}` },
       });

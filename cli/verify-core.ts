@@ -53,6 +53,11 @@ export function withRetry(
         }
         return res;
       } catch (e) {
+        // A compressed response (CVE-2026-111497) is a deliberate refusal, not
+        // a transient failure: this stays a name check, not an import, so this
+        // module keeps no dependency on the Node-only mitigation that throws
+        // it.
+        if (e instanceof Error && e.name === "CompressedResponseError") throw e;
         lastErr = e;
         if (i >= tries - 1) throw e;
         await sleep(baseMs * 2 ** i);

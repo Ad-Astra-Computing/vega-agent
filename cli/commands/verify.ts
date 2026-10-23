@@ -7,6 +7,7 @@ import { parseNarInfo } from "../../src/nix/narinfo.js";
 import { checkNarHash } from "../nar-check.js";
 import type { NixPublicKey } from "../../src/nix/types.js";
 import { trustedKeys, pickTrustedKey } from "../keys.js";
+import { fetchUncompressed } from "../../src/http/no-compression.js";
 import { verifyBuild, fullyVerified, withRetry, type Fetcher, type VerifyResult } from "../verify-core.js";
 import { boundedFetcher, revocationAuthority } from "../mcp/runtime.js";
 
@@ -58,7 +59,7 @@ export async function discoverTenant(
 ): Promise<{ url: string; narText: string } | null> {
   let tenants: string[];
   try {
-    const sres = await fetch(`${baseUrl}/api/status/${hash}`);
+    const sres = await fetchUncompressed(`${baseUrl}/api/status/${hash}`);
     if (!sres.ok) return null;
     const body = (await sres.json()) as { tenants?: unknown };
     tenants = Array.isArray(body.tenants)
@@ -79,7 +80,7 @@ export async function discoverTenant(
     );
   }
   const url = `${baseUrl}/tenant/${tenants[0]}`;
-  const nres = await fetch(`${url}/${hash}.narinfo`);
+  const nres = await fetchUncompressed(`${url}/${hash}.narinfo`);
   if (!nres.ok) return null;
   return { url, narText: await nres.text() };
 }
@@ -106,7 +107,7 @@ async function resolveKey(cacheUrl: string, sigNames: string[], flag?: string): 
   // verified independently of this key.
   if (isTenantScope(cacheUrl)) {
     try {
-      const res = await fetch(`${cacheUrl}/key`);
+      const res = await fetchUncompressed(`${cacheUrl}/key`);
       if (res.ok) {
         const { publicKey } = (await res.json()) as { publicKey?: unknown };
         if (typeof publicKey === "string") {
@@ -232,7 +233,7 @@ export function registerVerify(program: Command): void {
         // signature + log verification, and the NAR re-derivation, so a cache
         // cannot serve one narinfo to be verified and another to be hashed.
         let narText: string;
-        const res = await fetch(`${cacheUrl}/${hash}.narinfo`);
+        const res = await fetchUncompressed(`${cacheUrl}/${hash}.narinfo`);
         if (res.ok) {
           narText = await res.text();
         } else if (res.status === 404 && !isTenantScope(cacheUrl)) {
@@ -278,7 +279,7 @@ export function registerVerify(program: Command): void {
         });
 
         const nar = opts.nar
-          ? await checkNarHash((p) => fetch(`${cacheUrl}${p}`, { signal: AbortSignal.timeout(60_000) }), narInfo)
+          ? await checkNarHash((p) => fetchUncompressed(`${cacheUrl}${p}`, { signal: AbortSignal.timeout(60_000) }), narInfo)
           : null;
 
         const sig = result.signature;

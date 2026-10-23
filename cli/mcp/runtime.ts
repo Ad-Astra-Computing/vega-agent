@@ -6,6 +6,7 @@
  */
 
 import { parsePublicKey } from "../../src/nix/signing.js";
+import { fetchUncompressed } from "../../src/http/no-compression.js";
 import { trustedKeys, pickTrustedKey } from "../keys.js";
 import { withRetry, type Fetcher, type RevocationAuthority } from "../verify-core.js";
 import { checkNarHash } from "../nar-check.js";
@@ -38,7 +39,7 @@ export function revocationAuthority(cacheUrl: string, sharedKey: NixPublicKey | 
  * out a stalled response so a single call cannot hang. */
 export function boundedFetcher(base: string, maxBytes: number): Fetcher {
   return async (path) => {
-    const res = await fetch(`${base}${path}`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    const res = await fetchUncompressed(`${base}${path}`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     let body: string | null = null;
     const read = async (): Promise<string> => {
       if (body !== null) return body;
@@ -98,7 +99,7 @@ export function buildToolContext(
     // its wall-clock budget).
     verifyNar: (info, opts) =>
       checkNarHash(
-        (p) => fetch(`${cacheUrl}${p}`, { signal: AbortSignal.timeout(opts?.timeoutMs ?? NAR_TIMEOUT_MS) }),
+        (p) => fetchUncompressed(`${cacheUrl}${p}`, { signal: AbortSignal.timeout(opts?.timeoutMs ?? NAR_TIMEOUT_MS) }),
         info,
       ),
   };

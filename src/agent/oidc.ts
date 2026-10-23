@@ -4,6 +4,8 @@
  * exposes `ACTIONS_ID_TOKEN_REQUEST_URL` and `ACTIONS_ID_TOKEN_REQUEST_TOKEN`.
  * We exchange them for a JWT scoped to `audience` (the vega control plane).
  */
+import { fetchUncompressed } from "../http/no-compression.js";
+
 export interface ActionsOidcEnv {
   requestUrl?: string;
   requestToken?: string;
@@ -28,7 +30,7 @@ const JITTER = 0.5;
 export async function fetchActionsOidcToken(
   env: ActionsOidcEnv,
   audience: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = fetchUncompressed,
   timeoutMs = 60_000,
   sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
   random: () => number = Math.random,
@@ -58,6 +60,10 @@ export async function fetchActionsOidcToken(
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (e) {
+      // A compressed response (CVE-2026-111497) is a deliberate refusal, not a
+      // dropped connection: retrying asks the same hostile or misconfigured
+      // endpoint the same question and gets the same answer every time.
+      if (e instanceof Error && e.name === "CompressedResponseError") throw e;
       // No answer at all: a dropped connection or the deadline above. A publish
       // re-mints on demand, so giving up here throws away however long the
       // build and upload already took.

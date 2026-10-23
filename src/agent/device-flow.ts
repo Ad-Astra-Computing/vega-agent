@@ -7,6 +7,7 @@
  * and the CLI exchanges the device code for a short-lived GitHub user token,
  * which it sends once to Vega's enrollment endpoint (it is never stored).
  */
+import { fetchUncompressed } from "../http/no-compression.js";
 
 /** The Vega Cache GitHub App client ID (public). */
 export const VEGA_GITHUB_CLIENT_ID = "Iv23liYWrhwLxxmY8iK3";
@@ -28,7 +29,7 @@ export interface DeviceCode {
 /** Start the device flow; returns the code and URL to show the user. */
 export async function requestDeviceCode(
   clientId: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = fetchUncompressed,
 ): Promise<DeviceCode> {
   const res = await fetchImpl(DEVICE_CODE_URL, {
     method: "POST",
@@ -62,7 +63,7 @@ export type PollResult =
 export async function pollAccessToken(
   clientId: string,
   deviceCode: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = fetchUncompressed,
 ): Promise<PollResult> {
   const res = await fetchImpl(ACCESS_TOKEN_URL, {
     method: "POST",

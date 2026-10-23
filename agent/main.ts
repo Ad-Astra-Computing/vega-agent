@@ -23,6 +23,7 @@ import { narObjectExists } from "../src/agent/upstream.js";
 import { mapConcurrent } from "../src/agent/concurrency.js";
 import { tenantSubstituter, hostConfigBlock, isNixPublicKey } from "../src/agent/substituter.js";
 import { parseVegaConfig, type VegaConfig } from "../src/agent/config.js";
+import { fetchUncompressed } from "../src/http/no-compression.js";
 import { resolveBuilds, ownRepoSubflakeDir } from "../src/agent/builds.js";
 import { scanStorePath, redactKnownSecrets } from "../src/agent/secret-scan.js";
 import { workflowWarning } from "../src/agent/gha.js";
@@ -333,7 +334,7 @@ async function main(): Promise<void> {
       const { url, keyUrl } = tenantSubstituter(controlPlane, repository);
       // Deadline: this runs at startup, before the pipeline watchdog exists;
       // best-effort must mean a bounded wait, not a possible silent hang.
-      const res = await fetch(keyUrl, { signal: AbortSignal.timeout(15_000) });
+      const res = await fetchUncompressed(keyUrl, { signal: AbortSignal.timeout(15_000) });
       if (res.ok) {
         const { publicKey } = (await res.json()) as { publicKey?: string };
         if (typeof publicKey === "string" && publicKey !== "") {
@@ -391,7 +392,7 @@ async function main(): Promise<void> {
   if (repository) {
     try {
       const { url, keyUrl } = tenantSubstituter(controlPlane, repository);
-      const res = await fetch(keyUrl, { signal: AbortSignal.timeout(15_000) });
+      const res = await fetchUncompressed(keyUrl, { signal: AbortSignal.timeout(15_000) });
       if (res.ok) {
         const { publicKey } = (await res.json()) as { publicKey?: string };
         // Shape-checked before printing: this string ends up pasted into host

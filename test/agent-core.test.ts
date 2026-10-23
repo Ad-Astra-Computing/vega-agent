@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { writeFile, rm } from "node:fs/promises";
 import { openAsBlob } from "node:fs";
 import { createServer } from "node:http";
@@ -6,6 +6,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fetchActionsOidcToken } from "../src/agent/oidc.js";
+import { CompressedResponseError } from "../src/http/no-compression.js";
 import { ControlPlaneClient } from "../src/agent/client.js";
 import { sha256NixBase32, sha256NixHashToBase64 } from "../src/nix/hash.js";
 import { buildAttestBody } from "../src/agent/narinfo.js";
@@ -56,6 +57,26 @@ describe("fetchActionsOidcToken", () => {
     await expect(
       fetchActionsOidcToken({}, "https://api.vega.io", fn),
     ).rejects.toThrow(/id-token|ACTIONS_ID_TOKEN/i);
+  });
+
+  it("does not spend the retry budget on a CompressedResponseError", async () => {
+    // CVE-2026-111497: a compressed response is a deliberate refusal, not a
+    // dropped connection, so retrying it (up to 3 backoff sleeps, 500ms+ each)
+    // would turn a hostile token service into a multi-second hang for no
+    // better odds of succeeding.
+    const err = new CompressedResponseError("refusing a response compressed as 'br'");
+    const fn = (() => Promise.reject(err)) as unknown as typeof fetch;
+    const sleep = vi.fn(() => Promise.resolve());
+    await expect(
+      fetchActionsOidcToken(
+        { requestUrl: "https://token.svc/x", requestToken: "t" },
+        "aud",
+        fn,
+        20_000,
+        sleep,
+      ),
+    ).rejects.toBe(err);
+    expect(sleep).not.toHaveBeenCalled();
   });
 });
 
