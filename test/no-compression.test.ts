@@ -143,4 +143,15 @@ describe("the cache-facing fetchers refuse a compressed response", () => {
     const client = new ControlPlaneClient(origin, "jwt");
     await expect(client.uploadUrl("nar/x", "sha256:y")).rejects.toThrow(/CVE-2026-111497/);
   });
+
+  it("ControlPlaneClient does not retry the refusal, the way it retries a real network failure", async () => {
+    // A thrown error from fetchImpl is otherwise treated as a transient
+    // failure and retried with backoff (5 attempts, 500ms+), so a refusal
+    // that reused a plain Error would turn every call against a hostile or
+    // misconfigured endpoint into a multi-second hang instead of a fast fail.
+    const client = new ControlPlaneClient(origin, "jwt");
+    const started = Date.now();
+    await expect(client.uploadUrl("nar/x", "sha256:y")).rejects.toThrow(/CVE-2026-111497/);
+    expect(Date.now() - started).toBeLessThan(400);
+  });
 });

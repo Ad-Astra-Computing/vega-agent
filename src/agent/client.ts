@@ -2,7 +2,7 @@ import { openAsBlob } from "node:fs";
 import { envSeconds } from "./env.js";
 import type { PromotionDecision } from "../trust/policy.js";
 import type { FailureDiagnosis } from "./failure-diagnosis.js";
-import { fetchUncompressed } from "../http/no-compression.js";
+import { fetchUncompressed, CompressedResponseError } from "../http/no-compression.js";
 
 /** Attest request body — the narinfo fields the runner claims for an output. */
 export interface AttestBody {
@@ -404,6 +404,11 @@ export class ControlPlaneClient {
       try {
         res = await this.fetchImpl(url, prepared.init);
       } catch (e) {
+        // A compressed response is a deliberate refusal (CVE-2026-111497),
+        // not a network condition a retry could fix: rethrow immediately
+        // rather than spending the whole backoff budget on a hostile or
+        // misconfigured endpoint that will answer the same way every time.
+        if (e instanceof CompressedResponseError) throw e;
         // Network-level failure OR the per-attempt deadline: retry if budget
         // remains. Label a deadline abort explicitly, so an exhausted budget
         // reports "timed out", not an opaque AbortError.
@@ -423,6 +428,7 @@ export class ControlPlaneClient {
           try {
             return await consume(res);
           } catch (e) {
+            if (e instanceof CompressedResponseError) throw e;
             lastErr = this.labelTimeout(e, label, timeoutMs);
             if (attempt < this.retry.attempts) await this.backoff(attempt, null);
             continue;

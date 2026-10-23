@@ -60,6 +60,10 @@ export async function fetchActionsOidcToken(
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (e) {
+      // A compressed response (CVE-2026-111497) is a deliberate refusal, not a
+      // dropped connection: retrying asks the same hostile or misconfigured
+      // endpoint the same question and gets the same answer every time.
+      if (e instanceof Error && e.name === "CompressedResponseError") throw e;
       // No answer at all: a dropped connection or the deadline above. A publish
       // re-mints on demand, so giving up here throws away however long the
       // build and upload already took.

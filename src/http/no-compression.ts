@@ -1,3 +1,14 @@
+/** A deliberate refusal, not a network condition: a caller that retries this
+ * on a timer (ControlPlaneClient's fetchImpl is exactly such a caller) must
+ * recognize it and fail fast instead, or a hostile endpoint turns every call
+ * against it into a multi-second hang for no better odds of succeeding. */
+export class CompressedResponseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CompressedResponseError";
+  }
+}
+
 /** Mitigates CVE-2026-111497 (Brotli decoder RCE) until nixpkgs ships a patched
  * Node. Requesting `identity` is only a hint a hostile server can ignore, so
  * this checks the response's Content-Encoding and refuses the body outright
@@ -13,7 +24,7 @@ export async function fetchUncompressed(input: RequestInfo | URL, init: RequestI
   if (enc !== null && enc.toLowerCase() !== "identity") {
     // Drain and discard rather than read: do not hand the body to any decoder.
     await res.body?.cancel();
-    throw new Error(
+    throw new CompressedResponseError(
       `refusing a response compressed as '${enc}': the body is never decoded locally (CVE-2026-111497)`,
     );
   }
