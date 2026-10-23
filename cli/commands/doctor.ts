@@ -6,6 +6,7 @@ import { loadCredentialMaybe, DEFAULT_CONTROL_PLANE } from "../context.js";
 import { star, info, jsonEvent } from "../ui.js";
 import { VERSION, AGENT_REPO, compareVersions } from "../version.js";
 import { findSubstituterMismatch, tenantKeyNames } from "../../src/agent/substituter.js";
+import { fetchUncompressed } from "../../src/http/no-compression.js";
 
 const exec = promisify(execFile);
 
@@ -72,7 +73,7 @@ export async function runChecks(): Promise<Check[]> {
       // Bounded like the other two probes. Unbounded, this hangs for undici's
     // default against a blackholed host, which is precisely the case where
     // somebody is trying to run `vega report` about that host.
-    connOk = (await fetch(`${url}/nix-cache-info`, { signal: AbortSignal.timeout(5000) })).ok;
+    connOk = (await fetchUncompressed(`${url}/nix-cache-info`, { signal: AbortSignal.timeout(5000) })).ok;
     } catch {
       connOk = false;
     }
@@ -123,7 +124,7 @@ export async function runChecks(): Promise<Check[]> {
     // the running version to the latest published agent release. A network
     // hiccup or no-releases-yet is informational, not a failure.
     try {
-      const res = await fetch(`https://api.github.com/repos/${AGENT_REPO}/releases/latest`, {
+      const res = await fetchUncompressed(`https://api.github.com/repos/${AGENT_REPO}/releases/latest`, {
         headers: { accept: "application/vnd.github+json" },
         signal: AbortSignal.timeout(4000),
       });

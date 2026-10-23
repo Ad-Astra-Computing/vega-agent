@@ -12,6 +12,7 @@ import { createZstdDecompress } from "node:zlib";
 import { Readable, compose } from "node:stream";
 import { parseNarInfo } from "../src/nix/narinfo.js";
 import { verifyNarHash } from "../src/nix/verify.js";
+import { fetchUncompressed } from "../src/http/no-compression.js";
 
 async function main(): Promise<void> {
   const base = process.argv[2];
@@ -22,11 +23,11 @@ async function main(): Promise<void> {
   }
   const baseUrl = base.endsWith("/") ? base : `${base}/`;
 
-  const narinfoRes = await fetch(`${baseUrl}${hash}.narinfo`);
+  const narinfoRes = await fetchUncompressed(`${baseUrl}${hash}.narinfo`);
   if (!narinfoRes.ok) throw new Error(`narinfo fetch failed: ${narinfoRes.status}`);
   const info = parseNarInfo(await narinfoRes.text());
 
-  const narRes = await fetch(`${baseUrl}${info.url}`);
+  const narRes = await fetchUncompressed(`${baseUrl}${info.url}`);
   if (!narRes.ok || narRes.body === null) {
     throw new Error(`NAR fetch failed: ${narRes.status}`);
   }

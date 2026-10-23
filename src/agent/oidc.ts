@@ -4,6 +4,8 @@
  * exposes `ACTIONS_ID_TOKEN_REQUEST_URL` and `ACTIONS_ID_TOKEN_REQUEST_TOKEN`.
  * We exchange them for a JWT scoped to `audience` (the vega control plane).
  */
+import { fetchUncompressed } from "../http/no-compression.js";
+
 export interface ActionsOidcEnv {
   requestUrl?: string;
   requestToken?: string;
@@ -28,7 +30,7 @@ const JITTER = 0.5;
 export async function fetchActionsOidcToken(
   env: ActionsOidcEnv,
   audience: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = fetchUncompressed,
   timeoutMs = 60_000,
   sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
   random: () => number = Math.random,

@@ -8,6 +8,7 @@ import { hostConfigBlock, isNixPublicKey, isSubstituterPath } from "../../src/ag
 import { buildAttestBody } from "../../src/agent/narinfo.js";
 import { partitionByUpstream } from "../../src/agent/upstream.js";
 import { mapConcurrent } from "../../src/agent/concurrency.js";
+import { fetchUncompressed } from "../../src/http/no-compression.js";
 import { sha256NixHashToBase64 } from "../../src/nix/hash.js";
 import { nixBuild, pathInfoClosure, makeNar } from "../../agent/nix.js";
 import { requireCredential } from "../context.js";
@@ -116,7 +117,7 @@ export function registerPush(program: Command): void {
           if (last !== undefined && isSubstituterPath(last.substituter)) {
             try {
               const base = cred.url.replace(/\/$/, "");
-              const res = await fetch(`${base}${last.substituter}/key`, { signal: AbortSignal.timeout(5000) });
+              const res = await fetchUncompressed(`${base}${last.substituter}/key`, { signal: AbortSignal.timeout(5000) });
               if (res.ok) {
                 const { publicKey } = (await res.json()) as { publicKey?: string };
                 if (typeof publicKey === "string" && isNixPublicKey(publicKey)) {

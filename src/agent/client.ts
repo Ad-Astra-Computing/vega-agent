@@ -2,6 +2,7 @@ import { openAsBlob } from "node:fs";
 import { envSeconds } from "./env.js";
 import type { PromotionDecision } from "../trust/policy.js";
 import type { FailureDiagnosis } from "./failure-diagnosis.js";
+import { fetchUncompressed } from "../http/no-compression.js";
 
 /** Attest request body — the narinfo fields the runner claims for an output. */
 export interface AttestBody {
@@ -224,7 +225,7 @@ export class ControlPlaneClient {
   constructor(
     baseUrl: string,
     token: TokenSource,
-    fetchImpl: typeof fetch = fetch,
+    fetchImpl: typeof fetch = fetchUncompressed,
     retry: Partial<RetryOptions> = {},
   ) {
     this.baseUrl = baseUrl;

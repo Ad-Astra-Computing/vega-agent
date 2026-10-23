@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import pc from "picocolors";
 import { authHeaders, loadCredentialMaybe, safeError, type StoredCredential } from "../context.js";
 import { star, info, warn, jsonEvent } from "../ui.js";
+import { fetchUncompressed } from "../../src/http/no-compression.js";
 
 /** Exit codes for `vega diagnose`. Blocking-present-under-the-flag and an
  * auth/transport failure must never share a code, so a CI job can tell "the
@@ -142,7 +143,7 @@ export function registerDiagnose(program: Command): void {
     .option("--fail-on-blocking", "exit 1 when at least one blocking derivation is found")
     .action(async (opts: { json?: boolean; failOnBlocking?: boolean }) => {
       const cred = await loadCredentialMaybe();
-      const result = await fetchBlockingGroups(cred, fetch);
+      const result = await fetchBlockingGroups(cred, fetchUncompressed);
       if (!result.ok) {
         process.stderr.write(`${pc.red("error")}: ${result.message}\n`);
         if (cred === null) process.stderr.write(`\nTry:\n  ${pc.cyan("vega login")}\n`);

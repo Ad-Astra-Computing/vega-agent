@@ -1,4 +1,5 @@
 import { storePathHash } from "../nix/store-path.js";
+import { fetchUncompressed } from "../http/no-compression.js";
 
 /** Per-path upstream probe timeout; a slow upstream classifies as novel, not a stall. */
 const PROBE_TIMEOUT_MS = 15_000;
@@ -16,7 +17,7 @@ const PROBE_TIMEOUT_MS = 15_000;
 export async function partitionByUpstream(
   paths: readonly string[],
   upstreamUrl: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = fetchUncompressed,
   concurrency = 64,
 ): Promise<{ novel: string[]; upstream: string[] }> {
   const base = upstreamUrl.replace(/\/$/, "");
@@ -77,7 +78,7 @@ export async function partitionByUpstream(
 export async function narObjectExists(
   readBase: string,
   narUrl: string,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = fetchUncompressed,
 ): Promise<boolean> {
   const base = readBase.replace(/\/$/, "");
   try {

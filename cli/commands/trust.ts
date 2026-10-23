@@ -3,6 +3,7 @@ import { createInterface } from "node:readline/promises";
 import pc from "picocolors";
 import { requireCredential, authHeaders, safeError, type StoredCredential } from "../context.js";
 import { star, info, success, fail, jsonEvent, isTTY } from "../ui.js";
+import { fetchUncompressed } from "../../src/http/no-compression.js";
 
 type Scope =
   | { kind: "all" }
@@ -19,7 +20,7 @@ interface ScopeOpts {
 /** Resolve a GitHub login to its immutable numeric id; pass a numeric id through. */
 async function resolveBuilder(subject: string): Promise<string> {
   if (/^[0-9]+$/.test(subject)) return subject;
-  const res = await fetch(`https://api.github.com/users/${encodeURIComponent(subject)}`, {
+  const res = await fetchUncompressed(`https://api.github.com/users/${encodeURIComponent(subject)}`, {
     headers: { "user-agent": "vega-cli", accept: "application/vnd.github+json" },
   });
   if (!res.ok) fail(`could not resolve GitHub user '${subject}': ${res.status}`);
@@ -77,7 +78,7 @@ async function postTrust(
   scope: Scope,
   acceptUnreproducible = false,
 ): Promise<void> {
-  const res = await fetch(`${cred.url}${path}`, {
+  const res = await fetchUncompressed(`${cred.url}${path}`, {
     method: "POST",
     headers: authHeaders(cred),
     body: JSON.stringify(acceptUnreproducible ? { builder, scope, acceptUnreproducible } : { builder, scope }),
@@ -145,7 +146,7 @@ export function registerTrust(program: Command): void {
     .option("--json", "output JSON")
     .action(async (opts: { json?: boolean }) => {
       const cred = await requireCredential();
-      const res = await fetch(`${cred.url}/api/trust`, { headers: authHeaders(cred) });
+      const res = await fetchUncompressed(`${cred.url}/api/trust`, { headers: authHeaders(cred) });
       if (!res.ok) fail(`list failed (${await safeError(res)})`);
       const { edges } = (await res.json()) as {
         edges: { builder: string; scope: Scope; revokedAt?: number }[];

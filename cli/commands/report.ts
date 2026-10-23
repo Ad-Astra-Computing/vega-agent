@@ -5,6 +5,7 @@ import { loadCredentialMaybe, DEFAULT_CONTROL_PLANE } from "../context.js";
 import { star, info } from "../ui.js";
 import { VERSION, AGENT_REPO } from "../version.js";
 import { REPRO_STATUSES } from "../mcp/tools.js";
+import { fetchUncompressed } from "../../src/http/no-compression.js";
 
 /** The verdicts the control plane answers with. One list, shared, because the
  * copy this replaced named a verdict the server never sends ("reproduced") and
@@ -127,7 +128,7 @@ export function registerReport(program: Command): void {
         // The public verdict, which is what the reader would see on the status
         // page anyway. A failure here is not worth stopping for.
         try {
-          const res = await fetch(`${controlPlane}/api/status/${h}`, { signal: AbortSignal.timeout(5000) });
+          const res = await fetchUncompressed(`${controlPlane}/api/status/${h}`, { signal: AbortSignal.timeout(5000) });
           if (res.ok) {
             // Only a verdict this CLI knows. The control plane is named by the
             // stored credential, so a tampered file or a hostile server could

@@ -1,4 +1,5 @@
 import { partitionByUpstream } from "./upstream.js";
+import { fetchUncompressed } from "../http/no-compression.js";
 
 /** A closure entry, as much of it as planning needs. */
 export interface PlanEntry {
@@ -106,7 +107,7 @@ export function storePathName(path: string): string {
 export async function planUploads(
   closure: readonly PlanEntry[],
   opts: { upstreamUrl?: string; exclude?: readonly string[]; maxNarBytes?: number },
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch = fetchUncompressed,
 ): Promise<UploadPlan> {
   const patterns = (opts.exclude ?? []).filter((p) => p.trim() !== "");
   const cap = opts.maxNarBytes !== undefined && opts.maxNarBytes > 0 ? opts.maxNarBytes : undefined;

@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { platform } from "node:os";
 import { requireCredential, authHeaders, safeError } from "../context.js";
 import { star, info, fail } from "../ui.js";
+import { fetchUncompressed } from "../../src/http/no-compression.js";
 
 /** Open a URL in the platform browser via execFile, so the URL is passed as a
  * single argument and never through a shell on any platform: `open` on macOS,
@@ -34,7 +35,7 @@ export function registerDashboard(program: Command): void {
       const cred = await requireCredential();
       // Exchange the long-lived owner credential for a short-lived login code; the
       // credential never leaves the CLI, only the 60s code rides the URL.
-      const res = await fetch(`${cred.url}/owner/session-code`, {
+      const res = await fetchUncompressed(`${cred.url}/owner/session-code`, {
         method: "POST",
         headers: authHeaders(cred),
       });

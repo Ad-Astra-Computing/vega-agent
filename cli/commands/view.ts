@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import pc from "picocolors";
 import { requireCredential, authHeaders, safeError } from "../context.js";
 import { star, info, fail, jsonEvent } from "../ui.js";
+import { fetchUncompressed } from "../../src/http/no-compression.js";
 
 interface ViewToken {
   token: string;
@@ -37,7 +38,7 @@ export function registerView(program: Command): void {
     .option("--format <fmt>", "nix-conf | json", "nix-conf")
     .action(async (opts: { format: string }) => {
       const cred = await requireCredential();
-      const res = await fetch(`${cred.url}/api/view/token`, {
+      const res = await fetchUncompressed(`${cred.url}/api/view/token`, {
         method: "POST",
         headers: authHeaders(cred),
       });
