@@ -6,6 +6,18 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.20.2] - 2026-10-23
+
+### Security
+
+- Mitigated the Brotli decoder out-of-bounds write (CVE-2026-111497) ahead of
+  a patched Node release. `fetch()` decompresses a response based on its own
+  `Content-Encoding` header, including Brotli, regardless of what was
+  requested, so every cache, upstream, device-flow, OIDC and control-plane
+  fetch now refuses a response that declares a non-identity encoding before
+  reading its body. A deliberate refusal is no longer retried as a dropped
+  connection.
+
 ## [0.20.1] - 2026-09-16
 
 ### Fixed
