@@ -34,7 +34,7 @@
           nodejs = pkgs.nodejs_24;
           agent = pkgs.buildNpmPackage (finalAttrs: {
             pname = "vega-agent";
-            version = "0.20.2";
+            version = "0.21.0";
             src = ./.;
             inherit nodejs;
             npmDeps = pkgs.importNpmLock { npmRoot = finalAttrs.src; };

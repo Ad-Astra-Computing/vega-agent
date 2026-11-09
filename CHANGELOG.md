@@ -6,6 +6,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-11-09
+
 ### Added
 
 - NARs of 64 MiB or more upload in parts through the control plane's multipart
