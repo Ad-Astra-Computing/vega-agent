@@ -176,6 +176,24 @@ Useful action inputs:
   A blunt guard against an accidental multi-gigabyte push; prefer `exclude` when
   you know what you are dropping.
 
+A NAR of 64 MiB or more is uploaded in parts. A stalled or dropped connection
+then costs the part in flight rather than the whole NAR, and a re-run of a job
+that died mid-upload sends only the parts the control plane has recorded.
+Nothing is kept on the runner for this: the control plane records each upload
+under the identity that started it, and the same identity uploading the same NAR
+picks that upload up again. If that upload ends under the agent (it expired, was
+aborted, or another run with the same identity is completing it), the agent
+waits for or restarts it rather than failing. NARs larger than R2's 4.995 GiB
+single-PUT limit upload this way too, up to the control plane's multipart limit
+(8 GiB by default). Against a control plane without multipart support the agent
+uses a single PUT, as before.
+
+Integrity of a multipart NAR does not come from R2. R2 checks each part only
+against its MD5, which catches damage in transit but is not a cryptographic
+binding, and keeps no SHA-256 for the assembled object. The control plane hashes
+the assembled NAR with SHA-256 against the file hash before the upload counts
+and refuses to accept it on a mismatch.
+
 ### Install the GitHub App
 
 Attestation uses the workflow's OIDC token and does not require the GitHub App.
