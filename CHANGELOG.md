@@ -6,6 +6,19 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+### Added
+
+- NARs of 64 MiB or more upload in parts through the control plane's multipart
+  routes. Each part is retried on its own under the same inactivity timeout as a
+  single PUT, so a stall costs one part. A job re-run after an interrupted
+  upload resumes from the parts the control plane has recorded rather than from
+  zero, with no state kept on the runner. A session that expires, is aborted or
+  is being completed by an overlapping run is waited for or restarted within the
+  same run. NARs past R2's 4.995 GiB single-PUT limit can be uploaded, up to the
+  control plane's multipart limit. R2 checks each part against its MD5 only; the
+  control plane verifies the assembled NAR's SHA-256 before accepting it. A
+  control plane without multipart support still receives a single PUT.
+
 ## [0.20.2] - 2026-10-23
 
 ### Security

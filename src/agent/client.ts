@@ -1,4 +1,5 @@
 import { openAsBlob } from "node:fs";
+import { createHash } from "node:crypto";
 import { envSeconds } from "./env.js";
 import type { PromotionDecision } from "../trust/policy.js";
 import type { FailureDiagnosis } from "./failure-diagnosis.js";
@@ -56,10 +57,30 @@ export class HttpError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    /** The parsed JSON body of the refusal, when it had one. Kept off the
+     * message on purpose: an authenticated response body is never echoed. */
+    readonly detail?: Record<string, unknown>,
   ) {
     super(message);
     this.name = "HttpError";
   }
+}
+
+/** The non-2xx `res` as an {@link HttpError}, keeping a JSON body as `detail`
+ * (the multipart routes say why they refused there) and releasing the rest. */
+async function httpError(res: Response, label: string): Promise<HttpError> {
+  let detail: Record<string, unknown> | undefined;
+  if ((res.headers.get("content-type") ?? "").includes("application/json")) {
+    try {
+      const body: unknown = await res.json();
+      if (typeof body === "object" && body !== null) detail = body as Record<string, unknown>;
+    } catch {
+      // Not the JSON it claimed to be: the status alone still says enough.
+    }
+  } else {
+    void res.body?.cancel();
+  }
+  return new HttpError(res.status, `${label} failed: ${res.status}`, detail);
 }
 
 /**
@@ -216,6 +237,82 @@ function countingBlob(blob: Blob, onChunk: (bytes: number) => void): Blob {
 /** Reports bytes moved so far for one upload, and its total size. */
 export type UploadProgress = (movedBytes: number, totalBytes: number) => void;
 
+/**
+ * NARs this large or larger are uploaded in parts (see
+ * {@link ControlPlaneClient.uploadNarInParts}) rather than as one PUT.
+ *
+ * A single PUT that dies restarts from zero, and a multipart upload pays a few
+ * control-plane round trips per part, so the threshold is where losing the whole
+ * upload starts to cost noticeably more than those round trips. At 64 MiB a
+ * restart costs about a minute on a 1 MB/s link; above it the loss grows with
+ * every byte, and past R2's 4.995 GiB single-PUT ceiling a single PUT cannot
+ * succeed at all. The part size itself is the control plane's decision, since R2
+ * requires every part but the last to be the same size.
+ */
+export const MULTIPART_THRESHOLD_BYTES = 64 * 1024 * 1024;
+
+/** Whether a NAR of `size` bytes goes up in parts. */
+export function usesMultipart(size: number): boolean {
+  return size >= MULTIPART_THRESHOLD_BYTES;
+}
+
+/**
+ * Byte ranges `[start, end)` of each part, in part-number order (part 1 first).
+ * Every part is `partSize` long except the last, which takes the remainder.
+ */
+export function partRanges(size: number, partSize: number): { start: number; end: number }[] {
+  if (!Number.isSafeInteger(size) || size < 1 || !Number.isSafeInteger(partSize) || partSize < 1) {
+    throw new Error(`cannot split ${size} bytes into parts of ${partSize}`);
+  }
+  const out: { start: number; end: number }[] = [];
+  for (let start = 0; start < size; start += partSize) out.push({ start, end: Math.min(start + partSize, size) });
+  return out;
+}
+
+/**
+ * Per-attempt deadline for completing a multipart upload. Completion is the one
+ * control-plane call whose work scales with the NAR: the control plane reads the
+ * assembled object back and hashes it before answering, which for a multi-GB NAR
+ * is minutes, not the seconds every other request gets. Repeating it is safe
+ * (the control plane recognises an object it already assembled), so a deadline
+ * that fires only costs the work done so far.
+ */
+const COMPLETE_TIMEOUT_MS = 15 * 60 * 1000;
+
+/** Fresh sessions one upload may start after its session ends under it
+ * (it expired, was aborted or another process's completion did not take). A
+ * session that keeps ending is a fault to report, not to loop on. */
+const MAX_SESSION_RESTARTS = 3;
+
+/** How often to ask whether a completion in flight has settled. The completion
+ * hashes the whole NAR, so it takes seconds to minutes. */
+const STATUS_POLL_MS = 5_000;
+
+/** Added to the lease time the control plane reports before acting on it. The
+ * figure is relative to the server's clock, so this only covers the request's
+ * own travel time; being late here costs a few seconds, being early a
+ * conflict. */
+const TAKEOVER_MARGIN_MS = 2_000;
+
+/** Completions of one session this process will take over before reporting
+ * that the session cannot be completed. Each one means a holder died
+ * mid-verification; repeated deaths are a fault on the control plane side
+ * (a CPU limit, say) that more attempts will not fix. */
+const MAX_TAKEOVERS = 2;
+
+/** The control plane's view of a multipart upload session. */
+interface MultipartSession {
+  status: "open" | "completing" | "exists";
+  sessionId: string;
+  /** The size the session was opened for, which must be this file's. */
+  fileSize: number;
+  partSize: number;
+  partCount: number;
+  /** Parts the control plane has recorded as uploaded. This, not anything kept
+   * locally, is what a resumed upload skips. */
+  confirmedParts: number[];
+}
+
 export class ControlPlaneClient {
   private readonly baseUrl: string;
   private readonly tokenFn: (force?: boolean) => Promise<string>;
@@ -251,19 +348,21 @@ export class ControlPlaneClient {
     init: RequestInit,
     label: string,
     consume?: (res: Response) => Promise<T>,
+    timeoutMs = this.retry.requestTimeoutMs,
+    attempts = this.retry.attempts,
   ): Promise<T> {
     const withAuth = async (force: boolean): Promise<RequestInit> => ({
       ...init,
       headers: { ...init.headers, ...(await this.authHeaders(force)) },
     });
     try {
-      return await this.fetchWithRetry(url, await withAuth(false), label, undefined, consume);
+      return await this.fetchWithRetry(url, await withAuth(false), label, timeoutMs, consume, undefined, attempts);
     } catch (e) {
       if (e instanceof HttpError && e.status === 401) {
         // Recover with a fresh token, but as a SINGLE attempt: re-entering the
         // full retry loop here could run a second whole retry budget on transient
         // failures. The 401 path is a one-shot re-auth, not another retry budget.
-        return await this.fetchOnce(url, await withAuth(true), label, consume);
+        return await this.fetchOnce(url, await withAuth(true), label, consume, timeoutMs);
       }
       throw e;
     }
@@ -276,13 +375,14 @@ export class ControlPlaneClient {
     init: RequestInit,
     label: string,
     consume?: (res: Response) => Promise<T>,
+    timeoutMs = this.retry.requestTimeoutMs,
   ): Promise<T> {
     try {
-      const res = await this.fetchImpl(url, this.withDeadline(init, this.retry.requestTimeoutMs));
-      if (!res.ok) throw new HttpError(res.status, `${label} failed: ${res.status}`);
+      const res = await this.fetchImpl(url, this.withDeadline(init, timeoutMs));
+      if (!res.ok) throw await httpError(res, label);
       return consume === undefined ? (res as unknown as T) : await consume(res);
     } catch (e) {
-      throw this.labelTimeout(e, label, this.retry.requestTimeoutMs);
+      throw this.labelTimeout(e, label, timeoutMs);
     }
   }
 
@@ -391,9 +491,10 @@ export class ControlPlaneClient {
     timeoutMs = this.retry.requestTimeoutMs,
     consume?: (res: Response) => Promise<T>,
     stall?: { stallMs: number; capMs: number; onProgress?: UploadProgress },
+    attempts = this.retry.attempts,
   ): Promise<T> {
     let lastErr: unknown;
-    for (let attempt = 1; attempt <= this.retry.attempts; attempt++) {
+    for (let attempt = 1; attempt <= attempts; attempt++) {
       let res: Response | undefined;
       // A fresh deadline AND a fresh body per attempt: the stall clock must not
       // carry over, and the counting wrapper hands out a new underlying stream.
@@ -430,17 +531,17 @@ export class ControlPlaneClient {
           } catch (e) {
             if (e instanceof CompressedResponseError) throw e;
             lastErr = this.labelTimeout(e, label, timeoutMs);
-            if (attempt < this.retry.attempts) await this.backoff(attempt, null);
+            if (attempt < attempts) await this.backoff(attempt, null);
             continue;
           }
         }
         // Not returned to the caller: drain the body so undici frees the
         // connection instead of pinning the keep-alive pool until GC.
+        if (!RETRYABLE_STATUS.has(res.status)) throw await httpError(res, label);
         void res.body?.cancel();
-        if (!RETRYABLE_STATUS.has(res.status)) throw new HttpError(res.status, `${label} failed: ${res.status}`);
         lastErr = new Error(`${label} failed: ${res.status}`);
-        if (attempt < this.retry.attempts) await this.backoff(attempt, res.headers.get("retry-after"));
-      } else if (attempt < this.retry.attempts) {
+        if (attempt < attempts) await this.backoff(attempt, res.headers.get("retry-after"));
+      } else if (attempt < attempts) {
         await this.backoff(attempt, null);
       }
     }
@@ -477,10 +578,23 @@ export class ControlPlaneClient {
     sha256Base64: string,
     onProgress?: UploadProgress,
   ): Promise<void> {
+    await this.put(presignedUrl, body, { "x-amz-checksum-sha256": sha256Base64 }, "nar upload", onProgress);
+  }
+
+  /** The PUT behind {@link putNar} and each multipart part, returning R2's ETag
+   * for the object or part (null if the response carried none). `headers` are
+   * the integrity headers the URL was signed for. */
+  private async put(
+    presignedUrl: string,
+    body: BodyInit,
+    headers: Record<string, string>,
+    label: string,
+    onProgress?: UploadProgress,
+  ): Promise<string | null> {
     const res = await this.fetchWithRetry(
       presignedUrl,
-      { method: "PUT", body, headers: { "x-amz-checksum-sha256": sha256Base64 } },
-      "nar upload",
+      { method: "PUT", body, headers },
+      label,
       this.retry.requestTimeoutMs,
       undefined,
       // Bounded by inactivity, not by a duration guessed from the payload.
@@ -488,6 +602,30 @@ export class ControlPlaneClient {
     );
     // The PUT response body is unused; drain it so the connection is released.
     void res.body?.cancel();
+    return res.headers.get("etag");
+  }
+
+  /**
+   * Mint a presigned URL and PUT to it, re-minting ONCE if the URL's validity
+   * window lapsed before the upload finished. A 403 that is NOT an expiry (auth,
+   * checksum mismatch, object error, judged from the URL's own window) is
+   * surfaced, not retried, so real failures are never masked. `body` is called
+   * per attempt so a file-backed Blob is opened fresh each time.
+   */
+  private async putMinted(
+    mint: () => Promise<string>,
+    body: () => Promise<Blob>,
+    headers: Record<string, string>,
+    label: string,
+    onProgress?: UploadProgress,
+  ): Promise<string | null> {
+    const url = await mint();
+    try {
+      return await this.put(url, await body(), headers, label, onProgress);
+    } catch (e) {
+      if (!(e instanceof HttpError) || e.status !== 403 || !presignLapsed(url, Date.now())) throw e;
+    }
+    return await this.put(await mint(), await body(), headers, label, onProgress);
   }
 
   /**
@@ -505,20 +643,295 @@ export class ControlPlaneClient {
     sha256Base64: string,
     onProgress?: UploadProgress,
   ): Promise<void> {
-    const url = await this.uploadUrl(narUrl, fileHash);
+    const size = (await openAsBlob(file)).size;
+    if (usesMultipart(size)) {
+      try {
+        await this.uploadNarInParts(narUrl, fileHash, file, size, onProgress);
+        return;
+      } catch (e) {
+        // A control plane without the multipart routes answers 404 to the very
+        // first call. Anything else is a real failure of the multipart path.
+        if (!(e instanceof MultipartUnsupported)) throw e;
+      }
+    }
     // No payload-scaled deadline here any more: putNar bounds the attempt by
     // inactivity, which is what a stalled upload actually looks like. Scaling a
     // wall-clock allowance by size gave a 5 GB NAR an 85 minute attempt, so one
     // wedged connection consumed a 90 minute CI job and never reached a retry.
-    const blob = await openAsBlob(file);
-    try {
-      await this.putNar(url, blob, sha256Base64, onProgress);
-      return;
-    } catch (e) {
-      if (!(e instanceof HttpError) || e.status !== 403 || !presignLapsed(url, Date.now())) throw e;
+    await this.putMinted(
+      () => this.uploadUrl(narUrl, fileHash),
+      () => openAsBlob(file),
+      { "x-amz-checksum-sha256": sha256Base64 },
+      "nar upload",
+      onProgress,
+    );
+  }
+
+  /**
+   * Upload a NAR in parts, resuming whatever the control plane already holds.
+   *
+   * The session is found again, not remembered: opening one for a key this
+   * principal already has a live session for returns that session and the parts
+   * it has recorded. The key content-addresses the NAR, so a process that died
+   * and was re-run (a re-run CI job, a restarted worker) rebuilds the same NAR,
+   * asks for the same key and skips the parts that already arrived, with nothing
+   * persisted on the runner, whose disk a re-run usually does not keep anyway.
+   *
+   * Each part is its own PUT through the same retry, stall-detection and
+   * presign-expiry handling as a single-PUT NAR, so a stalled connection costs
+   * the part in flight rather than the whole upload. Parts go one at a time: the
+   * agent already uploads several NARs at once, and parts in parallel would
+   * multiply the memory and connections each of those holds.
+   *
+   * A session can end under this process without the NAR failing: it expired,
+   * was aborted, or another process holding the same identity (a retried job
+   * overlapping the one it replaced) is completing it. Those restart the attempt
+   * from a fresh `create`, which resumes, opens a new session or reports the NAR
+   * already there, up to {@link MAX_SESSION_RESTARTS} times. A completion by
+   * another process is waited for rather than raced (see {@link awaitOther}).
+   * Only a refusal that a restart cannot change fails the upload: R2 or the
+   * control plane rejecting the bytes themselves.
+   */
+  async uploadNarInParts(
+    narUrl: string,
+    fileHash: string,
+    file: string,
+    size: number,
+    onProgress?: UploadProgress,
+  ): Promise<void> {
+    for (let restarts = 0; ; restarts++) {
+      const outcome = await this.multipartAttempt(narUrl, fileHash, file, size, onProgress);
+      if (outcome === "done") return;
+      if (restarts >= MAX_SESSION_RESTARTS) {
+        throw new Error(`multipart upload of ${narUrl}: session ended ${restarts + 1} times without completing`);
+      }
     }
-    const fresh = await this.uploadUrl(narUrl, fileHash);
-    await this.putNar(fresh, await openAsBlob(file), sha256Base64, onProgress);
+  }
+
+  /** One pass over one session: "done" when the NAR is uploaded and verified,
+   * "restart" when the session ended in a way a fresh `create` recovers from. */
+  private async multipartAttempt(
+    narUrl: string,
+    fileHash: string,
+    file: string,
+    size: number,
+    onProgress?: UploadProgress,
+  ): Promise<"done" | "restart"> {
+    let session: MultipartSession;
+    try {
+      session = await this.multipartCreate(narUrl, fileHash, size);
+    } catch (e) {
+      // A live session for this key declares another size. The key fixes the
+      // bytes, so that session can never complete; abort it and start clean.
+      const stale = e instanceof HttpError && e.status === 409 ? e.detail?.sessionId : undefined;
+      if (typeof stale !== "string") throw e;
+      await this.multipartAbort(stale);
+      return "restart";
+    }
+    if (session.status === "exists") return "done"; // already uploaded and verified
+    if (session.status === "completing") return await this.awaitOther(session.sessionId);
+
+    const ranges = partRanges(size, session.partSize);
+    if (session.fileSize !== size || ranges.length !== session.partCount) {
+      // Created by a client that declared another size; same reasoning as above.
+      await this.multipartAbort(session.sessionId);
+      return "restart";
+    }
+    const confirmed = new Set(session.confirmedParts);
+    let base = 0;
+    for (const [i, { start, end }] of ranges.entries()) {
+      const partNumber = i + 1;
+      if (!confirmed.has(partNumber)) {
+        const part = async (): Promise<Blob> => (await openAsBlob(file)).slice(start, end);
+        const md5 = await md5Base64Of(await part());
+        let sent: "ok" | "done" | "restart";
+        try {
+          sent = await this.sessionStep(session.sessionId, async () => {
+            const etag = await this.putMinted(
+              async () => {
+                const minted = await this.multipartPartUrl(session.sessionId, partNumber, md5);
+                // The URL is signed for the session's idea of this part's length. If
+                // it disagrees with the file, R2 refuses every attempt, so stop here
+                // rather than spend a retry budget on a part that cannot land.
+                if (minted.size !== end - start) throw new PartLengthMismatch();
+                return minted.url;
+              },
+              part,
+              { "content-md5": md5 },
+              `nar upload part ${partNumber}/${ranges.length}`,
+              onProgress === undefined ? undefined : (moved) => onProgress(base + moved, size),
+            );
+            if (etag === null) throw new Error(`nar upload part ${partNumber}: R2 returned no ETag`);
+            await this.multipartReport(session.sessionId, partNumber, etag);
+          });
+        } catch (e) {
+          if (!(e instanceof PartLengthMismatch)) throw e;
+          await this.multipartAbort(session.sessionId);
+          return "restart";
+        }
+        if (sent !== "ok") return sent;
+      }
+      base += end - start;
+      onProgress?.(base, size);
+    }
+    const completed = await this.completeOnce(session.sessionId);
+    if (completed === "done" || completed === "restart") return completed;
+    return await this.awaitOther(session.sessionId);
+  }
+
+  /**
+   * One completion request, deliberately NOT through the generic retry loop.
+   *
+   * Every other request is safe to resend blindly. A completion is not: the
+   * control plane may still be assembling and hashing when this side's deadline
+   * fires or the connection drops, and a resend that arrived after the
+   * verification lease lapsed would take a fresh lease and hash the whole object
+   * a second time alongside the first. So any outcome that does not say what
+   * happened (a deadline, a dropped connection or a 5xx) is "unknown". The caller
+   * then asks the session's status instead of asking again.
+   */
+  private async completeOnce(sessionId: string): Promise<"done" | "restart" | "busy" | "unknown"> {
+    try {
+      await this.multipartCall("complete", { sessionId }, "multipart complete", COMPLETE_TIMEOUT_MS, 1);
+      return "done";
+    } catch (e) {
+      if (e instanceof CompressedResponseError) throw e;
+      if (!(e instanceof HttpError)) return "unknown"; // a deadline or a dropped connection
+      if (e.status === 409 && e.detail?.state === "completing") return "busy";
+      if (e.status === 404 || e.status === 410) return "restart";
+      if (e.status === 409) return "restart"; // parts missing, or the session ended
+      throw e; // 422: the bytes are not the NAR, which no new session changes
+    }
+  }
+
+  /**
+   * Run one session step, turning the refusals that mean "this session is no
+   * longer ours to drive" into an outcome instead of a failure:
+   *
+   * - 409 with a `state`: another process moved it on (completing, or already
+   *   finished). Wait for that to resolve.
+   * - 409 with `missing`: completion found parts unrecorded. A restart resumes
+   *   and sends exactly those.
+   * - 404 or 410: the session expired or was pruned. A restart opens a new one.
+   *
+   * Everything else, including a 422 for bytes that do not match the file hash,
+   * propagates: no new session would make those bytes different.
+   */
+  private async sessionStep(
+    sessionId: string,
+    step: () => Promise<void>,
+  ): Promise<"ok" | "done" | "restart"> {
+    try {
+      await step();
+      return "ok";
+    } catch (e) {
+      if (!(e instanceof HttpError)) throw e;
+      if (e.status === 404 || e.status === 410) return "restart";
+      if (e.status === 409 && Array.isArray(e.detail?.missing)) return "restart";
+      if (e.status === 409 && typeof e.detail?.state === "string") return await this.awaitOther(sessionId);
+      throw e;
+    }
+  }
+
+  /**
+   * Wait for a completion in flight to settle, and take it over if it died.
+   *
+   * Two processes with one identity can hold one session (a retried job
+   * overlapping the attempt it replaced), and this process's own completion can
+   * outlive its request (the deadline fired, the connection dropped). Either way
+   * a completion this process cannot see may be running. This polls the
+   * session's status; while it is `completing` the control plane says how long
+   * the current verification lease has left, measured on its own clock so this
+   * side's clock does not matter. Once that reaches zero the holder is presumed
+   * dead and this process completes the session itself, becoming the new
+   * holder; a conflict there means another process got in first, and polling
+   * resumes. A lease that never settles after {@link MAX_TAKEOVERS} takeovers
+   * is reported rather than chased.
+   *
+   * A lease that let only one process upload at all would prevent the overlap
+   * rather than resolve it, but it would also strand an upload behind a holder
+   * that died, which is the very case resumption exists for; overlap is rare
+   * here (one agent per job), so resolving it is the simpler correct answer.
+   */
+  private async awaitOther(sessionId: string): Promise<"done" | "restart"> {
+    let takeovers = 0;
+    for (;;) {
+      let st: { status: string; retryAfterMs?: number };
+      try {
+        st = await this.multipartCall<{ status: string; retryAfterMs?: number }>(
+          "status",
+          { sessionId },
+          "multipart status",
+        );
+      } catch (e) {
+        if (e instanceof HttpError && (e.status === 404 || e.status === 410)) return "restart";
+        throw e;
+      }
+      if (st.status === "completed") return "done";
+      // Back to open (its completion was refused and reopened it), or ended:
+      // either way a fresh create picks up from whatever the server now holds.
+      if (st.status !== "completing") return "restart";
+      const left = typeof st.retryAfterMs === "number" && st.retryAfterMs >= 0 ? st.retryAfterMs : STATUS_POLL_MS;
+      if (left > 0) {
+        await this.retry.sleep(Math.min(left + TAKEOVER_MARGIN_MS, STATUS_POLL_MS));
+        continue;
+      }
+      if (takeovers >= MAX_TAKEOVERS) {
+        throw new Error(`multipart upload: the completion of ${sessionId} keeps dying; gave up after ${takeovers} takeovers`);
+      }
+      takeovers++;
+      const r = await this.completeOnce(sessionId);
+      if (r === "done" || r === "restart") return r;
+      // busy (another process took over first) or unknown: look again.
+    }
+  }
+
+  private async multipartCall<T>(
+    path: string,
+    body: unknown,
+    label: string,
+    timeoutMs?: number,
+    attempts?: number,
+  ): Promise<T> {
+    return await this.authedFetch(
+      `${this.baseUrl}/api/cache/multipart/${path}`,
+      { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+      label,
+      (res) => res.json() as Promise<T>,
+      timeoutMs,
+      attempts,
+    );
+  }
+
+  private async multipartCreate(narUrl: string, fileHash: string, fileSize: number): Promise<MultipartSession> {
+    try {
+      return await this.multipartCall<MultipartSession>("create", { narUrl, fileHash, fileSize }, "multipart create");
+    } catch (e) {
+      if (e instanceof HttpError && e.status === 404) throw new MultipartUnsupported();
+      throw e;
+    }
+  }
+
+  private async multipartPartUrl(sessionId: string, partNumber: number, md5: string): Promise<{ url: string; size: number }> {
+    return await this.multipartCall<{ url: string; size: number }>(
+      "part-url",
+      { sessionId, partNumber, md5 },
+      `multipart part-url ${partNumber}`,
+    );
+  }
+
+  private async multipartReport(sessionId: string, partNumber: number, etag: string): Promise<void> {
+    await this.multipartCall("part", { sessionId, partNumber, etag }, `multipart report ${partNumber}`);
+  }
+
+  /** Abort a session this process will not finish. Already ended (409) or gone
+   * (404) is the outcome wanted, so those are not errors. */
+  private async multipartAbort(sessionId: string): Promise<void> {
+    try {
+      await this.multipartCall("abort", { sessionId }, "multipart abort");
+    } catch (e) {
+      if (!(e instanceof HttpError) || (e.status !== 404 && e.status !== 409)) throw e;
+    }
   }
 
   /** Submit an attestation; returns the promotion decision. */
@@ -609,6 +1022,25 @@ export class ControlPlaneClient {
       (res) => res.json() as Promise<PushResult>,
     );
   }
+}
+
+/** The control plane has no multipart routes, so the NAR goes up as one PUT. */
+class MultipartUnsupported extends Error {}
+
+/** The session's length for a part disagrees with the file, so R2 will refuse
+ * every upload of it (the length is signed into the URL). */
+class PartLengthMismatch extends Error {}
+
+/**
+ * Standard base64 MD5 of a Blob, streamed rather than buffered: the
+ * `Content-MD5` R2 checks a part against. R2's UploadPart takes no SHA-256, and
+ * MD5 here only catches damage in transit; the NAR's integrity is the control
+ * plane's SHA-256 of the assembled object at completion.
+ */
+async function md5Base64Of(blob: Blob): Promise<string> {
+  const h = createHash("md5");
+  for await (const chunk of blob.stream()) h.update(chunk);
+  return h.digest("base64");
 }
 
 /** Why a dispatched reproduction did not produce an attestation. */
