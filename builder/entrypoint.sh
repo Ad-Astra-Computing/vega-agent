@@ -532,6 +532,21 @@ run_runner() {
   export RUNNER_ALLOW_RUNASROOT=1
   mkdir -p "$RUNNER_ROOT"
 
+  # Read and clear both credentials before checking whether registration is
+  # even needed: run.sh runs regardless of which branch below fires, as root,
+  # so a clear scoped to only the registration branch left a mounted
+  # GITHUB_PAT or GITHUB_RUNNER_TOKEN readable by every job after a restart
+  # that reused a saved registration.
+  local token; token="$(read_secret GITHUB_RUNNER_TOKEN)"
+  local pat; pat="$(read_secret GITHUB_PAT)"
+  # The rm is best-effort: a read-only secret mount cannot be unlinked from
+  # inside the container, and that must not abort the runner (the env var is
+  # still cleared, and a read-only mount's lifecycle is the orchestrator's,
+  # not ours).
+  if [ -n "${GITHUB_RUNNER_TOKEN_FILE:-}" ]; then rm -f "$GITHUB_RUNNER_TOKEN_FILE" 2>/dev/null || true; fi
+  if [ -n "${GITHUB_PAT_FILE:-}" ]; then rm -f "$GITHUB_PAT_FILE" 2>/dev/null || true; fi
+  unset GITHUB_RUNNER_TOKEN GITHUB_RUNNER_TOKEN_FILE GITHUB_PAT GITHUB_PAT_FILE
+
   # Configure only when there is no saved registration. On a plain container
   # restart (docker restart / --restart policy) the writable layer persists, so
   # the existing registration is reused and NO token is needed or expected (a
@@ -543,27 +558,13 @@ run_runner() {
   if [ ! -f "$RUNNER_ROOT/.runner" ]; then
     # PRIMARY path: a short-lived registration token minted by the SUPERVISOR
     # (gh on your own machine, or a GitHub App for a fleet) and passed in, so no
-    # long-lived credential ever enters this container. Prefer
-    # GITHUB_RUNNER_TOKEN_FILE (a tmpfs/copied-in secret file) over the env var.
-    local token; token="$(read_secret GITHUB_RUNNER_TOKEN)"
-    # The token value (if any) is now captured in $token. Drop the env var and
-    # any file it came from immediately, before any branch, so neither the PAT
-    # fallback nor run.sh can ever see a leftover registration credential, even
-    # when the file was set but empty. The rm is best-effort: a read-only secret
-    # mount cannot be unlinked from inside the container, and that must not abort
-    # the runner (the env var is still cleared, and a read-only mount's lifecycle
-    # is the orchestrator's, not ours).
-    if [ -n "${GITHUB_RUNNER_TOKEN_FILE:-}" ]; then rm -f "$GITHUB_RUNNER_TOKEN_FILE" 2>/dev/null || true; fi
-    unset GITHUB_RUNNER_TOKEN GITHUB_RUNNER_TOKEN_FILE
+    # long-lived credential ever enters this container. $token was already
+    # captured and cleared from the environment above.
     if [ -z "$token" ]; then
-      # FALLBACK (trusted local runner only): mint inside the container from a PAT.
-      # Weaker, because a broad credential briefly enters the container; never use
-      # it for anything but your own trusted runner.
-      local pat; pat="$(read_secret GITHUB_PAT)"
-      # Remove the file-backed PAT as soon as it is read, before any exit path, so
-      # a file-mounted credential never outlives this step into the job (the runner
-      # runs as root). Best-effort, same as the runner-token file above.
-      if [ -n "${GITHUB_PAT_FILE:-}" ]; then rm -f "$GITHUB_PAT_FILE" 2>/dev/null || true; fi
+      # FALLBACK (trusted local runner only): mint inside the container from a
+      # PAT. Weaker, because a broad credential briefly enters the container;
+      # never use it for anything but your own trusted runner. $pat was
+      # already captured and cleared from the environment above.
       [ -n "$pat" ] || {
         echo "vega-builder: pass GITHUB_RUNNER_TOKEN (preferred: mint it in your supervisor with gh or a GitHub App) or, for a trusted local runner only, GITHUB_PAT" >&2
         exit 1
@@ -576,8 +577,8 @@ run_runner() {
         -H "X-GitHub-Api-Version: 2022-11-28" \
         "$api" | jq -er '.token')" || {
           echo "vega-builder: could not mint a registration token (check GITHUB_PAT scope: administration:write)" >&2; exit 1; }
-      unset GITHUB_PAT GITHUB_PAT_FILE pat
     fi
+    unset pat
 
     # Persistent by default: one long-lived runner handles many jobs. Set
     # VEGA_RUNNER_EPHEMERAL=true for one-job-then-exit (the untrusted donate fleet,
