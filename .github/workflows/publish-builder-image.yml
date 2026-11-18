@@ -114,8 +114,18 @@ jobs:
             sleep $((attempt * 10))
           done
           # Capture the immutable digest so cosign signs the content, not a tag.
-          digest=$(docker inspect --format '{{ index .RepoDigests 0 }}' \
-            "${{ steps.ref.outputs.image }}:${{ steps.ref.outputs.version }}-${{ matrix.arch }}")
+          # Filtered to OUR repo rather than index 0: a local image can carry
+          # more than one RepoDigests entry (its Nix-loaded bare tag among
+          # them), and array order is not something docker guarantees, so
+          # index 0 picked an unqualified one here and cosign resolved it
+          # against Docker Hub's default registry instead of ghcr.io.
+          image="${{ steps.ref.outputs.image }}"
+          digest=$(
+            docker inspect --format '{{ range .RepoDigests }}{{ println . }}{{ end }}' \
+              "${image}:${{ steps.ref.outputs.version }}-${{ matrix.arch }}" \
+            | grep "^${image}@" | head -1
+          )
+          test -n "$digest" || { echo "no RepoDigests entry for ${image}" >&2; exit 1; }
           echo "ref=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Sign (keyless)
