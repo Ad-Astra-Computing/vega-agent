@@ -25,8 +25,9 @@ vi.mock("../src/agent/device-flow.js", () => ({
 }));
 
 const enrollResponse = vi.fn();
+const fetchUncompressed = vi.fn(async (..._args: unknown[]) => enrollResponse());
 vi.mock("../src/http/no-compression.js", () => ({
-  fetchUncompressed: vi.fn(async () => enrollResponse()),
+  fetchUncompressed: (...args: unknown[]) => fetchUncompressed(...args),
 }));
 
 // A real saveR2Grant by default (so the happy-path test writes and can read
@@ -86,6 +87,25 @@ async function runLogin(): Promise<void> {
 }
 
 describe("vega login", () => {
+  it("declares the r2-grant capability on every enroll call", async () => {
+    enrollResponse.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        credential: "owner-cred",
+        login: "octocat",
+        userId: "583231",
+        expiresAt: Date.now() + 90 * 86_400_000,
+      }),
+    });
+
+    await runLogin();
+
+    expect(fetchUncompressed).toHaveBeenCalledTimes(1);
+    const [, init] = fetchUncompressed.mock.calls[0]!;
+    const headers = (init as { headers: Record<string, string> }).headers;
+    expect(headers["x-vega-capabilities"]).toBe("r2-grant");
+  });
+
   it("never writes the R2 grant's secretAccessKey to stdout or stderr on the happy path", async () => {
     enrollResponse.mockResolvedValue({
       ok: true,

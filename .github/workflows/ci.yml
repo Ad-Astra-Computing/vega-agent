@@ -24,3 +24,31 @@ jobs:
       # a skip when CI is set.
       - run: sudo apt-get install -y --no-install-recommends busybox-static
       - run: npm test
+
+  nix:
+    # Nothing else in CI ever evaluates the flake: `stdenv.isLinux` sat
+    # deprecated here for a release before anyone noticed, because the only
+    # place that actually built it was the release-only publish workflow.
+    # `nix flake check` evaluates every output (including the ones the
+    # publish workflow builds), and a deprecation warning fails the step
+    # rather than scrolling past in a log nobody reads at release time.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+        with:
+          source-tag: v3.21.0
+          extra-conf: |
+            experimental-features = nix-command flakes
+            sandbox = true
+      - name: nix flake check (fail on deprecation warnings)
+        run: |
+          nix flake check --print-build-logs 2>&1 | tee /tmp/nix-check.log
+          status=${PIPESTATUS[0]}
+          if grep -qi "deprecated" /tmp/nix-check.log; then
+            echo "::error::nix flake check printed a deprecation warning; see the log above" >&2
+            exit 1
+          fi
+          exit "$status"

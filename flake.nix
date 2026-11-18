@@ -207,7 +207,7 @@
           vega-agent = agent;
           default = agent;
         }
-        // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux { builder-image = builderImage; }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux { builder-image = builderImage; }
       );
 
       apps = forAll (

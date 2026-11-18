@@ -46,7 +46,11 @@ export function registerLogin(program: Command): void {
 
       const res = await fetchUncompressed(`${url}/api/owner/enroll`, {
         method: "POST",
-        headers: { authorization: `Bearer ${ghToken}` },
+        // The control plane only reveals a pending direct-R2 grant (spec 0006)
+        // to a client that declares it can actually display and save one: an
+        // older build has no code for it and would silently discard the one
+        // reveal a server that only checked "is a grant pending" would burn.
+        headers: { authorization: `Bearer ${ghToken}`, "x-vega-capabilities": "r2-grant" },
       });
       if (!res.ok) fail(`enrollment failed (${await safeError(res)})`);
       const body = (await res.json()) as {
