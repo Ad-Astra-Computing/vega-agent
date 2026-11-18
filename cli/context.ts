@@ -5,10 +5,11 @@
 // need no decode or round-trip) and the control-plane URL it was issued against
 // (so a staging credential can't silently target prod).
 
-import { readFile, mkdir, writeFile, rm, chmod } from "node:fs/promises";
+import { readFile, mkdir, writeFile, rm, chmod, rename } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fail } from "./ui.js";
+import { randomUUID } from "node:crypto";
 
 export const DEFAULT_CONTROL_PLANE = "https://vega-cache.dev";
 
@@ -160,12 +161,20 @@ export function r2GrantPath(): string {
   return join(configDir(), "r2-grant.json");
 }
 
+/**
+ * Written atomically, unlike {@link saveCredential}: a credential lost to a
+ * crash mid-write is one `vega login` away from being reissued, but this
+ * secret is not, since the control plane has already erased its own copy by
+ * the time this function runs. Writing a fresh `0600` temp file in the same
+ * directory and renaming it over the target (atomic on the same filesystem)
+ * means a kill mid-write leaves either the old grant or the new one intact,
+ * never a truncated file, and the mode is `0600` from creation rather than
+ * tightened after the fact.
+ */
 export async function saveR2Grant(grant: StoredR2Grant): Promise<void> {
   await mkdir(configDir(), { recursive: true });
   const path = r2GrantPath();
-  await writeFile(path, `${JSON.stringify(grant, null, 2)}\n`, { mode: 0o600 });
-  // As with saveCredential: writeFile's mode only applies on create, so an
-  // existing world-readable file from an older agent version is tightened here
-  // rather than trusted to have been written safely before.
-  await chmod(path, 0o600);
+  const tmp = `${path}.${randomUUID()}.tmp`;
+  await writeFile(tmp, `${JSON.stringify(grant, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+  await rename(tmp, path);
 }
