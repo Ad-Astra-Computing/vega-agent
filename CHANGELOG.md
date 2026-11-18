@@ -6,6 +6,23 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-11-18
+
+### Fixed
+
+- `vega login` now sends `x-vega-capabilities: r2-grant` on every enroll
+  call. The control plane had no way to tell this build from one too old to
+  know an `r2Grant` field exists, so an incapable client's enroll call
+  silently consumed a pending direct-R2 grant and discarded it. The control
+  plane now withholds a reveal from any request that does not declare this.
+- `stdenv.isLinux` replaced with `stdenv.hostPlatform.isLinux` in flake.nix.
+
+### Added
+
+- CI now runs `nix flake check` on every push and pull request, failing the
+  build on a deprecation warning rather than only surfacing one at release
+  time through the GHCR publish workflow.
+
 ## [0.22.0] - 2026-11-18
 
 ### Added
