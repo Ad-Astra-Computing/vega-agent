@@ -6,6 +6,22 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-11-18
+
+### Added
+
+- `vega login` saves and announces a direct-R2 tenant write grant when an
+  operator has issued one for that account (garnix-ci spec 0006), the one
+  time it is ever shown: the control plane erases its own copy the instant
+  the response leaves it. Saved to `~/.config/vega/r2-grant.json` at mode
+  0600, written atomically (a temp file renamed over the target, never
+  truncated in place), and saved before the owner credential so that losing
+  the one secret that cannot be re-revealed never depends on a later write
+  succeeding. The secret itself never reaches stdout; a save that still
+  fails prints it once to stderr with a loud warning rather than losing it
+  silently. No flag, no config: an account either has a pending grant or it
+  does not.
+
 ## [0.21.0] - 2026-11-09
 
 ### Added
