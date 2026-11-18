@@ -137,3 +137,35 @@ export async function loadCredentialMaybe(): Promise<StoredCredential | null> {
   }
   return null;
 }
+
+/**
+ * A direct-R2 tenant grant (spec 0006, garnix-ci/docs/specs). Vega's control
+ * plane reveals this at most once, through `/api/owner/enroll`'s response, and
+ * erases it from its own storage immediately after. This is the only place it
+ * is ever written down again, so losing this file is the same as losing the
+ * credential: an operator has to re-issue it, not re-reveal the old one.
+ */
+export interface StoredR2Grant {
+  bucket: string;
+  endpoint: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  /** The control plane this grant was revealed against, for the same reason a
+   * stored owner credential records it. */
+  url: string;
+  revealedAt: number;
+}
+
+export function r2GrantPath(): string {
+  return join(configDir(), "r2-grant.json");
+}
+
+export async function saveR2Grant(grant: StoredR2Grant): Promise<void> {
+  await mkdir(configDir(), { recursive: true });
+  const path = r2GrantPath();
+  await writeFile(path, `${JSON.stringify(grant, null, 2)}\n`, { mode: 0o600 });
+  // As with saveCredential: writeFile's mode only applies on create, so an
+  // existing world-readable file from an older agent version is tightened here
+  // rather than trusted to have been written safely before.
+  await chmod(path, 0o600);
+}
