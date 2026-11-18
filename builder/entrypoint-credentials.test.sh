@@ -54,12 +54,15 @@ run_one() {
     run_runner
   )
 
-  if grep -q "GITHUB_RUNNER_TOKEN" "$dump" 2>/dev/null; then
+  # Anchored to a `NAME=` line start, not a bare substring: a real CI runner
+  # sets its own unrelated GITHUB_PATH (for $GITHUB_PATH step outputs), which
+  # a loose `grep "GITHUB_PAT"` matches as a false leak.
+  if grep -qE "^GITHUB_RUNNER_TOKEN(_FILE)?=" "$dump" 2>/dev/null; then
     fail "$label: GITHUB_RUNNER_TOKEN leaked into run.sh's environment"
   else
     ok "$label: GITHUB_RUNNER_TOKEN cleared before run.sh"
   fi
-  if grep -q "GITHUB_PAT" "$dump" 2>/dev/null; then
+  if grep -qE "^GITHUB_PAT(_FILE)?=" "$dump" 2>/dev/null; then
     fail "$label: GITHUB_PAT leaked into run.sh's environment"
   else
     ok "$label: GITHUB_PAT cleared before run.sh"
