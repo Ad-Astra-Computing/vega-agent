@@ -115,7 +115,11 @@ Full command set: `init`, `login`, `logout`, `whoami`, `status`, `doctor`,
 details.
 The GitHub token from `login` is used once and never stored; only a short-lived
 Vega credential is kept (`~/.config/vega/credential`, mode 0600), and the control
-plane is required to be https.
+plane is required to be https. On an account an operator has separately granted
+direct R2 write access to its own tenant bucket, `login` also saves that grant
+once, the only time it is ever shown (`~/.config/vega/r2-grant.json`, mode
+0600); `logout` does not remove it, and a lost one can only be reissued, never
+re-shown.
 
 ## Layout
 

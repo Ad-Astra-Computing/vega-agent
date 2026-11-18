@@ -5,8 +5,8 @@ import {
   pollAccessToken,
   VEGA_GITHUB_CLIENT_ID,
 } from "../../src/agent/device-flow.js";
-import { controlPlaneFor, saveCredential, credentialPath, safeError } from "../context.js";
-import { success, info, keyValues, fail } from "../ui.js";
+import { controlPlaneFor, saveCredential, credentialPath, safeError, saveR2Grant, r2GrantPath } from "../context.js";
+import { success, info, keyValues, fail, warn } from "../ui.js";
 import { fetchUncompressed } from "../../src/http/no-compression.js";
 
 function sleep(ms: number): Promise<void> {
@@ -54,7 +54,36 @@ export function registerLogin(program: Command): void {
         login: string;
         userId: string;
         expiresAt: number;
+        r2Grant?: { bucket: string; endpoint: string; accessKeyId: string; secretAccessKey: string };
       };
+      // The grant, if present, is saved BEFORE the owner credential on
+      // purpose. The control plane has already erased its own copy by the
+      // time this response arrives, so it cannot be fetched again; the
+      // credential can, with a second `vega login`. If the process dies
+      // between the two saves, it dies having kept the one thing that
+      // cannot be recovered.
+      let revealedGrant = false;
+      if (
+        body.r2Grant !== undefined &&
+        typeof body.r2Grant.bucket === "string" &&
+        typeof body.r2Grant.endpoint === "string" &&
+        typeof body.r2Grant.accessKeyId === "string" &&
+        typeof body.r2Grant.secretAccessKey === "string"
+      ) {
+        const grant = body.r2Grant;
+        try {
+          await saveR2Grant({ ...grant, url, revealedAt: Date.now() });
+          revealedGrant = true;
+        } catch (e) {
+          // This is the only chance: the server has already forgotten its
+          // copy. Printing it once to stderr, loudly, beats losing it, even
+          // though it means it may now sit in a terminal scrollback.
+          warn(`could not save the direct-R2 grant to disk (${e instanceof Error ? e.message : String(e)}).`);
+          warn("printing it once instead, since the control plane will not show it again:");
+          process.stderr.write(`${JSON.stringify(grant, null, 2)}\n`);
+        }
+      }
+
       await saveCredential({
         credential: body.credential,
         login: body.login,
@@ -71,6 +100,24 @@ export function registerLogin(program: Command): void {
         ["Credential", credentialPath()],
         ["Expires", new Date(body.expiresAt).toISOString().slice(0, 10)],
       ]);
+
+      if (revealedGrant && body.r2Grant !== undefined) {
+        info("");
+        success("A direct R2 write grant for your tenant was revealed just now.");
+        keyValues([
+          ["Bucket", body.r2Grant.bucket],
+          ["Endpoint", body.r2Grant.endpoint],
+          ["Access key id", body.r2Grant.accessKeyId],
+          ["Saved to", r2GrantPath()],
+        ]);
+        info(
+          pc.bold(
+            "\nThis will not be shown again. Vega has already erased it from its own storage;\n" +
+              "the file above is now the only copy. If you lose it, ask an operator to issue a new one.\n",
+          ),
+        );
+      }
+
       info(`\nNext:\n  ${pc.cyan("vega push .#my-package")}\n  ${pc.cyan("vega view")}`);
     });
 }

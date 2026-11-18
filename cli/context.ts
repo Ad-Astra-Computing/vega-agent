@@ -5,10 +5,11 @@
 // need no decode or round-trip) and the control-plane URL it was issued against
 // (so a staging credential can't silently target prod).
 
-import { readFile, mkdir, writeFile, rm, chmod } from "node:fs/promises";
+import { readFile, mkdir, writeFile, rm, chmod, rename } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fail } from "./ui.js";
+import { randomUUID } from "node:crypto";
 
 export const DEFAULT_CONTROL_PLANE = "https://vega-cache.dev";
 
@@ -136,4 +137,44 @@ export async function loadCredentialMaybe(): Promise<StoredCredential | null> {
     /* absent or malformed */
   }
   return null;
+}
+
+/**
+ * A direct-R2 tenant grant (spec 0006, garnix-ci/docs/specs). Vega's control
+ * plane reveals this at most once, through `/api/owner/enroll`'s response, and
+ * erases it from its own storage immediately after. This is the only place it
+ * is ever written down again, so losing this file is the same as losing the
+ * credential: an operator has to re-issue it, not re-reveal the old one.
+ */
+export interface StoredR2Grant {
+  bucket: string;
+  endpoint: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  /** The control plane this grant was revealed against, for the same reason a
+   * stored owner credential records it. */
+  url: string;
+  revealedAt: number;
+}
+
+export function r2GrantPath(): string {
+  return join(configDir(), "r2-grant.json");
+}
+
+/**
+ * Written atomically, unlike {@link saveCredential}: a credential lost to a
+ * crash mid-write is one `vega login` away from being reissued, but this
+ * secret is not, since the control plane has already erased its own copy by
+ * the time this function runs. Writing a fresh `0600` temp file in the same
+ * directory and renaming it over the target (atomic on the same filesystem)
+ * means a kill mid-write leaves either the old grant or the new one intact,
+ * never a truncated file, and the mode is `0600` from creation rather than
+ * tightened after the fact.
+ */
+export async function saveR2Grant(grant: StoredR2Grant): Promise<void> {
+  await mkdir(configDir(), { recursive: true });
+  const path = r2GrantPath();
+  const tmp = `${path}.${randomUUID()}.tmp`;
+  await writeFile(tmp, `${JSON.stringify(grant, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+  await rename(tmp, path);
 }
