@@ -6,6 +6,19 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.22.2] - 2026-11-18
+
+### Security
+
+- The builder image's `GITHUB_RUNNER_TOKEN` and `GITHUB_PAT` cleanup only ran
+  inside the branch that registers a new runner. A plain container restart
+  that reuses a saved registration (`--restart=unless-stopped`, the
+  documented normal case) never entered that branch, so both credentials sat
+  in the environment and on disk for every job the container ran after the
+  first. `GITHUB_PAT` carries runner-administration scope, and the job runs
+  as root in the same container. Both are now read and cleared
+  unconditionally before the registration check runs at all.
+
 ## [0.22.1] - 2026-11-18
 
 ### Fixed
