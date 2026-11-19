@@ -179,6 +179,14 @@ assert "unrepairable store records repair-failed" '[ "$(head -n1 "$STORE_CORRUPT
 
 reset_calls; NIXSTORE_RC=0; rc=0; repair_store_at_boot 2>/dev/null || rc=$?
 assert "a failed repair is not retried on restart" '[ "$rc" != 0 ] && [ -z "$(calls)" ]'
+
+# A marker that cannot take the repair-failed state must not be repaired, or
+# a full volume would repeat a whole-store repair on every restart. A
+# directory in its place is present but unwritable, even for root.
+rm -f "$STORE_CORRUPT_MARKER"; mkdir "$STORE_CORRUPT_MARKER"
+reset_calls; NIXSTORE_RC=0; rc=0; repair_store_at_boot 2>/dev/null || rc=$?
+assert "unrecordable repair is not attempted" '[ "$rc" != 0 ] && [ -z "$(calls)" ]'
+rmdir "$STORE_CORRUPT_MARKER"
 }
 unset -f nix-store
 rm -rf "$sv_tmp"

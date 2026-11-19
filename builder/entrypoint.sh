@@ -529,14 +529,19 @@ store_verify_once() {
 # Repair a store a maintenance check marked, before the runner registers: the
 # one point where no job can be reading it. A path no substituter can supply
 # (a local build) cannot be repaired, and building on a known-corrupt store is
-# worse than a runner that is visibly down, so that refuses to start. The
-# failure is recorded, so later restarts refuse at once instead of repeating a
-# whole-store repair in a loop.
+# worse than a runner that is visibly down, so that refuses to start, and
+# later restarts refuse at once instead of repeating a whole-store repair.
 repair_store_at_boot() {
   [ -e "$STORE_CORRUPT_MARKER" ] || return 0
   local action="Delete the paths named in ${STORE_CORRUPT_MARKER} and then the file itself to retry, or recreate the /nix volume."
   if [ "$(head -n1 "$STORE_CORRUPT_MARKER" 2>/dev/null)" = "repair-failed" ]; then
     echo "vega-builder: FATAL: an earlier store repair failed, so the runner will not register. ${action}" >&2
+    return 1
+  fi
+  # Recorded before the attempt, so a repair that is killed or whose result
+  # cannot be written is never repeated: one attempt per marker.
+  if ! echo "repair-failed" >"$STORE_CORRUPT_MARKER"; then
+    echo "vega-builder: FATAL: cannot write ${STORE_CORRUPT_MARKER}, so the store is not repaired and the runner will not register. ${action}" >&2
     return 1
   fi
   echo "vega-builder: a maintenance check found corrupted store paths; repairing before the runner registers" >&2
