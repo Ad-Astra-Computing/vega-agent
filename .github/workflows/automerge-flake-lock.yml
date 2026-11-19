@@ -1,9 +1,9 @@
-name: Auto-merge flake.lock
+name: Auto-merge runner lock
 
-# Merges the weekly flake.lock update PR once its checks pass, the same way
-# dependabot-automerge.yml does for Dependabot. Without this the PR sits
-# waiting on a human every week, which is how the nixpkgs-runner input went
-# stale before it tracked nixos-unstable (see flake.nix).
+# Merges the weekly nixpkgs-runner update PR (update-runner-lock.yml) once its
+# checks pass, the same way dependabot-automerge.yml does for Dependabot.
+# Scoped to that one branch, NOT update-flake-lock.yml's: the rest of the
+# toolchain's weekly bump stays human-reviewed.
 on: pull_request
 
 permissions:
@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     if: >-
       github.actor == 'github-actions[bot]' &&
-      github.event.pull_request.head.ref == 'update_flake_lock_action' &&
+      github.event.pull_request.head.ref == 'update_runner_lock_action' &&
       github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - name: Enable auto-merge
