@@ -1,0 +1,25 @@
+name: Auto-merge runner lock
+
+# Merges the weekly nixpkgs-runner update PR (update-runner-lock.yml) once its
+# checks pass, the same way dependabot-automerge.yml does for Dependabot.
+# Scoped to that one branch, NOT update-flake-lock.yml's: the rest of the
+# toolchain's weekly bump stays human-reviewed.
+on: pull_request
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  automerge:
+    runs-on: ubuntu-latest
+    if: >-
+      github.actor == 'github-actions[bot]' &&
+      github.event.pull_request.head.ref == 'update_runner_lock_action' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Enable auto-merge
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

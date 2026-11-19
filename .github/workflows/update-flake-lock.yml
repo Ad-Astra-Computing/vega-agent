@@ -18,3 +18,7 @@ jobs:
       - uses: DeterminateSystems/update-flake-lock@da03c0f078bc4b2c37ee4f7e072d34bf8f188bb3 # v29
         with:
           pr-title: "Update flake.lock"
+          # nixpkgs-runner has its own update workflow (update-runner-lock.yml),
+          # auto-merged on its own branch: this one stays human-reviewed, so
+          # scoped to the rest of the toolchain only.
+          inputs: nixpkgs

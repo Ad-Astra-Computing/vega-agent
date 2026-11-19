@@ -44,7 +44,7 @@ jobs:
           # code. Comparing the full name to this repository excludes every fork.
           runs=$(gh api "repos/$REPO/actions/runs?status=action_required&per_page=100" \
             --jq ".workflow_runs[]
-                  | select(.head_branch == \"update_flake_lock_action\")
+                  | select(.head_branch == \"update_flake_lock_action\" or .head_branch == \"update_runner_lock_action\")
                   | select(.head_repository.full_name == \"$REPO\")
                   | select(.actor.login == \"github-actions[bot]\")
                   | .id")
