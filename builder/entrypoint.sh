@@ -538,7 +538,7 @@ job_in_flight() {
     # Subshelled: a process exiting between the glob and the read makes the
     # redirect itself fail, and bash reports that to its own stderr no
     # matter what the command inside redirects.
-    (tr '\0' '\n' <"$cmdline") 2>/dev/null | grep -q 'Runner\.Worker' && return 0
+    (tr '\0' '\n' <"$cmdline") 2>/dev/null | grep -qE '(^|/)Runner\.Worker$' && return 0
   done
   return 1
 }

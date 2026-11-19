@@ -19,11 +19,9 @@ describe("builder entrypoint", () => {
     expect(out).toContain("all entrypoint credential tests passed");
   });
 
-  it("nix-store --verify --check-contents catches on-disk corruption (bash)", () => {
-    const script = fileURLToPath(new URL("./store-verify.test.sh", import.meta.url));
-    const out = execFileSync("bash", [script], { encoding: "utf8" });
-    expect(out).toContain("all store-verify tests passed");
-  });
+  // store-verify.test.sh needs a real nix-store binary, which this job's
+  // runner does not carry: it runs in ci.yml's `nix` job instead, which
+  // already installs Nix for `nix flake check`.
 
   it("boot shim: fast path, volume self-seed and fail-loud cases (bash)", () => {
     const script = fileURLToPath(new URL("./bootstrap.test.sh", import.meta.url));

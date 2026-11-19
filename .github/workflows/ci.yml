@@ -52,3 +52,4 @@ jobs:
             exit 1
           fi
           exit "$status"
+      - run: bash builder/store-verify.test.sh
