@@ -56,7 +56,7 @@ run "version files agree" bash -c '
 # Every command has to at least start. A registration mistake in main.ts is
 # invisible to the unit tests and obvious here.
 run "every command responds" bash -c '
-  for c in doctor report status verify diff trust view push gate assess dashboard mcp login logout init whoami; do
+  for c in doctor report status verify diff trust view push gate assess dashboard mcp login logout init whoami worker; do
     ./node_modules/.bin/tsx cli/main.ts "$c" --help >/dev/null 2>&1 || { echo "vega $c --help failed"; exit 1; }
   done
 '
