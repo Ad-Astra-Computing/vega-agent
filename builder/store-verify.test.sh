@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Proves nix-store --verify --check-contents (what start_periodic_store_verify
+# Proves nix-store --verify --check-contents (what store_verify_once
 # in entrypoint.sh runs) actually catches the failure class this exists for: a
 # store path whose registered hash no longer matches its on-disk content, the
 # way a build killed mid-write can leave one. Against a real, throwaway local

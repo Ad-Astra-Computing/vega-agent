@@ -458,6 +458,8 @@ setup_nix() {
       echo "vega-builder: store free-space floor DISABLED (VEGA_MIN_FREE=0); a build can fill this disk" >&2
     fi
   fi
+  # Before registration, so no job can be reading a path repair rewrites.
+  repair_store_at_boot || exit 1
   # Never register a runner whose own runtime cannot execute a job.
   preflight_boot_closure || exit 1
 }
@@ -468,16 +470,19 @@ runner_runtime_missing() {
   [ -n "${RUNNER_DIST:-}" ] && [ ! -e "${RUNNER_DIST}/bin/run.sh" ]
 }
 
-# Shared by the GC and store-verify loops: if the runner's own runtime is
-# gone, Runner.Listener keeps accepting jobs on deleted-but-open files and
-# every job dies at GitHub's ten-minute no-communication timeout. Stopping
-# it instead queues jobs and fails the boot preflight loudly. Signal -1, not
-# PID 1 directly: the exec'd runner installs no TERM handler on PID 1.
-stop_runner_for_missing_runtime() {
-  echo "vega-builder: FATAL: the runner's own runtime (${RUNNER_DIST}) is gone from the store; stopping the runner so jobs queue instead of timing out" >&2
+# Take the runner out of service: queued jobs wait instead of running, and
+# docker's restart reruns the boot path. Signal -1, not PID 1 directly: the
+# exec'd runner installs no TERM handler on PID 1, and the kernel discards a
+# handler-less signal sent to a namespace's init from inside it.
+stop_runner() {
+  echo "vega-builder: FATAL: $1; stopping the runner so jobs queue instead of running" >&2
   kill -TERM -- -1 2>/dev/null || true
   exit 1
 }
+
+# Left on the persistent /nix volume by a maintenance check that found
+# corruption, so the next boot repairs before the runner can take a job.
+STORE_CORRUPT_MARKER="${STORE_CORRUPT_MARKER:-/nix/var/vega-builder/store-corrupt}"
 
 # Whether to run the periodic store GC. On by default; off via VEGA_GC in
 # {false,0,off}. Skipped for an EPHEMERAL runner, whose container (and store) is
@@ -500,68 +505,68 @@ store_verify_enabled() {
   return 0
 }
 
-# Periodically garbage-collect the Nix store so a long-lived runner's /nix does
-# not grow unbounded (a persistent runner accumulates every path it ever built or
-# substituted). Runs in the background alongside the runner; nix-collect-garbage
-# takes the store GC lock and honors in-flight build temproots, so it never
-# deletes a path a running build needs (an unrooted, older-than-threshold path is
-# the normal GC target). Tunables (sleep/nix duration suffixes): VEGA_GC=false to
-# disable, VEGA_GC_DELETE_OLDER_THAN (default 7d), VEGA_GC_INTERVAL (default 7d),
-# VEGA_GC_INITIAL_DELAY (default 1h, so a fresh container does not GC-storm).
-start_periodic_gc() {
-  gc_enabled || return 0
-  local older="${VEGA_GC_DELETE_OLDER_THAN:-7d}"
-  local interval="${VEGA_GC_INTERVAL:-7d}"
-  local delay="${VEGA_GC_INITIAL_DELAY:-1h}"
-  echo "vega-builder: periodic store GC enabled (--delete-older-than ${older}, every ${interval}, first after ${delay})" >&2
-  (
-    sleep "$delay"
-    while true; do
-      summary="$(nix-collect-garbage --delete-older-than "$older" 2>&1 | tail -n1)" || true
-      echo "vega-builder: periodic GC: ${summary}" >&2
-      # GC cannot remove the runner's own runtime once the boot closure is
-      # registered and rooted, but a corrupted database or an operator
-      # wiping /nix can; see stop_runner_for_missing_runtime.
-      runner_runtime_missing && stop_runner_for_missing_runtime
-      sleep "$interval"
-    done
-  ) &
-}
-
-# Whether a job is running, so a mutating store operation can defer to it.
-# Reads /proc directly: the image ships no ps/pgrep (see the tool-closure
-# test in entrypoint.test.sh). Runner.Worker is the child process GitHub's
-# listener spawns to actually run a job.
-job_in_flight() {
-  local cmdline
-  for cmdline in /proc/[0-9]*/cmdline; do
-    # Subshelled: a process exiting between the glob and the read makes the
-    # redirect itself fail, and bash reports that to its own stderr no
-    # matter what the command inside redirects.
-    (tr '\0' '\n' <"$cmdline") 2>/dev/null | grep -qE '(^|/)Runner\.Worker$' && return 0
-  done
+# One read-only content check. Nix hashes a fixed-output derivation only at
+# fetch time, so a build killed mid-write can leave a corrupted path that
+# stays registered valid and feeds every later build that uses it. Repairing
+# here could rewrite a path a job is reading, so a failure records the output
+# in STORE_CORRUPT_MARKER for repair_store_at_boot and returns non-zero.
+store_verify_once() {
+  local out rc=0
+  out="$(nix-store --verify --check-contents 2>&1)" || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  mkdir -p "$(dirname "$STORE_CORRUPT_MARKER")"
+  printf '%s\n' "$out" >"$STORE_CORRUPT_MARKER"
   return 1
 }
 
-# Periodically verify the store's CONTENT, not just GC's unreferenced-path
-# check: a build killed mid-write can leave a corrupted path registered
-# valid forever, since Nix only hashes a fixed-output derivation at fetch
-# time. `--check-contents` only reads, so it runs every cycle; `--repair`
-# deletes and rewrites a path, unlike GC's deletion of the unreferenced, so
-# it only runs while job_in_flight is false. See VEGA_STORE_VERIFY* below.
-start_periodic_store_verify() {
-  store_verify_enabled || return 0
-  local interval="${VEGA_STORE_VERIFY_INTERVAL:-1d}"
-  local delay="${VEGA_STORE_VERIFY_INITIAL_DELAY:-1h}"
-  echo "vega-builder: periodic store verify enabled (every ${interval}, first after ${delay})" >&2
+# Repair a store a maintenance check marked corrupt. Called before the runner
+# registers, the one point where no job can be reading the store. A path no
+# substituter can supply (a local build) cannot be repaired, and building on a
+# known-corrupt store is worse than a runner that is visibly down, so that
+# case refuses to start.
+repair_store_at_boot() {
+  [ -e "$STORE_CORRUPT_MARKER" ] || return 0
+  echo "vega-builder: a maintenance check found corrupted store paths; repairing before the runner registers" >&2
+  local out rc=0
+  out="$(nix-store --verify --check-contents --repair 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf '%s\n' "$out" >"$STORE_CORRUPT_MARKER"
+    printf '%s\n' "$out" | tail -n 5 >&2
+    echo "vega-builder: FATAL: the store could not be repaired, so the runner will not register. Delete the paths named in ${STORE_CORRUPT_MARKER} or recreate the /nix volume." >&2
+    return 1
+  fi
+  rm -f "$STORE_CORRUPT_MARKER"
+  echo "vega-builder: store repaired" >&2
+}
+
+# Periodic store maintenance for a long-lived runner: GC so /nix does not grow
+# without bound, then a content check. Serial in one loop so GC never deletes
+# a path the check is reading. nix-collect-garbage takes the GC lock and
+# honors in-flight build temproots. Tunables: VEGA_GC / VEGA_STORE_VERIFY
+# (false to disable either), VEGA_GC_DELETE_OLDER_THAN (7d), VEGA_GC_INTERVAL
+# (7d, the whole cycle), VEGA_GC_INITIAL_DELAY (1h).
+start_periodic_maintenance() {
+  gc_enabled || store_verify_enabled || return 0
+  local older="${VEGA_GC_DELETE_OLDER_THAN:-7d}"
+  local interval="${VEGA_GC_INTERVAL:-7d}"
+  local delay="${VEGA_GC_INITIAL_DELAY:-1h}"
+  echo "vega-builder: periodic store maintenance enabled (gc: $(gc_enabled && echo on || echo off), content check: $(store_verify_enabled && echo on || echo off), every ${interval}, first after ${delay})" >&2
   (
     sleep "$delay"
     while true; do
-      local repair_args=()
-      job_in_flight || repair_args=(--repair)
-      summary="$(nix-store --verify --check-contents "${repair_args[@]}" 2>&1 | tail -n3)" || true
-      echo "vega-builder: periodic store verify: ${summary}" >&2
-      runner_runtime_missing && stop_runner_for_missing_runtime
+      if gc_enabled; then
+        summary="$(nix-collect-garbage --delete-older-than "$older" 2>&1 | tail -n1)" || true
+        echo "vega-builder: periodic GC: ${summary}" >&2
+      fi
+      if store_verify_enabled; then
+        local t0; t0="$(date +%s)"
+        store_verify_once || stop_runner "the store content check found corrupted paths (${STORE_CORRUPT_MARKER})"
+        echo "vega-builder: store content check passed in $(($(date +%s) - t0))s" >&2
+      fi
+      # GC cannot remove the runner's own runtime once the boot closure is
+      # registered and rooted, but a corrupted database or an operator wiping
+      # /nix can.
+      runner_runtime_missing && stop_runner "the runner's own runtime (${RUNNER_DIST}) is gone from the store"
       sleep "$interval"
     done
   ) &
@@ -647,11 +652,7 @@ run_runner() {
     unset token
   fi
 
-  # Background store GC and content verification before handing PID 1 to the
-  # runner, so a persistent runner's /nix is trimmed and checked for
-  # corruption on a schedule rather than growing or rotting without bound.
-  start_periodic_gc
-  start_periodic_store_verify
+  start_periodic_maintenance
 
   exec "$RUNNER_DIST/bin/run.sh"
 }

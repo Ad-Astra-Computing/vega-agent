@@ -126,37 +126,52 @@ sv "0 disables"         0     false 1
 sv "off disables"       off   false 1
 sv "ephemeral disables" true  true  1
 
-# job_in_flight: the guard that keeps --repair from racing a live build. Uses
-# a real process (exec -a renames argv[0] so /proc/<pid>/cmdline carries the
-# name job_in_flight greps for) rather than stubbing /proc, since the whole
-# point is reading the real kernel-provided cmdline.
-rc=0
-job_in_flight || rc=$?
-if [ "$rc" != 1 ]; then
-  echo "FAIL: job_in_flight with none running -> rc=$rc (want 1)" >&2
-  fails=$((fails + 1))
-else
-  echo "ok: job_in_flight none running"
-fi
+# store_verify_once / repair_store_at_boot: the control flow around Nix's own
+# corruption detection (store-verify.test.sh proves the detection itself).
+# nix-store is stubbed as a function: NIXSTORE_RC is its exit status, and it
+# appends its arguments to a file because the callers run it in a $(...)
+# subshell, where a variable assignment would never reach this script.
+sv_tmp="$(mktemp -d)"
+STORE_CORRUPT_MARKER="$sv_tmp/var/store-corrupt"
+NIXSTORE_LOG="$sv_tmp/calls"
+NIXSTORE_RC=0
+# shellcheck disable=SC2329  # called indirectly, by the functions under test
+nix-store() { echo "$*" >>"$NIXSTORE_LOG"; echo "stub output"; return "$NIXSTORE_RC"; }
+calls() { cat "$NIXSTORE_LOG" 2>/dev/null; }
+reset_calls() { : >"$NIXSTORE_LOG"; }
+assert() {
+  if eval "$2"; then echo "ok: $1"; else echo "FAIL: $1" >&2; fails=$((fails + 1)); fi
+}
 
-exec -a "Runner.Worker" bash -c "sleep 5; true" &
-worker_pid=$!
-# Wait for the renamed process's cmdline to actually land, rather than a
-# fixed sleep: exec -a's rename is not guaranteed visible to /proc instantly.
-for _ in $(seq 1 50); do
-  tr '\0' '\n' <"/proc/$worker_pid/cmdline" 2>/dev/null | grep -q 'Runner\.Worker' && break
-  sleep 0.1
-done
-rc=0
-job_in_flight || rc=$?
-kill "$worker_pid" 2>/dev/null || true
-wait "$worker_pid" 2>/dev/null || true
-if [ "$rc" != 0 ]; then
-  echo "FAIL: job_in_flight with Runner.Worker running -> rc=$rc (want 0)" >&2
-  fails=$((fails + 1))
-else
-  echo "ok: job_in_flight detects a running Runner.Worker"
-fi
+# shellcheck disable=SC2016  # assertions are eval'd later, on purpose
+{
+reset_calls; NIXSTORE_RC=0; rc=0; store_verify_once || rc=$?
+assert "verify clean returns 0"            '[ "$rc" = 0 ]'
+assert "verify clean leaves no marker"     '[ ! -e "$STORE_CORRUPT_MARKER" ]'
+assert "verify ran --check-contents"       '[[ "$(calls)" == *--check-contents* ]]'
+assert "verify never repairs"              '[[ "$(calls)" != *--repair* ]]'
+
+reset_calls; NIXSTORE_RC=1; rc=0; store_verify_once || rc=$?
+assert "verify corrupt returns non-zero"   '[ "$rc" != 0 ]'
+assert "verify corrupt writes the marker"  'grep -q "stub output" "$STORE_CORRUPT_MARKER"'
+assert "verify corrupt still never repairs" '[[ "$(calls)" != *--repair* ]]'
+
+reset_calls; NIXSTORE_RC=0; rc=0; repair_store_at_boot 2>/dev/null || rc=$?
+assert "boot repair succeeds"              '[ "$rc" = 0 ]'
+assert "boot repair passes --repair"       '[[ "$(calls)" == *--repair* ]]'
+assert "boot repair clears the marker"     '[ ! -e "$STORE_CORRUPT_MARKER" ]'
+
+reset_calls; rc=0; repair_store_at_boot 2>/dev/null || rc=$?
+assert "boot without a marker is a no-op"  '[ "$rc" = 0 ] && [ -z "$(calls)" ]'
+
+mkdir -p "$(dirname "$STORE_CORRUPT_MARKER")"; echo old >"$STORE_CORRUPT_MARKER"
+NIXSTORE_RC=1; rc=0; repair_store_at_boot 2>/dev/null || rc=$?
+assert "unrepairable store refuses to boot" '[ "$rc" != 0 ]'
+assert "unrepairable store keeps the marker" 'grep -q "stub output" "$STORE_CORRUPT_MARKER"'
+
+}
+unset -f nix-store
+rm -rf "$sv_tmp"
 
 # nix_conf_contents: the generated nix.conf must substitute from the Vega cache
 # (with its key trusted) in addition to cache.nixos.org, and still append the
