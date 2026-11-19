@@ -71,9 +71,11 @@ export function registerWorker(program: Command): void {
     .option("--url <url>", "Vega control plane URL (default: prod, or $VEGA_URL)")
     .action((address: string, opts: { url?: string }) =>
       run(async () => {
-        await contactSet(deps(opts, `vega worker contact set ${address}`), address);
+        const d = deps(opts, `vega worker contact set ${address}`);
+        await contactSet(d, address);
         success(`Vega sends a confirmation message to ${pc.bold(address.trim())} if it can.`);
         info("  Alerts start once you follow the link in it. The link works for 24 hours.");
+        info(`  Confirming lets Vega store the address, encrypted, for these alerts only: ${pc.cyan(`${d.url}/privacy#worker-alerts`)}`);
       }),
     );
 
