@@ -3,16 +3,11 @@
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-  # The GitHub Actions runner is pinned SEPARATELY from the rest of the toolchain,
-  # because GitHub deprecates old runner versions SERVER-SIDE on its own schedule:
-  # a deprecated runner is refused before it can self-update, and every deployed
-  # builder bricks at once (the store-baked runner cannot update in place). The
-  # main pin lagged at github-runner 2.334.0, which GitHub deprecated, taking the
-  # whole fleet offline. Advancing only this input re-floats the runner without
-  # rebuilding the rest of the image on a fresh nixpkgs. This is the one knob to
-  # bump when GitHub deprecates a runner: move it to a rev whose github-runner is
-  # current (`nix eval --raw --impure --expr '(import (builtins.getFlake "github:NixOS/nixpkgs/<rev>") {}).github-runner.version'`).
-  inputs.nixpkgs-runner.url = "github:NixOS/nixpkgs/8be7bd0c83f12e2e3bbba07c9044d6fed9e66f7f";
+  # Separate input: GitHub refuses a runner more than 30 days behind the
+  # latest release, and this one cannot update itself once baked into the
+  # image. Its own nixos-unstable tracking lets update-flake-lock advance it
+  # without rebuilding the rest of the image on the main nixpkgs input.
+  inputs.nixpkgs-runner.url = "github:NixOS/nixpkgs/nixos-unstable";
 
   outputs =
     { self, nixpkgs, nixpkgs-runner }:
