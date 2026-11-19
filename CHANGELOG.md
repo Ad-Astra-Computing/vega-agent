@@ -6,6 +6,22 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.22.3] - 2026-11-19
+
+### Fixed
+
+- The builder image's `github-runner` tracked a fixed nixpkgs revision nothing
+  advanced, so GitHub's rolling 30-day minimum runner version deprecated it
+  and self-hosted runners stopped registering. `nixpkgs-runner` now tracks
+  nixos-unstable as its own input, bumped here to the current release.
+
+### Added
+
+- `update-runner-lock.yml` advances that input weekly and auto-merges once
+  checks pass, and `check-runner-freshness.sh` runs daily and fails once
+  the pinned runner nears GitHub's 30-day cutoff, independent of that
+  workflow.
+
 ## [0.22.2] - 2026-11-18
 
 ### Security
