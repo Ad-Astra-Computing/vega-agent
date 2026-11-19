@@ -462,10 +462,21 @@ setup_nix() {
   preflight_boot_closure || exit 1
 }
 
-# The GC backstop's trigger: the runner's own runtime is gone from the store.
-# Split out so the test harness can pin the condition.
+# The GC/verify backstop's trigger: the runner's own runtime is gone from the
+# store. Split out so the test harness can pin the condition.
 runner_runtime_missing() {
   [ -n "${RUNNER_DIST:-}" ] && [ ! -e "${RUNNER_DIST}/bin/run.sh" ]
+}
+
+# Shared by the GC and store-verify loops: if the runner's own runtime is
+# gone, Runner.Listener keeps accepting jobs on deleted-but-open files and
+# every job dies at GitHub's ten-minute no-communication timeout. Stopping
+# it instead queues jobs and fails the boot preflight loudly. Signal -1, not
+# PID 1 directly: the exec'd runner installs no TERM handler on PID 1.
+stop_runner_for_missing_runtime() {
+  echo "vega-builder: FATAL: the runner's own runtime (${RUNNER_DIST}) is gone from the store; stopping the runner so jobs queue instead of timing out" >&2
+  kill -TERM -- -1 2>/dev/null || true
+  exit 1
 }
 
 # Whether to run the periodic store GC. On by default; off via VEGA_GC in
@@ -473,6 +484,17 @@ runner_runtime_missing() {
 # fresh per job, so nothing accumulates to collect.
 gc_enabled() {
   local v="${VEGA_GC:-true}"
+  case "${v,,}" in false | 0 | off | no) return 1 ;; esac
+  [ "${VEGA_RUNNER_EPHEMERAL:-false}" = "true" ] && return 1
+  return 0
+}
+
+# Whether to run the periodic store-content verification. On by default; off
+# via VEGA_STORE_VERIFY in {false,0,off}. Skipped for an EPHEMERAL runner for
+# the same reason as GC: a fresh-per-job store cannot have accumulated the
+# kind of corruption this checks for.
+store_verify_enabled() {
+  local v="${VEGA_STORE_VERIFY:-true}"
   case "${v,,}" in false | 0 | off | no) return 1 ;; esac
   [ "${VEGA_RUNNER_EPHEMERAL:-false}" = "true" ] && return 1
   return 0
@@ -497,24 +519,49 @@ start_periodic_gc() {
     while true; do
       summary="$(nix-collect-garbage --delete-older-than "$older" 2>&1 | tail -n1)" || true
       echo "vega-builder: periodic GC: ${summary}" >&2
-      # Backstop against the silent-brick mode: if a GC ever removes the
-      # runner's own runtime (it cannot once the boot closure is registered and
-      # rooted, but a corrupted database or an operator wiping /nix can), the
-      # already-running Runner.Listener would keep accepting jobs on its
-      # deleted-but-open files and every job would die at GitHub's ten-minute
-      # no-communication timeout. Stop the runner instead: offline means queued
-      # jobs wait, and the restarted container fails the boot preflight loudly.
-      # Signal -1 (every process in the namespace except this subshell and
-      # PID 1), NOT PID 1 directly: the exec'd runner installs no TERM handler
-      # on PID 1, and the kernel discards handler-less signals sent to a PID
-      # namespace's init from inside, so `kill 1` succeeds while stopping
-      # nothing. Killing the runner's process tree makes PID 1's run.sh see its
-      # child die and exit; docker's restart then hits the boot preflight.
-      if runner_runtime_missing; then
-        echo "vega-builder: FATAL: the runner's own runtime (${RUNNER_DIST}) is gone from the store; stopping the runner so jobs queue instead of timing out" >&2
-        kill -TERM -- -1 2>/dev/null || true
-        exit 1
-      fi
+      # GC cannot remove the runner's own runtime once the boot closure is
+      # registered and rooted, but a corrupted database or an operator
+      # wiping /nix can; see stop_runner_for_missing_runtime.
+      runner_runtime_missing && stop_runner_for_missing_runtime
+      sleep "$interval"
+    done
+  ) &
+}
+
+# Whether a job is running, so a mutating store operation can defer to it.
+# Reads /proc directly: the image ships no ps/pgrep (see the tool-closure
+# test in entrypoint.test.sh). Runner.Worker is the child process GitHub's
+# listener spawns to actually run a job.
+job_in_flight() {
+  local cmdline
+  for cmdline in /proc/[0-9]*/cmdline; do
+    # Subshelled: a process exiting between the glob and the read makes the
+    # redirect itself fail, and bash reports that to its own stderr no
+    # matter what the command inside redirects.
+    (tr '\0' '\n' <"$cmdline") 2>/dev/null | grep -q 'Runner\.Worker' && return 0
+  done
+  return 1
+}
+
+# Periodically verify the store's CONTENT, not just GC's unreferenced-path
+# check: a build killed mid-write can leave a corrupted path registered
+# valid forever, since Nix only hashes a fixed-output derivation at fetch
+# time. `--check-contents` only reads, so it runs every cycle; `--repair`
+# deletes and rewrites a path, unlike GC's deletion of the unreferenced, so
+# it only runs while job_in_flight is false. See VEGA_STORE_VERIFY* below.
+start_periodic_store_verify() {
+  store_verify_enabled || return 0
+  local interval="${VEGA_STORE_VERIFY_INTERVAL:-1d}"
+  local delay="${VEGA_STORE_VERIFY_INITIAL_DELAY:-1h}"
+  echo "vega-builder: periodic store verify enabled (every ${interval}, first after ${delay})" >&2
+  (
+    sleep "$delay"
+    while true; do
+      local repair_args=()
+      job_in_flight || repair_args=(--repair)
+      summary="$(nix-store --verify --check-contents "${repair_args[@]}" 2>&1 | tail -n3)" || true
+      echo "vega-builder: periodic store verify: ${summary}" >&2
+      runner_runtime_missing && stop_runner_for_missing_runtime
       sleep "$interval"
     done
   ) &
@@ -600,9 +647,11 @@ run_runner() {
     unset token
   fi
 
-  # Background store GC before handing PID 1 to the runner, so a persistent
-  # runner's /nix is trimmed on a schedule rather than growing without bound.
+  # Background store GC and content verification before handing PID 1 to the
+  # runner, so a persistent runner's /nix is trimmed and checked for
+  # corruption on a schedule rather than growing or rotting without bound.
   start_periodic_gc
+  start_periodic_store_verify
 
   exec "$RUNNER_DIST/bin/run.sh"
 }

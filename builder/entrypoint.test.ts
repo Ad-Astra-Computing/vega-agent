@@ -19,6 +19,12 @@ describe("builder entrypoint", () => {
     expect(out).toContain("all entrypoint credential tests passed");
   });
 
+  it("nix-store --verify --check-contents catches on-disk corruption (bash)", () => {
+    const script = fileURLToPath(new URL("./store-verify.test.sh", import.meta.url));
+    const out = execFileSync("bash", [script], { encoding: "utf8" });
+    expect(out).toContain("all store-verify tests passed");
+  });
+
   it("boot shim: fast path, volume self-seed and fail-loud cases (bash)", () => {
     const script = fileURLToPath(new URL("./bootstrap.test.sh", import.meta.url));
     // Capture stderr too: the suite reports a skipped busybox pass there, and

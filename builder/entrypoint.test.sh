@@ -106,6 +106,58 @@ gc "off+ephemeral disabled" false   true  1
 gc "False (case-insensitive)" False   false 1
 gc "OFF (case-insensitive)"   OFF     false 1
 
+# store_verify_enabled: same gate shape as gc_enabled, own env var.
+# sv <name> <VEGA_STORE_VERIFY> <VEGA_RUNNER_EPHEMERAL> <want_rc> (0=enabled, 1=disabled)
+sv() {
+  local name="$1" vsv="$2" eph="$3" want_rc="$4" rc=0
+  VEGA_STORE_VERIFY="$vsv" VEGA_RUNNER_EPHEMERAL="$eph" store_verify_enabled || rc=$?
+  if [ "$rc" != "$want_rc" ]; then
+    echo "FAIL: sv $name -> rc=$rc (want $want_rc)" >&2
+    fails=$((fails + 1))
+  else
+    echo "ok: sv $name"
+  fi
+}
+
+sv "default on"         ""    false 0
+sv "explicit true on"   true  false 0
+sv "false disables"     false false 1
+sv "0 disables"         0     false 1
+sv "off disables"       off   false 1
+sv "ephemeral disables" true  true  1
+
+# job_in_flight: the guard that keeps --repair from racing a live build. Uses
+# a real process (exec -a renames argv[0] so /proc/<pid>/cmdline carries the
+# name job_in_flight greps for) rather than stubbing /proc, since the whole
+# point is reading the real kernel-provided cmdline.
+rc=0
+job_in_flight || rc=$?
+if [ "$rc" != 1 ]; then
+  echo "FAIL: job_in_flight with none running -> rc=$rc (want 1)" >&2
+  fails=$((fails + 1))
+else
+  echo "ok: job_in_flight none running"
+fi
+
+exec -a "Runner.Worker" bash -c "sleep 5; true" &
+worker_pid=$!
+# Wait for the renamed process's cmdline to actually land, rather than a
+# fixed sleep: exec -a's rename is not guaranteed visible to /proc instantly.
+for _ in $(seq 1 50); do
+  tr '\0' '\n' <"/proc/$worker_pid/cmdline" 2>/dev/null | grep -q 'Runner\.Worker' && break
+  sleep 0.1
+done
+rc=0
+job_in_flight || rc=$?
+kill "$worker_pid" 2>/dev/null || true
+wait "$worker_pid" 2>/dev/null || true
+if [ "$rc" != 0 ]; then
+  echo "FAIL: job_in_flight with Runner.Worker running -> rc=$rc (want 0)" >&2
+  fails=$((fails + 1))
+else
+  echo "ok: job_in_flight detects a running Runner.Worker"
+fi
+
 # nix_conf_contents: the generated nix.conf must substitute from the Vega cache
 # (with its key trusted) in addition to cache.nixos.org, and still append the
 # operator's extra caches. This pins the fix for the builder that could not
