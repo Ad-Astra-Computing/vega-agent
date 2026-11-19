@@ -19,6 +19,10 @@ describe("builder entrypoint", () => {
     expect(out).toContain("all entrypoint credential tests passed");
   });
 
+  // store-verify.test.sh needs a real nix-store binary, which this job's
+  // runner does not carry: it runs in ci.yml's `nix` job instead, which
+  // already installs Nix for `nix flake check`.
+
   it("boot shim: fast path, volume self-seed and fail-loud cases (bash)", () => {
     const script = fileURLToPath(new URL("./bootstrap.test.sh", import.meta.url));
     // Capture stderr too: the suite reports a skipped busybox pass there, and

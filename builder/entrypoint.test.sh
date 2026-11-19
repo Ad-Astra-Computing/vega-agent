@@ -106,6 +106,91 @@ gc "off+ephemeral disabled" false   true  1
 gc "False (case-insensitive)" False   false 1
 gc "OFF (case-insensitive)"   OFF     false 1
 
+# store_verify_enabled: same gate shape as gc_enabled, own env var.
+# sv <name> <VEGA_STORE_VERIFY> <VEGA_RUNNER_EPHEMERAL> <want_rc> (0=enabled, 1=disabled)
+sv() {
+  local name="$1" vsv="$2" eph="$3" want_rc="$4" rc=0
+  VEGA_STORE_VERIFY="$vsv" VEGA_RUNNER_EPHEMERAL="$eph" store_verify_enabled || rc=$?
+  if [ "$rc" != "$want_rc" ]; then
+    echo "FAIL: sv $name -> rc=$rc (want $want_rc)" >&2
+    fails=$((fails + 1))
+  else
+    echo "ok: sv $name"
+  fi
+}
+
+sv "default on"         ""    false 0
+sv "explicit true on"   true  false 0
+sv "false disables"     false false 1
+sv "0 disables"         0     false 1
+sv "off disables"       off   false 1
+sv "ephemeral disables" true  true  1
+
+# store_verify_once / repair_store_at_boot: the control flow around Nix's own
+# corruption detection (store-verify.test.sh proves the detection itself).
+# nix-store is stubbed as a function: NIXSTORE_RC is its exit status, and it
+# appends its arguments to a file because the callers run it in a $(...)
+# subshell, where a variable assignment would never reach this script.
+sv_tmp="$(mktemp -d)"
+STORE_CORRUPT_MARKER="$sv_tmp/var/store-corrupt"
+NIXSTORE_LOG="$sv_tmp/calls"
+NIXSTORE_RC=0
+# shellcheck disable=SC2329  # called indirectly, by the functions under test
+nix-store() { echo "$*" >>"$NIXSTORE_LOG"; echo "stub output"; return "$NIXSTORE_RC"; }
+calls() { cat "$NIXSTORE_LOG" 2>/dev/null; }
+reset_calls() { : >"$NIXSTORE_LOG"; }
+assert() {
+  if eval "$2"; then echo "ok: $1"; else echo "FAIL: $1" >&2; fails=$((fails + 1)); fi
+}
+
+# shellcheck disable=SC2016  # assertions are eval'd later, on purpose
+{
+reset_calls; NIXSTORE_RC=0; rc=0; store_verify_once || rc=$?
+assert "verify clean returns 0"            '[ "$rc" = 0 ]'
+assert "verify clean removes the marker"   '[ ! -e "$STORE_CORRUPT_MARKER" ]'
+assert "verify ran --check-contents"       '[[ "$(calls)" == *--check-contents* ]]'
+assert "verify never repairs"              '[[ "$(calls)" != *--repair* ]]'
+
+reset_calls; NIXSTORE_RC=1; rc=0; store_verify_once || rc=$?
+assert "verify corrupt returns non-zero"   '[ "$rc" != 0 ]'
+assert "verify corrupt records the output" 'grep -q "stub output" "$STORE_CORRUPT_MARKER"'
+assert "verify corrupt still never repairs" '[[ "$(calls)" != *--repair* ]]'
+
+# A marker that cannot be written must fail closed, without checking at all.
+# A path under a regular file fails even for root, where a mode would not.
+saved_marker="$STORE_CORRUPT_MARKER"
+: >"$sv_tmp/plainfile"; STORE_CORRUPT_MARKER="$sv_tmp/plainfile/store-corrupt"
+reset_calls; NIXSTORE_RC=0; rc=0; store_verify_once 2>/dev/null || rc=$?
+assert "unwritable marker fails closed"    '[ "$rc" != 0 ] && [ -z "$(calls)" ]'
+STORE_CORRUPT_MARKER="$saved_marker"
+
+echo check-in-progress >"$STORE_CORRUPT_MARKER"
+reset_calls; NIXSTORE_RC=0; rc=0; repair_store_at_boot 2>/dev/null || rc=$?
+assert "interrupted check repairs at boot" '[ "$rc" = 0 ] && [[ "$(calls)" == *--repair* ]]'
+assert "boot repair clears the marker"     '[ ! -e "$STORE_CORRUPT_MARKER" ]'
+
+reset_calls; rc=0; repair_store_at_boot 2>/dev/null || rc=$?
+assert "boot without a marker is a no-op"  '[ "$rc" = 0 ] && [ -z "$(calls)" ]'
+
+printf 'corrupt\nold\n' >"$STORE_CORRUPT_MARKER"
+reset_calls; NIXSTORE_RC=1; rc=0; repair_store_at_boot 2>/dev/null || rc=$?
+assert "unrepairable store refuses to boot" '[ "$rc" != 0 ]'
+assert "unrepairable store records repair-failed" '[ "$(head -n1 "$STORE_CORRUPT_MARKER")" = repair-failed ]'
+
+reset_calls; NIXSTORE_RC=0; rc=0; repair_store_at_boot 2>/dev/null || rc=$?
+assert "a failed repair is not retried on restart" '[ "$rc" != 0 ] && [ -z "$(calls)" ]'
+
+# A marker that cannot take the repair-failed state must not be repaired, or
+# a full volume would repeat a whole-store repair on every restart. A
+# directory in its place is present but unwritable, even for root.
+rm -f "$STORE_CORRUPT_MARKER"; mkdir "$STORE_CORRUPT_MARKER"
+reset_calls; NIXSTORE_RC=0; rc=0; repair_store_at_boot 2>/dev/null || rc=$?
+assert "unrecordable repair is not attempted" '[ "$rc" != 0 ] && [ -z "$(calls)" ]'
+rmdir "$STORE_CORRUPT_MARKER"
+}
+unset -f nix-store
+rm -rf "$sv_tmp"
+
 # nix_conf_contents: the generated nix.conf must substitute from the Vega cache
 # (with its key trusted) in addition to cache.nixos.org, and still append the
 # operator's extra caches. This pins the fix for the builder that could not

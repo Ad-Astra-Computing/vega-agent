@@ -31,6 +31,9 @@ run() {
 run "typecheck" npm run typecheck
 run "unit tests" npm test
 run "builder bootstrap" bash builder/bootstrap.test.sh
+run "builder entrypoint" bash builder/entrypoint.test.sh
+run "builder entrypoint credentials" bash builder/entrypoint-credentials.test.sh
+run "builder store verify" bash builder/store-verify.test.sh
 
 # The version lives in two files and a changelog heading. They drift silently:
 # a release with a stale version reports the wrong thing to every user through

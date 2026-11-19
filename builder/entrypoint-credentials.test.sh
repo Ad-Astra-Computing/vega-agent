@@ -12,10 +12,15 @@ fails=0
 ok() { echo "ok: $1"; }
 fail() { echo "FAIL: $1" >&2; fails=$((fails + 1)); }
 
-# Real work (Nix store init, GC) is irrelevant to credential handling; stub
-# both so this test needs no container.
+# Real work (Nix store init, store maintenance) is irrelevant to credential
+# handling; stub both so this test needs no container. Each must exist first:
+# stubbing a name run_runner no longer calls would let the real background
+# loop start and hold this script's output open, so the caller never returns.
+for f in setup_nix start_periodic_maintenance; do
+  declare -F "$f" >/dev/null || { echo "FAIL: entrypoint.sh has no $f to stub" >&2; exit 1; }
+done
 setup_nix() { :; }
-start_periodic_gc() { :; }
+start_periodic_maintenance() { :; }
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT

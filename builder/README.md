@@ -167,6 +167,17 @@ Notes:
   `VEGA_GC=false` (disable), `VEGA_GC_DELETE_OLDER_THAN` (default `7d`),
   `VEGA_GC_INTERVAL` (default `7d`) and `VEGA_GC_INITIAL_DELAY` (default `1h`).
   An ephemeral runner skips it (its store is fresh per job).
+- After each GC, the same cycle checks the store's content against its
+  database (`nix-store --verify --check-contents`, read-only). Nix hashes a
+  fetched path only once, so a build killed mid-write can leave a corrupted
+  path registered valid. If the check finds one, the runner stops and leaves a
+  marker on the `/nix` volume; on the next start, before the runner registers,
+  the entrypoint runs the same check with `--repair`. A path no substituter can
+  supply cannot be repaired; the runner then refuses to start, names the paths
+  in `/nix/var/vega-builder/store-corrupt`, and keeps refusing without
+  retrying the repair until that file is deleted. `VEGA_STORE_VERIFY=false` disables the check; it shares
+  `VEGA_GC_INTERVAL`. The check reads every byte of the store, so on a large
+  store expect it to take minutes and compete for disk with a build.
 - **The store has a free-space floor, enforced during a build.** A periodic GC
   runs between builds, so it cannot help when one build produces more garbage
   than the disk has headroom: the build fills the disk first, and on a shared
