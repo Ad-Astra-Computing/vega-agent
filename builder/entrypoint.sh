@@ -508,34 +508,47 @@ store_verify_enabled() {
 # One read-only content check. Nix hashes a fixed-output derivation only at
 # fetch time, so a build killed mid-write can leave a corrupted path that
 # stays registered valid and feeds every later build that uses it. Repairing
-# here could rewrite a path a job is reading, so a failure records the output
-# in STORE_CORRUPT_MARKER for repair_store_at_boot and returns non-zero.
+# here could rewrite a path a job is reading, so this only records: the marker
+# is written BEFORE the check and removed only after it passes, so a check that
+# is killed, or a volume that cannot take the marker, still fails closed.
 store_verify_once() {
+  if ! { mkdir -p "$(dirname "$STORE_CORRUPT_MARKER")" && echo "check-in-progress" >"$STORE_CORRUPT_MARKER"; }; then
+    echo "vega-builder: cannot write ${STORE_CORRUPT_MARKER}" >&2
+    return 1
+  fi
   local out rc=0
   out="$(nix-store --verify --check-contents 2>&1)" || rc=$?
-  [ "$rc" -eq 0 ] && return 0
-  mkdir -p "$(dirname "$STORE_CORRUPT_MARKER")"
-  printf '%s\n' "$out" >"$STORE_CORRUPT_MARKER"
+  if [ "$rc" -eq 0 ]; then
+    rm -f "$STORE_CORRUPT_MARKER" || return 1
+    return 0
+  fi
+  printf 'corrupt\n%s\n' "$out" >"$STORE_CORRUPT_MARKER" || true
   return 1
 }
 
-# Repair a store a maintenance check marked corrupt. Called before the runner
-# registers, the one point where no job can be reading the store. A path no
-# substituter can supply (a local build) cannot be repaired, and building on a
-# known-corrupt store is worse than a runner that is visibly down, so that
-# case refuses to start.
+# Repair a store a maintenance check marked, before the runner registers: the
+# one point where no job can be reading it. A path no substituter can supply
+# (a local build) cannot be repaired, and building on a known-corrupt store is
+# worse than a runner that is visibly down, so that refuses to start. The
+# failure is recorded, so later restarts refuse at once instead of repeating a
+# whole-store repair in a loop.
 repair_store_at_boot() {
   [ -e "$STORE_CORRUPT_MARKER" ] || return 0
+  local action="Delete the paths named in ${STORE_CORRUPT_MARKER} and then the file itself to retry, or recreate the /nix volume."
+  if [ "$(head -n1 "$STORE_CORRUPT_MARKER" 2>/dev/null)" = "repair-failed" ]; then
+    echo "vega-builder: FATAL: an earlier store repair failed, so the runner will not register. ${action}" >&2
+    return 1
+  fi
   echo "vega-builder: a maintenance check found corrupted store paths; repairing before the runner registers" >&2
   local out rc=0
   out="$(nix-store --verify --check-contents --repair 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then
-    printf '%s\n' "$out" >"$STORE_CORRUPT_MARKER"
+    printf 'repair-failed\n%s\n' "$out" >"$STORE_CORRUPT_MARKER" || true
     printf '%s\n' "$out" | tail -n 5 >&2
-    echo "vega-builder: FATAL: the store could not be repaired, so the runner will not register. Delete the paths named in ${STORE_CORRUPT_MARKER} or recreate the /nix volume." >&2
+    echo "vega-builder: FATAL: the store could not be repaired, so the runner will not register. ${action}" >&2
     return 1
   fi
-  rm -f "$STORE_CORRUPT_MARKER"
+  rm -f "$STORE_CORRUPT_MARKER" || return 1
   echo "vega-builder: store repaired" >&2
 }
 

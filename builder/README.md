@@ -173,8 +173,9 @@ Notes:
   path registered valid. If the check finds one, the runner stops and leaves a
   marker on the `/nix` volume; on the next start, before the runner registers,
   the entrypoint runs the same check with `--repair`. A path no substituter can
-  supply cannot be repaired, and the runner then refuses to start and names the
-  paths to delete. `VEGA_STORE_VERIFY=false` disables the check; it shares
+  supply cannot be repaired; the runner then refuses to start, names the paths
+  in `/nix/var/vega-builder/store-corrupt`, and keeps refusing without
+  retrying the repair until that file is deleted. `VEGA_STORE_VERIFY=false` disables the check; it shares
   `VEGA_GC_INTERVAL`. The check reads every byte of the store, so on a large
   store expect it to take minutes and compete for disk with a build.
 - **The store has a free-space floor, enforced during a build.** A periodic GC

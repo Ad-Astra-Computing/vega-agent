@@ -147,28 +147,38 @@ assert() {
 {
 reset_calls; NIXSTORE_RC=0; rc=0; store_verify_once || rc=$?
 assert "verify clean returns 0"            '[ "$rc" = 0 ]'
-assert "verify clean leaves no marker"     '[ ! -e "$STORE_CORRUPT_MARKER" ]'
+assert "verify clean removes the marker"   '[ ! -e "$STORE_CORRUPT_MARKER" ]'
 assert "verify ran --check-contents"       '[[ "$(calls)" == *--check-contents* ]]'
 assert "verify never repairs"              '[[ "$(calls)" != *--repair* ]]'
 
 reset_calls; NIXSTORE_RC=1; rc=0; store_verify_once || rc=$?
 assert "verify corrupt returns non-zero"   '[ "$rc" != 0 ]'
-assert "verify corrupt writes the marker"  'grep -q "stub output" "$STORE_CORRUPT_MARKER"'
+assert "verify corrupt records the output" 'grep -q "stub output" "$STORE_CORRUPT_MARKER"'
 assert "verify corrupt still never repairs" '[[ "$(calls)" != *--repair* ]]'
 
+# A marker that cannot be written must fail closed, without checking at all.
+# A path under a regular file fails even for root, where a mode would not.
+saved_marker="$STORE_CORRUPT_MARKER"
+: >"$sv_tmp/plainfile"; STORE_CORRUPT_MARKER="$sv_tmp/plainfile/store-corrupt"
+reset_calls; NIXSTORE_RC=0; rc=0; store_verify_once 2>/dev/null || rc=$?
+assert "unwritable marker fails closed"    '[ "$rc" != 0 ] && [ -z "$(calls)" ]'
+STORE_CORRUPT_MARKER="$saved_marker"
+
+echo check-in-progress >"$STORE_CORRUPT_MARKER"
 reset_calls; NIXSTORE_RC=0; rc=0; repair_store_at_boot 2>/dev/null || rc=$?
-assert "boot repair succeeds"              '[ "$rc" = 0 ]'
-assert "boot repair passes --repair"       '[[ "$(calls)" == *--repair* ]]'
+assert "interrupted check repairs at boot" '[ "$rc" = 0 ] && [[ "$(calls)" == *--repair* ]]'
 assert "boot repair clears the marker"     '[ ! -e "$STORE_CORRUPT_MARKER" ]'
 
 reset_calls; rc=0; repair_store_at_boot 2>/dev/null || rc=$?
 assert "boot without a marker is a no-op"  '[ "$rc" = 0 ] && [ -z "$(calls)" ]'
 
-mkdir -p "$(dirname "$STORE_CORRUPT_MARKER")"; echo old >"$STORE_CORRUPT_MARKER"
-NIXSTORE_RC=1; rc=0; repair_store_at_boot 2>/dev/null || rc=$?
+printf 'corrupt\nold\n' >"$STORE_CORRUPT_MARKER"
+reset_calls; NIXSTORE_RC=1; rc=0; repair_store_at_boot 2>/dev/null || rc=$?
 assert "unrepairable store refuses to boot" '[ "$rc" != 0 ]'
-assert "unrepairable store keeps the marker" 'grep -q "stub output" "$STORE_CORRUPT_MARKER"'
+assert "unrepairable store records repair-failed" '[ "$(head -n1 "$STORE_CORRUPT_MARKER")" = repair-failed ]'
 
+reset_calls; NIXSTORE_RC=0; rc=0; repair_store_at_boot 2>/dev/null || rc=$?
+assert "a failed repair is not retried on restart" '[ "$rc" != 0 ] && [ -z "$(calls)" ]'
 }
 unset -f nix-store
 rm -rf "$sv_tmp"
