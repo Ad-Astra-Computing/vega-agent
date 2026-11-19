@@ -3,7 +3,7 @@ import pc from "picocolors";
 import { controlPlaneFor, safeError } from "../context.js";
 import { githubDeviceToken } from "../github-auth.js";
 import { fetchUncompressed } from "../../src/http/no-compression.js";
-import { success, info, fail } from "../ui.js";
+import { success, info, fail, confirm, isTTY } from "../ui.js";
 
 export interface ContactDeps {
   url: string;
@@ -69,13 +69,20 @@ export function registerWorker(program: Command): void {
     .command("set <address>")
     .description("Send alerts to this address, once you confirm it")
     .option("--url <url>", "Vega control plane URL (default: prod, or $VEGA_URL)")
-    .action((address: string, opts: { url?: string }) =>
+    .option("-y, --yes", "Agree to the terms without the prompt")
+    .action((address: string, opts: { url?: string; yes?: boolean }) =>
       run(async () => {
         const d = deps(opts, `vega worker contact set ${address}`);
+        // Stated before anything is sent: the request itself stores the address.
+        info(`Vega stores ${pc.bold(address.trim())} encrypted. It keeps it for up to 24 hours to send one`);
+        info("confirmation message, and after that only if you confirm, to email you when one of");
+        info(`your reproduction workers stops or reports again. Terms: ${pc.cyan(`${d.url}/privacy#worker-alerts`)}`);
+        if (!opts.yes && !(await confirm("Continue?"))) {
+          fail("aborted (no address sent).", isTTY ? undefined : [`vega worker contact set ${address} --yes`]);
+        }
         await contactSet(d, address);
         success(`Vega sends a confirmation message to ${pc.bold(address.trim())} if it can.`);
         info("  Alerts start once you follow the link in it. The link works for 24 hours.");
-        info(`  Confirming lets Vega store the address, encrypted, for these alerts only: ${pc.cyan(`${d.url}/privacy#worker-alerts`)}`);
       }),
     );
 
