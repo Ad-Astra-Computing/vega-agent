@@ -6,6 +6,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-11-20
+
 ### Added
 
 - `vega worker contact set`, `show` and `remove` manage the address the
