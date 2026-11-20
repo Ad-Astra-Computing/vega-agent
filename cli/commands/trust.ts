@@ -1,8 +1,7 @@
 import type { Command } from "commander";
-import { createInterface } from "node:readline/promises";
 import pc from "picocolors";
 import { requireCredential, authHeaders, safeError, type StoredCredential } from "../context.js";
-import { star, info, success, fail, jsonEvent, isTTY } from "../ui.js";
+import { star, info, success, fail, jsonEvent, isTTY, confirm } from "../ui.js";
 import { fetchUncompressed } from "../../src/http/no-compression.js";
 
 type Scope =
@@ -57,17 +56,6 @@ function scopeLabel(s: Scope): string {
       return `builds with verified provenance from the ${pc.bold(s.name)} flake`;
     case "org":
       return `builds with verified provenance from any ${pc.bold(s.name)} repo`;
-  }
-}
-
-async function confirm(question: string): Promise<boolean> {
-  if (!isTTY) return false; // never auto-confirm a security action in non-interactive use
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    const a = (await rl.question(`${question} [y/N] `)).trim().toLowerCase();
-    return a === "y" || a === "yes";
-  } finally {
-    rl.close();
   }
 }
 

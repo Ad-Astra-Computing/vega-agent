@@ -1,17 +1,9 @@
 import type { Command } from "commander";
 import pc from "picocolors";
-import {
-  requestDeviceCode,
-  pollAccessToken,
-  VEGA_GITHUB_CLIENT_ID,
-} from "../../src/agent/device-flow.js";
+import { githubDeviceToken } from "../github-auth.js";
 import { controlPlaneFor, saveCredential, credentialPath, safeError, saveR2Grant, r2GrantPath } from "../context.js";
 import { success, info, keyValues, fail, warn } from "../ui.js";
 import { fetchUncompressed } from "../../src/http/no-compression.js";
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
 
 export function registerLogin(program: Command): void {
   program
@@ -25,24 +17,7 @@ export function registerLogin(program: Command): void {
     )
     .action(async (opts: { url?: string; controlPlane?: string }) => {
       const url = controlPlaneFor(opts.url || opts.controlPlane);
-      const dc = await requestDeviceCode(VEGA_GITHUB_CLIENT_ID);
-      info(`\n  Open ${pc.cyan(dc.verificationUri)} and enter code:  ${pc.bold(dc.userCode)}\n`);
-      info("  Waiting for authorization...");
-
-      let interval = dc.interval;
-      const deadline = Date.now() + dc.expiresIn * 1000;
-      let ghToken: string | undefined;
-      while (Date.now() < deadline) {
-        await sleep(interval * 1000);
-        const r = await pollAccessToken(VEGA_GITHUB_CLIENT_ID, dc.deviceCode);
-        if (r.status === "token") {
-          ghToken = r.accessToken;
-          break;
-        }
-        if (r.status === "slow_down") interval = r.interval;
-        else if (r.status === "error") fail(`authorization failed: ${r.error}`);
-      }
-      if (ghToken === undefined) fail("device code expired before authorization.", ["vega login"]);
+      const ghToken = await githubDeviceToken("vega login");
 
       const res = await fetchUncompressed(`${url}/api/owner/enroll`, {
         method: "POST",

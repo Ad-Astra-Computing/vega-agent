@@ -6,6 +6,17 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+### Added
+
+- `vega worker contact set`, `show` and `remove` manage the address the
+  control plane emails when one of your reproduction workers stops
+  reporting, and again when it reports. Vega sends one confirmation
+  message first and nothing else until the address is confirmed.
+- The builder checks its Nix store's content after each periodic GC. A
+  build killed mid-write can leave a corrupted path registered valid on a
+  persistent runner's store; the runner stops, repairs on its next start
+  before it registers, and refuses to start if a path cannot be repaired.
+
 ## [0.22.3] - 2026-11-19
 
 ### Fixed

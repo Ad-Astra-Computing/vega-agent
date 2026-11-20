@@ -5,6 +5,7 @@
 // and vocabulary that never overstates ("accepted by your view", not "trusted";
 // "reproduced" only when Vega actually reproduced).
 
+import { createInterface } from "node:readline/promises";
 import pc from "picocolors";
 
 /** The Vega mark. Used sparingly: bare `vega`, help headers, success moments. */
@@ -150,4 +151,17 @@ export function keyValues(pairs: [string, string][]): void {
 /** Emit one NDJSON event line (for `--json`). */
 export function jsonEvent(obj: unknown): void {
   process.stdout.write(`${JSON.stringify(obj)}\n`);
+}
+
+/** A yes/no question. Never answers yes on its own: without a terminal it
+ * returns false, so a caller that must not proceed unasked offers --yes. */
+export async function confirm(question: string): Promise<boolean> {
+  if (!isTTY) return false;
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const a = (await rl.question(`${question} [y/N] `)).trim().toLowerCase();
+    return a === "y" || a === "yes";
+  } finally {
+    rl.close();
+  }
 }
