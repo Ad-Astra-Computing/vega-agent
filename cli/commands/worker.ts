@@ -14,6 +14,18 @@ export interface ContactDeps {
 
 const ADDRESS = /^[^\s@]+@[^\s@]+$/;
 
+/** The terms revision this build states, sent as `consent`. It is the privacy
+ * policy's effective date for worker alerts; the control plane refuses an
+ * address sent with any other, so a policy change needs a release that states
+ * the new terms. */
+export const WORKER_ALERT_TERMS = "2026-12-19";
+
+function parse(raw: string): string {
+  const address = raw.trim();
+  if (!ADDRESS.test(address) || address.length > 254) throw new Error(`${JSON.stringify(raw)} is not an email address`);
+  return address;
+}
+
 async function call(d: ContactDeps, method: string, body?: unknown): Promise<Response> {
   const token = await d.token();
   const res = await d.fetch(`${d.url}/api/worker/contact`, {
@@ -29,9 +41,26 @@ async function call(d: ContactDeps, method: string, body?: unknown): Promise<Res
 }
 
 export async function contactSet(d: ContactDeps, raw: string): Promise<void> {
-  const address = raw.trim();
-  if (!ADDRESS.test(address) || address.length > 254) throw new Error(`${JSON.stringify(raw)} is not an email address`);
-  await call(d, "POST", { address });
+  await call(d, "POST", { address: parse(raw), consent: WORKER_ALERT_TERMS });
+}
+
+/**
+ * The order is the point: the terms are shown, then agreed, and only then is
+ * there a GitHub sign-in or a request, because the request itself stores the
+ * address.
+ */
+export async function runContactSet(
+  d: ContactDeps,
+  raw: string,
+  o: { yes: boolean; ask(question: string): Promise<boolean>; say(line: string): void },
+): Promise<"sent" | "declined"> {
+  const address = parse(raw);
+  o.say(`Vega stores ${address} encrypted. It keeps it for up to 24 hours to send one`);
+  o.say("confirmation message, and after that only if you confirm, to email you when one of");
+  o.say(`your reproduction workers stops or reports again. Terms: ${d.url}/privacy#worker-alerts`);
+  if (!o.yes && !(await o.ask("Continue?"))) return "declined";
+  await contactSet(d, address);
+  return "sent";
 }
 
 export async function contactShow(d: ContactDeps): Promise<{ state: string; address?: string | null }> {
@@ -73,14 +102,10 @@ export function registerWorker(program: Command): void {
     .action((address: string, opts: { url?: string; yes?: boolean }) =>
       run(async () => {
         const d = deps(opts, `vega worker contact set ${address}`);
-        // Stated before anything is sent: the request itself stores the address.
-        info(`Vega stores ${pc.bold(address.trim())} encrypted. It keeps it for up to 24 hours to send one`);
-        info("confirmation message, and after that only if you confirm, to email you when one of");
-        info(`your reproduction workers stops or reports again. Terms: ${pc.cyan(`${d.url}/privacy#worker-alerts`)}`);
-        if (!opts.yes && !(await confirm("Continue?"))) {
+        const r = await runContactSet(d, address, { yes: opts.yes === true, ask: confirm, say: info });
+        if (r === "declined") {
           fail("aborted (no address sent).", isTTY ? undefined : [`vega worker contact set ${address} --yes`]);
         }
-        await contactSet(d, address);
         success(`Vega sends a confirmation message to ${pc.bold(address.trim())} if it can.`);
         info("  Alerts start once you follow the link in it. The link works for 24 hours.");
       }),
