@@ -590,6 +590,100 @@ start_periodic_maintenance() {
   ) &
 }
 
+# The builder's update check (garnix-ci spec 0008, section 5). The release
+# record is a static file on the docs site, so fetching it runs none of Vega's
+# code; like any request it reaches Cloudflare with this host's address and a
+# user agent naming the builder's version. Nothing here can stop the builder:
+# a failed fetch or a malformed record logs one line and changes nothing.
+RELEASES_URL="${VEGA_RELEASES_URL:-https://docs.vega-cache.dev/releases.json}"
+UPDATE_DOCS="https://docs.vega-cache.dev/heavy-builds#updating-your-builder"
+VERSION_RE='^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+
+update_check_enabled() {
+  local v="${VEGA_UPDATE_CHECK:-true}"
+  case "${v,,}" in false | 0 | off | no) return 1 ;; esac
+  return 0
+}
+
+# -1, 0 or 1 for two versions already known to match VERSION_RE.
+version_cmp() {
+  local a="${1#v}" b="${2#v}" i x y
+  IFS=. read -r -a x <<<"$a"
+  IFS=. read -r -a y <<<"$b"
+  for i in 0 1 2; do
+    ((x[i] < y[i])) && { echo -1; return; }
+    ((x[i] > y[i])) && { echo 1; return; }
+  done
+  echo 0
+}
+
+# The whole record, against the schema the control plane enforces.
+valid_release_record() {
+  jq -e '
+    def ver: type == "string" and test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$");
+    def req: . == null or (type == "object" and (keys == ["from", "reason", "version"])
+      and (.version | ver) and (.from | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"))
+      and (.reason | type == "string" and length >= 1 and length <= 200 and (test("[\\p{Cc}\\p{Cf}]") | not)));
+    type == "object" and (keys == ["repro-worker", "vega-agent"])
+    and (.["vega-agent"] | type == "object" and keys == ["latest", "required", "sha"]
+      and (.latest | ver) and (.sha | type == "string" and test("^[0-9a-f]{40}$")) and (.required | req))
+    and (.["repro-worker"] | type == "object" and keys == ["latest", "required"] and (.latest | ver) and (.required | req))
+  ' "$1" >/dev/null 2>&1 || return 1
+  local latest req
+  latest="$(jq -r '.["vega-agent"].latest' "$1")"
+  req="$(jq -r '.["vega-agent"].required.version // empty' "$1")"
+  [ -z "$req" ] || [ "$(version_cmp "$req" "$latest")" -le 0 ]
+}
+
+# current, behind, required, below-minimum or unknown, as spec 0008 section 2.
+version_state() {
+  local v="$1" rec="$2" today="$3" latest req from
+  [[ "$v" =~ $VERSION_RE ]] || { echo unknown; return; }
+  latest="$(jq -r '.["vega-agent"].latest' "$rec")"
+  req="$(jq -r '.["vega-agent"].required.version // empty' "$rec")"
+  from="$(jq -r '.["vega-agent"].required.from // empty' "$rec")"
+  if [ -n "$req" ] && [ "$(version_cmp "$v" "$req")" -lt 0 ]; then
+    [[ "$today" < "$from" ]] && echo required || echo below-minimum
+    return
+  fi
+  [ "$(version_cmp "$v" "$latest")" -lt 0 ] && echo behind || echo current
+}
+
+update_check_once() {
+  local v="${VEGA_BUILDER_VERSION:-}" rec rc=0
+  rec="$(mktemp)"
+  curl -fsS --max-time 10 --max-filesize 65536 -A "vega-builder/${v:-unknown}" -o "$rec" "$RELEASES_URL" || rc=$?
+  if [ "$rc" != 0 ]; then
+    echo "vega-builder: update check could not fetch ${RELEASES_URL} (curl exit ${rc})" >&2
+    rm -f "$rec"; return 0
+  fi
+  if ! valid_release_record "$rec"; then
+    echo "vega-builder: update check: ${RELEASES_URL} is not a valid release record" >&2
+    rm -f "$rec"; return 0
+  fi
+  local latest req from reason today state
+  latest="$(jq -r '.["vega-agent"].latest' "$rec")"
+  req="$(jq -r '.["vega-agent"].required.version // empty' "$rec")"
+  from="$(jq -r '.["vega-agent"].required.from // empty' "$rec")"
+  reason="$(jq -r '.["vega-agent"].required.reason // empty' "$rec")"
+  today="$(date -u +%F)"
+  state="$(version_state "$v" "$rec" "$today")"
+  rm -f "$rec"
+  case "$state" in
+    behind) echo "vega-builder: vega-agent ${latest} is available; this builder runs ${v}. ${UPDATE_DOCS}" >&2 ;;
+    required) echo "vega-builder: UPDATE REQUIRED: Vega requires vega-agent ${req} from ${from} and this builder runs ${v}. ${reason} ${UPDATE_DOCS}" >&2 ;;
+    below-minimum) echo "vega-builder: UPDATE REQUIRED: Vega requires vega-agent ${req} since ${from} and this builder runs ${v}. ${reason} ${UPDATE_DOCS}" >&2 ;;
+    unknown) echo "vega-builder: update check: this builder's version (${v:-not set}) cannot be compared with vega-agent ${latest}" >&2 ;;
+  esac
+  return 0
+}
+
+# At start and then every 24 hours, in the background.
+start_update_check() {
+  update_check_enabled || { echo "vega-builder: update check off (VEGA_UPDATE_CHECK)" >&2; return 0; }
+  ( while true; do update_check_once; sleep 86400; done ) &
+}
+
 run_runner() {
   : "${GITHUB_OWNER:?set GITHUB_OWNER}"
   : "${GITHUB_REPOSITORY:?set GITHUB_REPOSITORY (name only, not owner/name)}"
@@ -671,6 +765,7 @@ run_runner() {
   fi
 
   start_periodic_maintenance
+  start_update_check
 
   exec "$RUNNER_DIST/bin/run.sh"
 }
