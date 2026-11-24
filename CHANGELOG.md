@@ -6,6 +6,12 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+### Added
+
+- `vega worker status` lists your own reproduction workers: each one's
+  version, whether it is current, behind or below the version Vega
+  requires, and when it last reported.
+
 ## [0.24.0] - 2026-11-24
 
 ### Added
