@@ -621,18 +621,24 @@ version_cmp() {
 valid_release_record() {
   jq -e '
     def ver: type == "string" and test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$");
+    # A real calendar date: one that does not round-trip, such as 30 February,
+    # is refused.
+    def day: type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+      and ((try (strptime("%Y-%m-%d") | mktime | strftime("%Y-%m-%d")) catch "") == .);
     def req: . == null or (type == "object" and (keys == ["from", "reason", "version"])
-      and (.version | ver) and (.from | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"))
-      and (.reason | type == "string" and length >= 1 and length <= 200 and (test("[\\p{Cc}\\p{Cf}]") | not)));
+      and (.version | ver) and (.from | day)
+      and (.reason | type == "string" and length >= 1 and length <= 200 and (test("[\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}]") | not)));
     type == "object" and (keys == ["repro-worker", "vega-agent"])
     and (.["vega-agent"] | type == "object" and keys == ["latest", "required", "sha"]
       and (.latest | ver) and (.sha | type == "string" and test("^[0-9a-f]{40}$")) and (.required | req))
     and (.["repro-worker"] | type == "object" and keys == ["latest", "required"] and (.latest | ver) and (.required | req))
   ' "$1" >/dev/null 2>&1 || return 1
-  local latest req
-  latest="$(jq -r '.["vega-agent"].latest' "$1")"
-  req="$(jq -r '.["vega-agent"].required.version // empty' "$1")"
-  [ -z "$req" ] || [ "$(version_cmp "$req" "$latest")" -le 0 ]
+  local c latest req
+  for c in vega-agent repro-worker; do
+    latest="$(jq -r --arg c "$c" '.[$c].latest' "$1")"
+    req="$(jq -r --arg c "$c" '.[$c].required.version // empty' "$1")"
+    [ -z "$req" ] || [ "$(version_cmp "$req" "$latest")" -le 0 ] || return 1
+  done
 }
 
 # current, behind, required, below-minimum or unknown, as spec 0008 section 2.
@@ -652,7 +658,7 @@ version_state() {
 update_check_once() {
   local v="${VEGA_BUILDER_VERSION:-}" rec rc=0
   rec="$(mktemp)"
-  curl -fsS --max-time 10 --max-filesize 65536 -A "vega-builder/${v:-unknown}" -o "$rec" "$RELEASES_URL" || rc=$?
+  curl -fs --max-time 10 --max-filesize 65536 -A "vega-builder/${v:-unknown}" -o "$rec" "$RELEASES_URL" 2>/dev/null || rc=$?
   if [ "$rc" != 0 ]; then
     echo "vega-builder: update check could not fetch ${RELEASES_URL} (curl exit ${rc})" >&2
     rm -f "$rec"; return 0

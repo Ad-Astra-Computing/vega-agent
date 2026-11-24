@@ -46,6 +46,9 @@ for bad in \
   '{"vega-agent": {"latest": "0.23.0", "sha": "cccccccccccccccccccccccccccccccccccccccc", "required": {"version": "0.24.0", "from": "2026-12-01", "reason": "x"}}, "repro-worker": {"latest": "0.2.0", "required": null}}' \
   '{"vega-agent": {"latest": "0.23.0", "sha": "cccccccccccccccccccccccccccccccccccccccc", "required": {"version": "0.22.0", "from": "soon", "reason": "x"}}, "repro-worker": {"latest": "0.2.0", "required": null}}' \
   '{"vega-agent": {"latest": "0.23.0", "sha": "cccccccccccccccccccccccccccccccccccccccc", "required": {"version": "0.22.0", "from": "2026-12-01", "reason": "a\u202eb"}}, "repro-worker": {"latest": "0.2.0", "required": null}}' \
+  '{"vega-agent": {"latest": "0.23.0", "sha": "cccccccccccccccccccccccccccccccccccccccc", "required": {"version": "0.22.0", "from": "2026-12-01", "reason": "a\u2028b"}}, "repro-worker": {"latest": "0.2.0", "required": null}}' \
+  '{"vega-agent": {"latest": "0.23.0", "sha": "cccccccccccccccccccccccccccccccccccccccc", "required": {"version": "0.22.0", "from": "2026-02-30", "reason": "x"}}, "repro-worker": {"latest": "0.2.0", "required": null}}' \
+  '{"vega-agent": {"latest": "0.23.0", "sha": "cccccccccccccccccccccccccccccccccccccccc", "required": null}, "repro-worker": {"latest": "0.2.0", "required": {"version": "0.3.0", "from": "2026-12-01", "reason": "x"}}}' \
   'not json'; do
   echo "$bad" >"$work/bad.json"
   valid_release_record "$work/bad.json" && fail "accepted: $bad" || ok "rejects a malformed record"
@@ -60,7 +63,10 @@ check_with() {
       case "$1" in -o) out="$2"; shift ;; esac
       shift
     done
-    [ "$body" = "FAIL" ] && return 22
+    if [ "$body" = "FAIL" ]; then
+      echo "curl: (22) The requested URL returned error: 503" >&2
+      return 22
+    fi
     printf '%s' "$body" >"$out"
   }
   VEGA_BUILDER_VERSION="$version" update_check_once 2>&1
@@ -81,7 +87,7 @@ out="$(check_with "$(record 0.23.0 '{"version": "0.23.0", "from": "2000-01-01", 
   && ok "says loudly when an update is required" || fail "required: rc=$rc out=$out"
 
 out="$(check_with FAIL 0.22.3)"; rc=$?
-[ "$rc" = 0 ] && [[ "$out" == *"could not fetch"* ]] && ok "a failed fetch logs one line and does not fail" || fail "fetch failure: rc=$rc out=$out"
+[ "$rc" = 0 ] && [[ "$out" == *"could not fetch"* ]] && [ "$(wc -l <<<"$out")" = 1 ] && ok "a failed fetch logs one line and does not fail" || fail "fetch failure: rc=$rc out=$out"
 
 out="$(check_with 'not json' 0.22.3)"; rc=$?
 [ "$rc" = 0 ] && [[ "$out" == *"not a valid release record"* ]] && ok "an invalid record logs one line and does not fail" || fail "invalid: rc=$rc out=$out"
