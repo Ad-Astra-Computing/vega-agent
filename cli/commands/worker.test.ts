@@ -142,6 +142,17 @@ describe("vega worker status (spec 0008)", () => {
     expect(out).toMatch(/box-b\s+microvm\s+0\.1\.0\s+below minimum, given no work\s+silent, 1 h 30 min ago/);
   });
 
+  it("prints nothing a worker reported that could drive the terminal", () => {
+    const hostile: WorkerStatus = {
+      release: { latest: "0.3.0", required: { version: "0.2.0", from: "2026-11-27", reason: "a\u001b]8;;x\u0007b" } },
+      workers: [{ label: "box\u001b[2J", deployment: "host\u202e", version: "0.1\u001b[31m", state: "unknown", lastSeen: NOW, reporting: true }],
+    };
+    const lines = statusLines(hostile, NOW);
+    for (const l of lines) expect(l).not.toMatch(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u);
+    const out = lines.join("\n");
+    expect(out).toContain("box[2J");
+  });
+
   it("says plainly when the account has no worker", () => {
     expect(statusLines({ release: { latest: "0.3.0" }, workers: [] }, NOW).join("\n")).toContain("No worker has reported under your account.");
   });

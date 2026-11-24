@@ -88,6 +88,12 @@ export async function workerStatus(d: ContactDeps): Promise<WorkerStatus> {
   return (await res.json()) as WorkerStatus;
 }
 
+/** Labels, versions and reasons are self-reported or server-supplied, so
+ * nothing that can drive the terminal or reorder text is printed. */
+function clean(v: string): string {
+  return v.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, "").slice(0, 120);
+}
+
 /** "2 min", "1 h 30 min", "3 d 4 h". */
 function span(ms: number): string {
   const m = Math.max(0, Math.round(ms / 60_000));
@@ -111,14 +117,14 @@ export function statusLines(r: WorkerStatus, now: number, color: (s: string, st:
   const req = r.release.required;
   const inForce = req !== undefined && now >= Date.parse(`${req.from}T00:00:00Z`);
   const head =
-    `Latest vega-repro-worker: ${r.release.latest}.` +
-    (req === undefined ? "" : ` Vega requires ${req.version} ${inForce ? "since" : "from"} ${req.from}: ${req.reason}`);
+    `Latest vega-repro-worker: ${clean(r.release.latest)}.` +
+    (req === undefined ? "" : ` Vega requires ${clean(req.version)} ${inForce ? "since" : "from"} ${clean(req.from)}: ${clean(req.reason)}`);
   if (r.workers.length === 0) return [head, "", "No worker has reported under your account."];
   const rows = r.workers.map((w) => [
-    w.label,
-    w.deployment || "unstated",
-    w.version || "-",
-    STATE_TEXT[w.state] ?? w.state,
+    clean(w.label),
+    clean(w.deployment) || "unstated",
+    clean(w.version) || "-",
+    STATE_TEXT[w.state] ?? clean(String(w.state)),
     `${w.reporting ? "reporting" : "silent"}, ${span(now - w.lastSeen)} ago`,
     w.state,
   ]);
