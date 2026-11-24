@@ -73,6 +73,7 @@ vega mcp                    # read-only MCP server for AI agents (verify, risk, 
 vega view                   # print the nix.conf substituter + keys for your view
 vega trust add github:alice # trust a builder (scoped --package/--flake/--org, revocable)
 vega diagnose               # which derivations block your candidates, and why
+vega worker status          # your reproduction workers: version, update state, last report
 vega worker contact set <a> # email you when a reproduction worker stops or needs an update
 vega status                 # auth + connectivity
 vega doctor                 # diagnose nix / zstd / auth, and check for a newer release

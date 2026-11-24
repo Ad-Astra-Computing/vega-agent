@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { contactSet, contactShow, contactRemove, runContactSet, WORKER_ALERT_TERMS, type ContactDeps } from "./worker.js";
+import { contactSet, contactShow, contactRemove, runContactSet, statusLines, workerStatus, WORKER_ALERT_TERMS, type ContactDeps, type WorkerStatus } from "./worker.js";
 
 function deps(respond: (req: Request) => Response): { d: ContactDeps; seen: Request[] } {
   const seen: Request[] = [];
@@ -108,5 +108,41 @@ describe("vega worker contact set: terms before sending", () => {
     const { d, events, say } = traced();
     await expect(runContactSet(d, "nope", { yes: false, ask: async () => true, say })).rejects.toThrow(/email address/);
     expect(events).toEqual([]);
+  });
+});
+
+describe("vega worker status (spec 0008)", () => {
+  const NOW = Date.parse("2026-11-28T12:00:00Z");
+  const body: WorkerStatus = {
+    release: { latest: "0.3.0", required: { version: "0.2.0", from: "2026-11-27", reason: "Fixes a store leak." } },
+    workers: [
+      { label: "box-a", deployment: "host", version: "0.3.0", state: "current", lastSeen: NOW - 120_000, reporting: true },
+      { label: "box-b", deployment: "microvm", version: "0.1.0", state: "below-minimum", lastSeen: NOW - 5_400_000, reporting: false },
+    ],
+  };
+
+  it("asks the status route with the GitHub token", async () => {
+    const seen: { url: string; auth: string | null }[] = [];
+    const d = {
+      url: "https://vega.test",
+      token: async () => "gh",
+      fetch: (async (url: string, init?: RequestInit) => {
+        seen.push({ url, auth: new Headers(init?.headers).get("authorization") });
+        return new Response(JSON.stringify(body), { status: 200 });
+      }) as typeof fetch,
+    };
+    expect(await workerStatus(d)).toEqual(body);
+    expect(seen).toEqual([{ url: "https://vega.test/api/worker/status", auth: "Bearer gh" }]);
+  });
+
+  it("states the release once, then one line per worker with what to do", () => {
+    const out = statusLines(body, NOW).join("\n");
+    expect(out).toContain("Latest vega-repro-worker: 0.3.0. Vega requires 0.2.0 since 2026-11-27: Fixes a store leak.");
+    expect(out).toMatch(/box-a\s+host\s+0\.3\.0\s+current\s+reporting, 2 min ago/);
+    expect(out).toMatch(/box-b\s+microvm\s+0\.1\.0\s+below minimum, given no work\s+silent, 1 h 30 min ago/);
+  });
+
+  it("says plainly when the account has no worker", () => {
+    expect(statusLines({ release: { latest: "0.3.0" }, workers: [] }, NOW).join("\n")).toContain("No worker has reported under your account.");
   });
 });
