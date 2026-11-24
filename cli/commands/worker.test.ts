@@ -85,6 +85,15 @@ describe("vega worker contact set: terms before sending", () => {
     expect(events.slice(0, firstAsk).join(" ")).toContain("/privacy#worker-alerts");
   });
 
+  it("names every kind of message the address receives before asking", async () => {
+    const { d, events, say } = traced();
+    await runContactSet(d, "jane@example.org", { yes: false, ask: async () => (events.push("ask"), false), say });
+    const terms = events.slice(0, events.indexOf("ask")).map((e) => e.replace(/^say:/, "")).join(" ");
+    expect(terms).toMatch(/stops reporting/);
+    expect(terms).toMatch(/reports again/);
+    expect(terms).toMatch(/each version Vega requires, when one of them runs an older release/);
+  });
+
   it("with --yes still shows the terms before signing in or sending", async () => {
     const { d, events, say } = traced();
     const r = await runContactSet(d, "jane@example.org", { yes: true, ask: async () => { throw new Error("must not ask"); }, say });
