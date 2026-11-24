@@ -235,6 +235,16 @@ Notes:
   signed by it, so an unavailable or wrong cache is a miss, not a trust change.
 - The bundled runner has auto-update disabled (`--disableupdate`); rebuild and
   re-pull the image to update the runner version.
+- At start and every 24 hours the entrypoint checks whether this image is
+  current. It fetches the public release record at
+  `https://docs.vega-cache.dev/releases.json` (10 second timeout, 64 KiB
+  cap), validates it and compares the image's own version. It logs one line
+  when a newer release exists, and an `UPDATE REQUIRED` line when Vega has
+  declared a minimum this image is below, with the date and the reason. It
+  updates nothing and never stops the runner; a failed fetch logs one line.
+  The request carries no Vega identifier, but like any web request it reaches
+  Cloudflare with this host's address and a user agent of
+  `vega-builder/<version>`. `VEGA_UPDATE_CHECK=false` turns it off.
 
 ## Point the workflow at it
 

@@ -6,6 +6,21 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+### Added
+
+- The builder checks at start and every 24 hours whether a newer image
+  exists, from the public release record on docs.vega-cache.dev, and logs
+  one line when it does and a louder one when Vega requires a newer version
+  than it runs. It updates nothing and cannot stop the runner.
+  `VEGA_UPDATE_CHECK=false` turns it off.
+
+### Changed
+
+- `vega worker contact set` states that the address also receives one
+  message for each version Vega requires when one of your workers runs an
+  older release, as well as the messages when a worker stops reporting and
+  when it reports again.
+
 ## [0.23.0] - 2026-11-20
 
 ### Added
