@@ -13,6 +13,12 @@ describe("builder entrypoint", () => {
     expect(out).toContain("all entrypoint sandbox tests passed");
   });
 
+  it("update check: version states, record validation and what it logs (bash)", () => {
+    const script = fileURLToPath(new URL("./update-check.test.sh", import.meta.url));
+    const out = execFileSync("bash", [script], { encoding: "utf8" });
+    expect(out).toContain("all update-check tests passed");
+  });
+
   it("run_runner clears GITHUB_RUNNER_TOKEN/GITHUB_PAT before run.sh on every path (bash)", () => {
     const script = fileURLToPath(new URL("./entrypoint-credentials.test.sh", import.meta.url));
     const out = execFileSync("bash", [script], { encoding: "utf8" });

@@ -1,0 +1,20 @@
+{
+  "comment": "Version states (spec 0008, section 2). The builder's shell comparison reads a copy of this table, so both implementations answer the same cases.",
+  "cases": [
+    { "version": "0.23.0", "latest": "0.23.0", "required": null, "today": "2026-11-20", "state": "current" },
+    { "version": "v0.23.0", "latest": "0.23.0", "required": null, "today": "2026-11-20", "state": "current" },
+    { "version": "0.24.0", "latest": "0.23.0", "required": null, "today": "2026-11-20", "state": "current" },
+    { "version": "0.22.3", "latest": "0.23.0", "required": null, "today": "2026-11-20", "state": "behind" },
+    { "version": "0.9.9", "latest": "0.10.0", "required": null, "today": "2026-11-20", "state": "behind" },
+    { "version": "0.22.3", "latest": "0.23.0", "required": { "version": "0.22.3", "from": "2026-11-19" }, "today": "2026-11-20", "state": "behind" },
+    { "version": "0.22.2", "latest": "0.23.0", "required": { "version": "0.22.3", "from": "2026-11-27" }, "today": "2026-11-20", "state": "required" },
+    { "version": "0.22.2", "latest": "0.23.0", "required": { "version": "0.22.3", "from": "2026-11-27" }, "today": "2026-11-26", "state": "required" },
+    { "version": "0.22.2", "latest": "0.23.0", "required": { "version": "0.22.3", "from": "2026-11-27" }, "today": "2026-11-27", "state": "below-minimum" },
+    { "version": "0.22.2", "latest": "0.23.0", "required": { "version": "0.22.3", "from": "2026-11-19" }, "today": "2026-11-20", "state": "below-minimum" },
+    { "version": "", "latest": "0.23.0", "required": null, "today": "2026-11-20", "state": "unknown" },
+    { "version": "0.23", "latest": "0.23.0", "required": null, "today": "2026-11-20", "state": "unknown" },
+    { "version": "0.23.0-rc1", "latest": "0.23.0", "required": null, "today": "2026-11-20", "state": "unknown" },
+    { "version": "00.23.0", "latest": "0.23.0", "required": null, "today": "2026-11-20", "state": "unknown" },
+    { "version": "dev", "latest": "0.23.0", "required": { "version": "0.22.3", "from": "2026-11-19" }, "today": "2026-11-20", "state": "unknown" }
+  ]
+}

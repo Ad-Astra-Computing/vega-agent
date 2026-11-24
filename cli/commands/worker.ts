@@ -57,7 +57,9 @@ export async function runContactSet(
   const address = parse(raw);
   o.say(`Vega stores ${address} encrypted. It keeps it for up to 24 hours to send one`);
   o.say("confirmation message, and after that only if you confirm, to email you when one of");
-  o.say(`your reproduction workers stops or reports again. Terms: ${d.url}/privacy#worker-alerts`);
+  o.say("your reproduction workers stops reporting or reports again. It also sends one");
+  o.say("message for each version Vega requires, when one of them runs an older release.");
+  o.say(`Terms: ${d.url}/privacy#worker-alerts`);
   if (!o.yes && !(await o.ask("Continue?"))) return "declined";
   await contactSet(d, address);
   return "sent";
