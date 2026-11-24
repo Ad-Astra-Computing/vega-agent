@@ -6,6 +6,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-11-24
+
 ### Added
 
 - The builder checks at start and every 24 hours whether a newer image
