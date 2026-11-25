@@ -6,6 +6,12 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+### Added
+
+- `vega builder enroll`, `list` and `remove` manage your self-hosted
+  builders. Enrolling states what a builder's heartbeat sends and asks,
+  then writes a heartbeat-only credential to a file only you can read.
+
 ## [0.25.0] - 2026-11-25
 
 ### Added
