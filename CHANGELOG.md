@@ -8,6 +8,12 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ### Added
 
+- With `VEGA_BUILDER_CREDENTIAL_FILE` pointing at a credential from
+  `vega builder enroll`, the builder reports to Vega once a minute while its
+  runner is up, with its version and that it runs in a container, so its owner
+  can be told when it stops. The credential is sent on standard input, never
+  in arguments or the log. A refused credential stops the heartbeat with
+  what to do.
 - `vega builder enroll`, `list` and `remove` manage your self-hosted
   builders. Enrolling states what a builder's heartbeat sends and asks,
   then writes a heartbeat-only credential to a file only you can read.

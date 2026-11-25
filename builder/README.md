@@ -246,6 +246,35 @@ Notes:
   Cloudflare with this host's address and a user agent of
   `vega-builder/<version>`. `VEGA_UPDATE_CHECK=false` turns it off.
 
+## Know when it stops
+
+A builder that stops leaves your jobs queued on GitHub, and GitHub tells no one.
+Enrol the builder with Vega and it can say when it goes quiet:
+
+```
+vega builder enroll rack-1     # writes ./vega-builder-rack-1.credential, mode 0600
+```
+
+Mount that file read-only and point the builder at it:
+
+```
+-v "$PWD/vega-builder-rack-1.credential:/run/vega/builder.credential:ro" \
+-e VEGA_BUILDER_CREDENTIAL_FILE=/run/vega/builder.credential \
+```
+
+While its runner is up, the builder then reports to Vega once a minute with its
+version and that it runs in a container, nothing else. The credential can send
+these reports and nothing more: it cannot claim work, attest or upload. Turn on
+worker alerts with `vega worker contact set` to be emailed when it stops.
+`vega builder list` shows your builders, and `vega builder remove rack-1`
+revokes its credential at once.
+
+Jobs on a self-hosted runner run as root in the container, so a job can read
+the credential file; with it, a job could send heartbeats for this builder and
+nothing else. The entrypoint keeps it out of the process list and the log.
+`VEGA_TELEMETRY=false` turns the heartbeat off, and then Vega cannot tell you
+the builder stopped.
+
 ## Point the workflow at it
 
 In your repo's workflow, change the job (or its matrix entry) from

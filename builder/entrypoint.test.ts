@@ -19,6 +19,12 @@ describe("builder entrypoint", () => {
     expect(out).toContain("all update-check tests passed");
   });
 
+  it("builder heartbeat: credential file, report, loop and refusals (bash)", () => {
+    const script = fileURLToPath(new URL("./builder-heartbeat.test.sh", import.meta.url));
+    const out = execFileSync("bash", [script], { encoding: "utf8" });
+    expect(out).toContain("all builder-heartbeat tests passed");
+  });
+
   it("run_runner clears GITHUB_RUNNER_TOKEN/GITHUB_PAT before run.sh on every path (bash)", () => {
     const script = fileURLToPath(new URL("./entrypoint-credentials.test.sh", import.meta.url));
     const out = execFileSync("bash", [script], { encoding: "utf8" });
