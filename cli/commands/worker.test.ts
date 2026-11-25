@@ -210,7 +210,7 @@ describe("vega fleet status (spec 0009)", () => {
   });
 
   it("never tells a builder below the minimum that Vega gives it no work, since GitHub assigns its jobs", () => {
-    const low = { ...both, builders: [{ ...both.builders[0]!, version: "0.1.0", state: "below-minimum" as const }] };
+    const low = { ...both, builders: [{ ...both.builders![0]!, version: "0.1.0", state: "below-minimum" as const }] };
     const out = fleetLines(low, NOW).join("\n");
     expect(out).toMatch(/rack-1\s+container\s+0\.1\.0\s+below minimum, update now\s+reporting/);
     expect(out).not.toMatch(/rack-1.*given no work/);
