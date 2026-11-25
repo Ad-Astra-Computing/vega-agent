@@ -135,11 +135,34 @@ describe("vega worker status (spec 0008)", () => {
     expect(seen).toEqual([{ url: "https://vega.test/api/worker/status", auth: "Bearer gh" }]);
   });
 
-  it("states the release once, then one line per worker with what to do", () => {
-    const out = statusLines(body, NOW).join("\n");
-    expect(out).toContain("Latest vega-repro-worker: 0.3.0. Vega requires 0.2.0 since 2026-11-27: Fixes a store leak.");
-    expect(out).toMatch(/box-a\s+host\s+0\.3\.0\s+current\s+reporting, 2 min ago/);
-    expect(out).toMatch(/box-b\s+microvm\s+0\.1\.0\s+below minimum, given no work\s+silent, 1 h 30 min ago/);
+  it("leads with a summary, then the release, then an aligned table", () => {
+    const out = statusLines(body, NOW);
+    expect(out[0]).toBe("2 reproduction workers, 1 reporting");
+    expect(out[1]).toBe("Latest vega-repro-worker 0.3.0. Vega requires 0.2.0 since 27 Nov 2026: Fixes a store leak.");
+    expect(out[2]).toBe("");
+    expect(out[3]).toMatch(/^WORKER\s+DEPLOYMENT\s+VERSION\s+STATE\s+STATUS\s+LAST REPORT$/);
+    expect(out[4]).toMatch(/^box-a\s+host\s+0\.3\.0\s+current\s+reporting\s+2 min ago$/);
+    expect(out[5]).toMatch(/^box-b\s+microvm\s+0\.1\.0\s+below minimum, given no work\s+silent\s+1 h 30 min ago$/);
+    // Columns line up: each header starts where its cells do.
+    expect(out[3]!.indexOf("STATE")).toBe(out[4]!.indexOf("current"));
+    expect(out[3]!.indexOf("LAST REPORT")).toBe(out[5]!.indexOf("1 h 30 min ago"));
+  });
+
+  it("closes with what to do when a worker needs an update, and says nothing when none does", () => {
+    expect(statusLines(body, NOW).at(-1)).toBe(
+      "1 worker needs an update: https://docs.vega-cache.dev/contribute#updating-your-worker",
+    );
+    const fine: WorkerStatus = { release: { latest: "0.3.0" }, workers: [body.workers[0]!] };
+    expect(statusLines(fine, NOW).join("\n")).not.toContain("needs an update");
+  });
+
+  it("colours what needs attention when a style is given", () => {
+    const tag = (n: string) => (s: string) => `<${n}>${s}</${n}>`;
+    const out = statusLines(body, NOW, { title: tag("b"), header: tag("g"), good: tag("ok"), warn: tag("w"), bad: tag("x"), dim: tag("d") }).join("\n");
+    expect(out).toContain("<b>2 reproduction workers, 1 reporting</b>");
+    expect(out).toContain("<ok>current");
+    expect(out).toContain("<x>below minimum, given no work");
+    expect(out).toContain("<w>silent");
   });
 
   it("prints nothing a worker reported that could drive the terminal", () => {
@@ -154,6 +177,7 @@ describe("vega worker status (spec 0008)", () => {
   });
 
   it("says plainly when the account has no worker", () => {
-    expect(statusLines({ release: { latest: "0.3.0" }, workers: [] }, NOW).join("\n")).toContain("No worker has reported under your account.");
+    const out = statusLines({ release: { latest: "0.3.0" }, workers: [] }, NOW);
+    expect(out[0]).toBe("No reproduction worker has reported under your account.");
   });
 });

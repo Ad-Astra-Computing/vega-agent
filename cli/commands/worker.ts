@@ -3,7 +3,7 @@ import pc from "picocolors";
 import { controlPlaneFor, safeError } from "../context.js";
 import { githubDeviceToken } from "../github-auth.js";
 import { fetchUncompressed } from "../../src/http/no-compression.js";
-import { success, info, fail, confirm, isTTY } from "../ui.js";
+import { success, info, fail, confirm, isTTY, star, jsonEvent } from "../ui.js";
 
 export interface ContactDeps {
   url: string;
@@ -112,27 +112,76 @@ const STATE_TEXT: Record<VersionState, string> = {
   unknown: "version not reported",
 };
 
-/** The status as lines, colour applied by the caller's terminal check. */
-export function statusLines(r: WorkerStatus, now: number, color: (s: string, st: VersionState) => string = (s) => s): string[] {
+const UPDATE_GUIDE = "https://docs.vega-cache.dev/contribute#updating-your-worker";
+
+/** How the status is painted. Plain by default, so tests and pipes read it as is. */
+export interface StatusStyle {
+  title(s: string): string;
+  header(s: string): string;
+  good(s: string): string;
+  warn(s: string): string;
+  bad(s: string): string;
+  dim(s: string): string;
+}
+
+const PLAIN: StatusStyle = { title: (s) => s, header: (s) => s, good: (s) => s, warn: (s) => s, bad: (s) => s, dim: (s) => s };
+
+/** "27 Nov 2026" from a YYYY-MM-DD date. */
+function day(d: string): string {
+  const t = Date.parse(`${d}T00:00:00Z`);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || !Number.isFinite(t)) return clean(d);
+  const x = new Date(t);
+  return `${x.getUTCDate()} ${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][x.getUTCMonth()]} ${x.getUTCFullYear()}`;
+}
+
+/**
+ * The status as lines: a summary, the release, an aligned table, and what to
+ * do when a worker needs an update. Padding is applied before colour, so the
+ * columns line up whether or not the terminal shows colour.
+ */
+export function statusLines(r: WorkerStatus, now: number, style: StatusStyle = PLAIN): string[] {
   const req = r.release.required;
   const inForce = req !== undefined && now >= Date.parse(`${req.from}T00:00:00Z`);
-  const head =
-    `Latest vega-repro-worker: ${clean(r.release.latest)}.` +
-    (req === undefined ? "" : ` Vega requires ${clean(req.version)} ${inForce ? "since" : "from"} ${clean(req.from)}: ${clean(req.reason)}`);
-  if (r.workers.length === 0) return [head, "", "No worker has reported under your account."];
-  const rows = r.workers.map((w) => [
-    clean(w.label),
-    clean(w.deployment) || "unstated",
-    clean(w.version) || "-",
-    STATE_TEXT[w.state] ?? clean(String(w.state)),
-    `${w.reporting ? "reporting" : "silent"}, ${span(now - w.lastSeen)} ago`,
-    w.state,
-  ]);
-  const width = (i: number) => Math.max(...rows.map((x) => x[i]!.length));
-  const lines = rows.map((x) =>
-    [0, 1, 2].map((i) => x[i]!.padEnd(width(i))).join("  ") + "  " + color(x[3]!.padEnd(width(3)), x[5] as VersionState) + "  " + x[4],
-  );
-  return [head, "", ...lines];
+  const release =
+    `Latest vega-repro-worker ${clean(r.release.latest)}.` +
+    (req === undefined ? "" : ` Vega requires ${clean(req.version)} ${inForce ? "since" : "from"} ${day(req.from)}: ${clean(req.reason)}`);
+  if (r.workers.length === 0) {
+    return [style.title("No reproduction worker has reported under your account."), style.dim(release)];
+  }
+  const n = r.workers.length;
+  const live = r.workers.filter((w) => w.reporting).length;
+  const head = ["WORKER", "DEPLOYMENT", "VERSION", "STATE", "STATUS", "LAST REPORT"];
+  const rows = r.workers.map((w) => ({
+    cells: [
+      clean(w.label),
+      clean(w.deployment) || "unstated",
+      clean(w.version) || "-",
+      STATE_TEXT[w.state] ?? clean(String(w.state)),
+      w.reporting ? "reporting" : "silent",
+      `${span(now - w.lastSeen)} ago`,
+    ],
+    w,
+  }));
+  const width = head.map((h, i) => Math.max(h.length, ...rows.map((x) => x.cells[i]!.length)));
+  const pad = (cells: string[]) => cells.map((c, i) => (i === cells.length - 1 ? c : c.padEnd(width[i]!)));
+  const stateColor = (st: VersionState) =>
+    st === "current" ? style.good : st === "behind" || st === "unknown" ? style.warn : style.bad;
+  const lines = [
+    style.title(`${n} reproduction worker${n === 1 ? "" : "s"}, ${live} reporting`),
+    style.dim(release),
+    "",
+    style.header(pad(head).join("  ")),
+    ...rows.map(({ cells, w }) => {
+      const p = pad(cells);
+      p[3] = stateColor(w.state)(p[3]!);
+      p[4] = (w.reporting ? style.good : style.warn)(p[4]!);
+      p[5] = style.dim(p[5]!);
+      return p.join("  ");
+    }),
+  ];
+  const stale = r.workers.filter((w) => w.state === "behind" || w.state === "required" || w.state === "below-minimum").length;
+  if (stale > 0) lines.push("", `${stale} worker${stale === 1 ? " needs" : "s need"} an update: ${UPDATE_GUIDE}`);
+  return lines;
 }
 
 export function registerWorker(program: Command): void {
@@ -141,12 +190,26 @@ export function registerWorker(program: Command): void {
     .command("status")
     .description("Your reproduction workers: version, whether it is current, and when each last reported")
     .option("--url <url>", "Vega control plane URL (default: prod, or $VEGA_URL)")
-    .action((opts: { url?: string }) =>
+    .option("--json", "output JSON")
+    .action((opts: { url?: string; json?: boolean }) =>
       run(async () => {
         const r = await workerStatus(deps(opts, "vega worker status"));
-        const paint = (s: string, st: VersionState) =>
-          st === "current" ? pc.green(s) : st === "behind" ? pc.yellow(s) : st === "unknown" ? pc.dim(s) : pc.red(s);
-        for (const line of statusLines(r, Date.now(), paint)) info(line);
+        if (opts.json) {
+          jsonEvent(r);
+          return;
+        }
+        const style: StatusStyle = {
+          title: (t) => star(pc.bold(t)),
+          header: pc.gray,
+          good: pc.green,
+          warn: pc.yellow,
+          bad: pc.red,
+          dim: pc.gray,
+        };
+        const lines = statusLines(r, Date.now(), style);
+        // The release line and the table sit under the starred title.
+        info(lines[0]!);
+        for (const line of lines.slice(1)) info(line === "" ? "" : `  ${line}`);
       }),
     );
 
