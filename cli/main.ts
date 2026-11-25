@@ -10,6 +10,7 @@ import { brandIntro } from "./ui.js";
 import { VERSION } from "./version.js";
 import { registerLogin } from "./commands/login.js";
 import { registerWorker } from "./commands/worker.js";
+import { registerBuilder } from "./commands/builder.js";
 import { registerLogout } from "./commands/logout.js";
 import { registerReport } from "./commands/report.js";
 import { registerWhoami } from "./commands/whoami.js";
@@ -68,6 +69,7 @@ registerMcp(program);
 registerInit(program);
 registerDiagnose(program);
 registerWorker(program);
+registerBuilder(program);
 
 async function run(): Promise<void> {
   // Bare `vega` shows an animated brand splash, then help (not an error).
