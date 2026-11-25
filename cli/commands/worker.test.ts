@@ -209,6 +209,13 @@ describe("vega fleet status (spec 0009)", () => {
     expect(out.indexOf("reproduction worker")).toBeLessThan(out.indexOf("builder,"));
   });
 
+  it("never tells a builder below the minimum that Vega gives it no work, since GitHub assigns its jobs", () => {
+    const low = { ...both, builders: [{ ...both.builders[0]!, version: "0.1.0", state: "below-minimum" as const }] };
+    const out = fleetLines(low, NOW).join("\n");
+    expect(out).toMatch(/rack-1\s+container\s+0\.1\.0\s+below minimum, update now\s+reporting/);
+    expect(out).not.toMatch(/rack-1.*given no work/);
+  });
+
   it("leaves out a kind the account has none of, and says so when it has neither", () => {
     expect(fleetLines({ ...both, builders: [] }, NOW).join("\n")).not.toContain("builder");
     expect(fleetLines({ ...both, workers: [] }, NOW).join("\n")).not.toContain("reproduction worker");

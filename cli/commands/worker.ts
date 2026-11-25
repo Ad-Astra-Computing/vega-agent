@@ -166,10 +166,12 @@ interface Kind {
   component: string;
   header: string;
   guide: string;
+  /** Vega withholds reproductions from a worker below the minimum; GitHub still gives a builder jobs. */
+  belowMinimum: string;
 }
 
-const WORKERS: Kind = { noun: "reproduction worker", short: "worker", component: "vega-repro-worker", header: "WORKER", guide: UPDATE_GUIDE };
-const BUILDERS: Kind = { noun: "builder", short: "builder", component: "vega-agent", header: "BUILDER", guide: BUILDER_UPDATE_GUIDE };
+const WORKERS: Kind = { noun: "reproduction worker", short: "worker", component: "vega-repro-worker", header: "WORKER", guide: UPDATE_GUIDE, belowMinimum: "below minimum, given no work" };
+const BUILDERS: Kind = { noun: "builder", short: "builder", component: "vega-agent", header: "BUILDER", guide: BUILDER_UPDATE_GUIDE, belowMinimum: "below minimum, update now" };
 
 function machineLines(k: Kind, release: Release, machines: MachineRow[], now: number, style: StatusStyle): string[] {
   const req = release.required;
@@ -188,7 +190,7 @@ function machineLines(k: Kind, release: Release, machines: MachineRow[], now: nu
       clean(w.label),
       clean(w.deployment) || "unstated",
       clean(w.version) || "-",
-      STATE_TEXT[w.state] ?? clean(String(w.state)),
+      w.state === "below-minimum" ? k.belowMinimum : (STATE_TEXT[w.state] ?? clean(String(w.state))),
       w.reporting ? "reporting" : "silent",
       `${span(now - w.lastSeen)} ago`,
     ],
