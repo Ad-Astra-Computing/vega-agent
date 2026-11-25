@@ -6,6 +6,12 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+### Changed
+
+- `vega worker contact set` names enrolled builders among the machines it
+  sends alerts about, and states terms revision 2026-12-19.2, which the
+  control plane now requires.
+
 ### Added
 
 - With `VEGA_BUILDER_CREDENTIAL_FILE` pointing at a credential from

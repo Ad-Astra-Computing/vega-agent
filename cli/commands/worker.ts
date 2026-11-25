@@ -14,11 +14,11 @@ export interface ContactDeps {
 
 const ADDRESS = /^[^\s@]+@[^\s@]+$/;
 
-/** The terms revision this build states, sent as `consent`. It is the privacy
- * policy's effective date for worker alerts; the control plane refuses an
- * address sent with any other, so a policy change needs a release that states
- * the new terms. */
-export const WORKER_ALERT_TERMS = "2026-12-19";
+/** The terms revision this build states, sent as `consent`: the privacy
+ * policy's effective date and the version of the alert terms within it (".2"
+ * names builders). The control plane refuses an address sent with any other,
+ * so a change to the terms needs a release that states them. */
+export const WORKER_ALERT_TERMS = "2026-12-19.2";
 
 function parse(raw: string): string {
   const address = raw.trim();
@@ -57,8 +57,9 @@ export async function runContactSet(
   const address = parse(raw);
   o.say(`Vega stores ${address} encrypted. It keeps it for up to 24 hours to send one`);
   o.say("confirmation message, and after that only if you confirm, to email you when one of");
-  o.say("your reproduction workers stops reporting or reports again. It also sends one");
-  o.say("message for each version Vega requires, when one of them runs an older release.");
+  o.say("your reproduction workers or enrolled builders stops reporting or reports again. It");
+  o.say("also sends one message for each version Vega requires, when one of them runs an older");
+  o.say("release.");
   o.say(`Terms: ${d.url}/privacy#worker-alerts`);
   if (!o.yes && !(await o.ask("Continue?"))) return "declined";
   await contactSet(d, address);
@@ -215,7 +216,7 @@ export function registerWorker(program: Command): void {
 
   const contact = worker
     .command("contact")
-    .description("Email alerts when one of your reproduction workers stops reporting")
+    .description("Email alerts when one of your reproduction workers or builders stops reporting")
     .addHelpText(
       "after",
       "\nEach command signs in with GitHub once; the GitHub token is used for that request and never stored.\n",

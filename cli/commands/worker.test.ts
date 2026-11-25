@@ -92,6 +92,7 @@ describe("vega worker contact set: terms before sending", () => {
     expect(terms).toMatch(/stops reporting/);
     expect(terms).toMatch(/reports again/);
     expect(terms).toMatch(/each version Vega requires, when one of them runs an older release/);
+    expect(terms).toMatch(/reproduction workers or enrolled builders/);
   });
 
   it("with --yes still shows the terms before signing in or sending", async () => {
@@ -179,5 +180,11 @@ describe("vega worker status (spec 0008)", () => {
   it("says plainly when the account has no worker", () => {
     const out = statusLines({ release: { latest: "0.3.0" }, workers: [] }, NOW);
     expect(out[0]).toBe("No reproduction worker has reported under your account.");
+  });
+});
+
+describe("the alert terms revision", () => {
+  it("is the one that names builders, which the control plane requires", () => {
+    expect(WORKER_ALERT_TERMS).toBe("2026-12-19.2");
   });
 });
