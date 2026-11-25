@@ -14,6 +14,9 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ### Added
 
+- `vega fleet status` lists your reproduction workers and your enrolled
+  builders, each kind with its own release, versions, update state and last
+  report. `vega worker status` still shows workers alone.
 - With `VEGA_BUILDER_CREDENTIAL_FILE` pointing at a credential from
   `vega builder enroll`, the builder reports to Vega once a minute while its
   runner is up, with its version and that it runs in a container, so its owner

@@ -9,7 +9,7 @@ import { Command } from "commander";
 import { brandIntro } from "./ui.js";
 import { VERSION } from "./version.js";
 import { registerLogin } from "./commands/login.js";
-import { registerWorker } from "./commands/worker.js";
+import { registerFleet, registerWorker } from "./commands/worker.js";
 import { registerBuilder } from "./commands/builder.js";
 import { registerLogout } from "./commands/logout.js";
 import { registerReport } from "./commands/report.js";
@@ -69,6 +69,7 @@ registerMcp(program);
 registerInit(program);
 registerDiagnose(program);
 registerWorker(program);
+registerFleet(program);
 registerBuilder(program);
 
 async function run(): Promise<void> {

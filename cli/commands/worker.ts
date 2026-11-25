@@ -76,9 +76,26 @@ export async function contactRemove(d: ContactDeps): Promise<void> {
 
 export type VersionState = "current" | "behind" | "required" | "below-minimum" | "unknown";
 
+export interface MachineRow {
+  label: string;
+  deployment: string;
+  version: string;
+  state: VersionState;
+  lastSeen: number;
+  reporting: boolean;
+}
+
+export interface Release {
+  latest: string;
+  required?: { version: string; from: string; reason: string };
+}
+
 export interface WorkerStatus {
-  release: { latest: string; required?: { version: string; from: string; reason: string } };
-  workers: { label: string; deployment: string; version: string; state: VersionState; lastSeen: number; reporting: boolean }[];
+  release: Release;
+  workers: MachineRow[];
+  /** Absent from a control plane that predates builders (spec 0009). */
+  builderRelease?: Release;
+  builders?: MachineRow[];
 }
 
 /** Your own reproduction workers, as the control plane last heard from them. */
@@ -114,6 +131,7 @@ const STATE_TEXT: Record<VersionState, string> = {
 };
 
 const UPDATE_GUIDE = "https://docs.vega-cache.dev/contribute#updating-your-worker";
+const BUILDER_UPDATE_GUIDE = "https://docs.vega-cache.dev/heavy-builds#updating-your-builder";
 
 /** How the status is painted. Plain by default, so tests and pipes read it as is. */
 export interface StatusStyle {
@@ -140,19 +158,32 @@ function day(d: string): string {
  * do when a worker needs an update. Padding is applied before colour, so the
  * columns line up whether or not the terminal shows colour.
  */
-export function statusLines(r: WorkerStatus, now: number, style: StatusStyle = PLAIN): string[] {
-  const req = r.release.required;
+interface Kind {
+  /** "reproduction worker" or "builder", in the summary. */
+  noun: string;
+  /** "worker" or "builder", in the update line. */
+  short: string;
+  component: string;
+  header: string;
+  guide: string;
+}
+
+const WORKERS: Kind = { noun: "reproduction worker", short: "worker", component: "vega-repro-worker", header: "WORKER", guide: UPDATE_GUIDE };
+const BUILDERS: Kind = { noun: "builder", short: "builder", component: "vega-agent", header: "BUILDER", guide: BUILDER_UPDATE_GUIDE };
+
+function machineLines(k: Kind, release: Release, machines: MachineRow[], now: number, style: StatusStyle): string[] {
+  const req = release.required;
   const inForce = req !== undefined && now >= Date.parse(`${req.from}T00:00:00Z`);
-  const release =
-    `Latest vega-repro-worker ${clean(r.release.latest)}.` +
+  const rel =
+    `Latest ${k.component} ${clean(release.latest)}.` +
     (req === undefined ? "" : ` Vega requires ${clean(req.version)} ${inForce ? "since" : "from"} ${day(req.from)}: ${clean(req.reason)}`);
-  if (r.workers.length === 0) {
-    return [style.title("No reproduction worker has reported under your account."), style.dim(release)];
+  if (machines.length === 0) {
+    return [style.title(`No ${k.noun} has reported under your account.`), style.dim(rel)];
   }
-  const n = r.workers.length;
-  const live = r.workers.filter((w) => w.reporting).length;
-  const head = ["WORKER", "DEPLOYMENT", "VERSION", "STATE", "STATUS", "LAST REPORT"];
-  const rows = r.workers.map((w) => ({
+  const n = machines.length;
+  const live = machines.filter((w) => w.reporting).length;
+  const head = [k.header, "DEPLOYMENT", "VERSION", "STATE", "STATUS", "LAST REPORT"];
+  const rows = machines.map((w) => ({
     cells: [
       clean(w.label),
       clean(w.deployment) || "unstated",
@@ -168,8 +199,8 @@ export function statusLines(r: WorkerStatus, now: number, style: StatusStyle = P
   const stateColor = (st: VersionState) =>
     st === "current" ? style.good : st === "behind" || st === "unknown" ? style.warn : style.bad;
   const lines = [
-    style.title(`${n} reproduction worker${n === 1 ? "" : "s"}, ${live} reporting`),
-    style.dim(release),
+    style.title(`${n} ${k.noun}${n === 1 ? "" : "s"}, ${live} reporting`),
+    style.dim(rel),
     "",
     style.header(pad(head).join("  ")),
     ...rows.map(({ cells, w }) => {
@@ -180,9 +211,71 @@ export function statusLines(r: WorkerStatus, now: number, style: StatusStyle = P
       return p.join("  ");
     }),
   ];
-  const stale = r.workers.filter((w) => w.state === "behind" || w.state === "required" || w.state === "below-minimum").length;
-  if (stale > 0) lines.push("", `${stale} worker${stale === 1 ? " needs" : "s need"} an update: ${UPDATE_GUIDE}`);
+  const stale = machines.filter((w) => w.state === "behind" || w.state === "required" || w.state === "below-minimum").length;
+  if (stale > 0) lines.push("", `${stale} ${k.short}${stale === 1 ? " needs" : "s need"} an update: ${k.guide}`);
   return lines;
+}
+
+/** The workers alone, as `vega worker status` prints them. */
+export function statusLines(r: WorkerStatus, now: number, style: StatusStyle = PLAIN): string[] {
+  return machineLines(WORKERS, r.release, r.workers, now, style);
+}
+
+/** Workers, then builders, one section each, leaving out a kind the account
+ * has none of. Each section's first line is its title. */
+export function fleetSections(r: WorkerStatus, now: number, style: StatusStyle = PLAIN): string[][] {
+  const builders = r.builders ?? [];
+  if (r.workers.length === 0 && builders.length === 0) {
+    return [[style.title("No worker or builder has reported under your account.")]];
+  }
+  const out: string[][] = [];
+  if (r.workers.length > 0) out.push(machineLines(WORKERS, r.release, r.workers, now, style));
+  if (builders.length > 0 && r.builderRelease !== undefined) out.push(machineLines(BUILDERS, r.builderRelease, builders, now, style));
+  return out;
+}
+
+export function fleetLines(r: WorkerStatus, now: number, style: StatusStyle = PLAIN): string[] {
+  return fleetSections(r, now, style).flatMap((sec, i) => (i === 0 ? sec : ["", ...sec]));
+}
+
+const STYLE: StatusStyle = {
+  title: (t) => star(pc.bold(t)),
+  header: pc.gray,
+  good: pc.green,
+  warn: pc.yellow,
+  bad: pc.red,
+  dim: pc.gray,
+};
+
+/** A section's starred title, then its lines indented beneath it. */
+function printSection(lines: string[]): void {
+  info(lines[0]!);
+  for (const line of lines.slice(1)) info(line === "" ? "" : `  ${line}`);
+}
+
+/** `vega fleet status`: your workers and your builders together. */
+export function registerFleet(program: Command): void {
+  const fleet = program.command("fleet").description("Your reproduction workers and self-hosted builders");
+  fleet
+    .command("status")
+    .description("Every worker and builder you run: version, whether it is current, and when each last reported")
+    .option("--url <url>", "Vega control plane URL (default: prod, or $VEGA_URL)")
+    .option("--json", "output JSON")
+    .action(async (opts: { url?: string; json?: boolean }) => {
+      try {
+        const r = await workerStatus({ url: controlPlaneFor(opts.url), token: () => githubDeviceToken("vega fleet status"), fetch: fetchUncompressed });
+        if (opts.json) {
+          jsonEvent(r);
+          return;
+        }
+        fleetSections(r, Date.now(), STYLE).forEach((sec, i) => {
+          if (i > 0) info("");
+          printSection(sec);
+        });
+      } catch (e) {
+        fail(e instanceof Error ? e.message : String(e));
+      }
+    });
 }
 
 export function registerWorker(program: Command): void {
@@ -199,18 +292,7 @@ export function registerWorker(program: Command): void {
           jsonEvent(r);
           return;
         }
-        const style: StatusStyle = {
-          title: (t) => star(pc.bold(t)),
-          header: pc.gray,
-          good: pc.green,
-          warn: pc.yellow,
-          bad: pc.red,
-          dim: pc.gray,
-        };
-        const lines = statusLines(r, Date.now(), style);
-        // The release line and the table sit under the starred title.
-        info(lines[0]!);
-        for (const line of lines.slice(1)) info(line === "" ? "" : `  ${line}`);
+        printSection(statusLines(r, Date.now(), STYLE));
       }),
     );
 

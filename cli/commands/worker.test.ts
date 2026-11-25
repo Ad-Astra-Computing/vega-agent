@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { contactSet, contactShow, contactRemove, runContactSet, statusLines, workerStatus, WORKER_ALERT_TERMS, type ContactDeps, type WorkerStatus } from "./worker.js";
+import { contactSet, contactShow, contactRemove, runContactSet, statusLines, fleetLines, workerStatus, WORKER_ALERT_TERMS, type ContactDeps, type WorkerStatus } from "./worker.js";
 
 function deps(respond: (req: Request) => Response): { d: ContactDeps; seen: Request[] } {
   const seen: Request[] = [];
@@ -186,5 +186,40 @@ describe("vega worker status (spec 0008)", () => {
 describe("the alert terms revision", () => {
   it("is the one that names builders, which the control plane requires", () => {
     expect(WORKER_ALERT_TERMS).toBe("2026-12-19.2");
+  });
+});
+
+describe("vega fleet status (spec 0009)", () => {
+  const NOW = Date.parse("2026-11-28T12:00:00Z");
+  const both: WorkerStatus = {
+    release: { latest: "0.3.0" },
+    workers: [{ label: "box-a", deployment: "host", version: "0.3.0", state: "current", lastSeen: NOW - 120_000, reporting: true }],
+    builderRelease: { latest: "0.26.0" },
+    builders: [{ label: "rack-1", deployment: "container", version: "0.24.0", state: "behind", lastSeen: NOW - 60_000, reporting: true }],
+  };
+
+  it("shows workers, then builders, each with its own release and update guide", () => {
+    const out = fleetLines(both, NOW).join("\n");
+    expect(out).toContain("1 reproduction worker, 1 reporting");
+    expect(out).toContain("Latest vega-repro-worker 0.3.0.");
+    expect(out).toContain("1 builder, 1 reporting");
+    expect(out).toContain("Latest vega-agent 0.26.0.");
+    expect(out).toMatch(/rack-1\s+container\s+0\.24\.0\s+update available\s+reporting\s+1 min ago/);
+    expect(out).toContain("1 builder needs an update: https://docs.vega-cache.dev/heavy-builds#updating-your-builder");
+    expect(out.indexOf("reproduction worker")).toBeLessThan(out.indexOf("builder,"));
+  });
+
+  it("leaves out a kind the account has none of, and says so when it has neither", () => {
+    expect(fleetLines({ ...both, builders: [] }, NOW).join("\n")).not.toContain("builder");
+    expect(fleetLines({ ...both, workers: [] }, NOW).join("\n")).not.toContain("reproduction worker");
+    expect(fleetLines({ release: { latest: "0.3.0" }, workers: [], builders: [] }, NOW)[0]).toBe(
+      "No worker or builder has reported under your account.",
+    );
+  });
+
+  it("works with a control plane that predates builders", () => {
+    const out = fleetLines({ release: both.release, workers: both.workers }, NOW).join("\n");
+    expect(out).toContain("1 reproduction worker, 1 reporting");
+    expect(out).not.toContain("builder");
   });
 });
