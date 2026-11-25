@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { writeFileSync } from "node:fs";
+import { closeSync, openSync, rmSync, writeSync } from "node:fs";
 import pc from "picocolors";
 import { controlPlaneFor, safeError } from "../context.js";
 import { githubDeviceToken } from "../github-auth.js";
@@ -39,18 +39,30 @@ export async function runBuilderEnroll(
 ): Promise<"enrolled" | "declined"> {
   if (!LABEL.test(label)) throw new Error("the label must be 1 to 64 letters, digits, dots, dashes or underscores");
   o.say(`Vega records the builder "${label}" under your GitHub account. Started with the`);
-  o.say("credential, it reports to Vega every minute: its version, that it runs in a container");
-  o.say("and whether its runner is up. Vega keeps no IP address or location for it.");
+  o.say("credential, it reports to Vega every minute while its runner is up: its version and");
+  o.say("that it runs in a container. Vega keeps no IP address or location for it.");
   o.say(`Terms: ${d.url}/privacy#builders`);
   if (!o.yes && !(await o.ask("Continue?"))) return "declined";
-  const res = await call(d, "POST", "/api/builder/enroll", { label });
-  const body = (await res.json()) as { credential: string };
+  // The file is claimed before the request: enrolling replaces any earlier
+  // credential for this label, so one that could not then be saved would leave
+  // the builder with none that works.
+  let fd: number;
   try {
-    writeFileSync(o.out, `${body.credential}\n`, { mode: 0o600, flag: "wx" });
+    fd = openSync(o.out, "wx", 0o600);
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "EEXIST") {
-      throw new Error(`${o.out} already exists; remove it or pass --out, then enrol again (this credential replaced any earlier one)`);
+      throw new Error(`${o.out} already exists; nothing was sent. Move it or pass --out, then enrol again`);
     }
+    throw e;
+  }
+  try {
+    const res = await call(d, "POST", "/api/builder/enroll", { label });
+    const body = (await res.json()) as { credential: string };
+    writeSync(fd, `${body.credential}\n`);
+    closeSync(fd);
+  } catch (e) {
+    closeSync(fd);
+    rmSync(o.out, { force: true });
     throw e;
   }
   return "enrolled";

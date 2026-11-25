@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runBuilderEnroll, builderList, builderRemove, type BuilderDeps } from "./builder.js";
@@ -33,7 +33,7 @@ describe("vega builder enroll (spec 0009)", () => {
     const r = await runBuilderEnroll(d, "rack", { out: join(dir, "c"), yes: false, ask: async () => (events.push("ask"), false), say });
     expect(r).toBe("declined");
     const before = events.slice(0, events.indexOf("ask")).join(" ");
-    expect(before).toMatch(/every minute/);
+    expect(before).toMatch(/every minute while its runner is up/);
     expect(before).toMatch(/no IP address/);
     expect(before).toContain("/privacy#builders");
     expect(events).not.toContain("token");
@@ -48,7 +48,24 @@ describe("vega builder enroll (spec 0009)", () => {
     expect(statSync(out).mode & 0o777).toBe(0o600);
     expect(await seen[0]!.json()).toEqual({ label: "rack" });
     expect(seen[0]!.headers.get("authorization")).toBe("Bearer gh");
+  });
+
+  it("refuses an existing file before asking for a credential, so the current one is not revoked", async () => {
+    const { d, events, say } = deps(ok);
+    const dir = mkdtempSync(join(tmpdir(), "vb-"));
+    const out = join(dir, "rack.credential");
+    writeFileSync(out, "the credential in use\n");
     await expect(runBuilderEnroll(d, "rack", { out, yes: true, ask: async () => true, say })).rejects.toThrow(/already exists/);
+    expect(events.filter((e) => e === "token" || e.startsWith("POST"))).toEqual([]);
+    expect(readFileSync(out, "utf8")).toBe("the credential in use\n");
+  });
+
+  it("leaves no empty file behind when the control plane refuses", async () => {
+    const { d, say } = deps(() => new Response(JSON.stringify({ error: "no" }), { status: 409 }));
+    const dir = mkdtempSync(join(tmpdir(), "vb-"));
+    const out = join(dir, "c");
+    await expect(runBuilderEnroll(d, "rack", { out, yes: true, ask: async () => true, say })).rejects.toThrow();
+    expect(existsSync(out)).toBe(false);
   });
 
   it("refuses a bad label before asking anything", async () => {
