@@ -690,6 +690,92 @@ start_update_check() {
   ( while true; do update_check_once; sleep 86400; done ) &
 }
 
+# The builder heartbeat (garnix-ci spec 0009): version and "container" once a
+# minute, so the owner can be told when it stops. Jobs here run as root and can
+# read the credential, which only sends heartbeats for this builder; it is kept
+# out of the process list and the log all the same.
+BUILDER_CONTROL_PLANE="${VEGA_URL:-$VEGA_CACHE_URL}"
+BUILDER_CRED_RE='^[A-Za-z0-9+/=]+\.[A-Za-z0-9._-]+:[A-Za-z0-9+/=]+$'
+
+builder_heartbeat_enabled() {
+  local v="${VEGA_TELEMETRY:-true}"
+  case "${v,,}" in false | 0 | off | no) return 1 ;; esac
+  [ -n "${VEGA_BUILDER_CREDENTIAL_FILE:-}" ]
+}
+
+# The credential from its file, or a failure with a line saying why.
+read_builder_credential() {
+  local f="$1" cred
+  if [ ! -f "$f" ] || [ ! -r "$f" ]; then
+    echo "vega-builder: builder credential file ${f} is missing or unreadable; no heartbeat" >&2
+    return 1
+  fi
+  if [ "$(wc -c <"$f")" -gt 4096 ]; then
+    echo "vega-builder: builder credential file ${f} is too large to be a credential; no heartbeat" >&2
+    return 1
+  fi
+  cred="$(head -n 1 "$f" | tr -d '[:space:]')"
+  # A worker or signer credential has the same shape, and the control plane
+  # would take its reports as that worker's or signer's: only a builder's will do.
+  if ! [[ "$cred" =~ $BUILDER_CRED_RE ]] || [[ "$(printf '%s' "${cred%%.*}" | base64 -d 2>/dev/null)" != vega-builder:v1:* ]]; then
+    echo "vega-builder: ${f} does not hold a builder credential; no heartbeat" >&2
+    return 1
+  fi
+  printf '%s' "$cred"
+}
+
+# One report; prints the HTTP status (000 when the request failed).
+builder_report_once() {
+  local cred="$1" v="${VEGA_BUILDER_VERSION:-}" body
+  [[ "$v" =~ $VERSION_RE ]] || v="unknown"
+  body="$(printf '{"version":"%s","deployment":"container"}' "$v")"
+  printf 'authorization: Bearer %s\n' "$cred" |
+    curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST -H @- \
+      -H 'content-type: application/json' -d "$body" "${BUILDER_CONTROL_PLANE}/api/fleet/report" 2>/dev/null ||
+    true
+}
+
+# Reports while the runner process is alive. A refused credential (revoked,
+# removed or expired) or a control plane that takes no builder reports ends
+# it, once, with what to do; a rate limit is waited out quietly.
+builder_heartbeat_loop() {
+  local runner_pid="$1" cred="$2" interval="${BUILDER_REPORT_INTERVAL:-60}" code said_ok=0 last_err=0 t
+  while kill -0 "$runner_pid" 2>/dev/null; do
+    code="$(builder_report_once "$cred")"
+    case "$code" in
+      200)
+        [ "$said_ok" = 0 ] && echo "vega-builder: builder heartbeat: reporting to Vega every ${interval}s" >&2
+        said_ok=1
+        ;;
+      401 | 403)
+        echo "vega-builder: builder heartbeat stopped: Vega refused the credential (removed, replaced or expired). Run vega builder enroll again and restart with the new file." >&2
+        return 0
+        ;;
+      404)
+        echo "vega-builder: builder heartbeat stopped: ${BUILDER_CONTROL_PLANE} does not take builder reports" >&2
+        return 0
+        ;;
+      429) ;;
+      *)
+        t="$(date +%s)"
+        if [ $((t - last_err)) -ge 3600 ]; then
+          echo "vega-builder: builder heartbeat: report failed (HTTP ${code}); retrying" >&2
+          last_err="$t"
+        fi
+        ;;
+    esac
+    sleep "$interval"
+  done
+}
+
+# Started just before the runner takes over this process, so $$ is the runner.
+start_builder_heartbeat() {
+  builder_heartbeat_enabled || return 0
+  local cred
+  cred="$(read_builder_credential "$VEGA_BUILDER_CREDENTIAL_FILE")" || return 0
+  builder_heartbeat_loop "$$" "$cred" &
+}
+
 run_runner() {
   : "${GITHUB_OWNER:?set GITHUB_OWNER}"
   : "${GITHUB_REPOSITORY:?set GITHUB_REPOSITORY (name only, not owner/name)}"
@@ -772,6 +858,7 @@ run_runner() {
 
   start_periodic_maintenance
   start_update_check
+  start_builder_heartbeat
 
   exec "$RUNNER_DIST/bin/run.sh"
 }
