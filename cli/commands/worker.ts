@@ -66,8 +66,22 @@ export async function runContactSet(
   return "sent";
 }
 
-export async function contactShow(d: ContactDeps): Promise<{ state: string; address?: string | null }> {
-  return (await (await call(d, "GET")).json()) as { state: string; address?: string | null };
+export interface ContactState {
+  state: string;
+  address?: string | null;
+  /** False for an address agreed under the worker-only terms; absent from an older control plane. */
+  builderAlerts?: boolean;
+}
+
+export async function contactShow(d: ContactDeps): Promise<ContactState> {
+  return (await (await call(d, "GET")).json()) as ContactState;
+}
+
+/** What to tell a donor whose address receives no builder alerts, or null. */
+export function builderAlertsNote(r: ContactState): string | null {
+  return r.state !== "none" && r.builderAlerts === false
+    ? "This address was set under earlier terms, so it receives no builder alerts. Run vega worker contact set again to add them."
+    : null;
 }
 
 export async function contactRemove(d: ContactDeps): Promise<void> {
@@ -346,6 +360,8 @@ export function registerWorker(program: Command): void {
         if (r.state === "none") info(`No alert address. Add one with ${pc.cyan("vega worker contact set <address>")}.`);
         else if (r.state === "pending") info(`${pc.bold(r.address ?? "The address")} is waiting for you to confirm it.`);
         else success(`Worker alerts go to ${pc.bold(r.address ?? "your confirmed address")}.`);
+        const note = builderAlertsNote(r);
+        if (note !== null) info(note);
       }),
     );
 

@@ -11,6 +11,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 - `vega worker contact set` names enrolled builders among the machines it
   sends alerts about, and states terms revision 2026-12-19.2, which the
   control plane now requires.
+- `vega worker contact show` says when the address was set under the earlier,
+  worker-only terms and so receives no builder alerts.
 
 ### Added
 

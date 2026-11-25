@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { contactSet, contactShow, contactRemove, runContactSet, statusLines, fleetLines, workerStatus, WORKER_ALERT_TERMS, type ContactDeps, type WorkerStatus } from "./worker.js";
+import { builderAlertsNote, contactSet, contactShow, contactRemove, runContactSet, statusLines, fleetLines, workerStatus, WORKER_ALERT_TERMS, type ContactDeps, type WorkerStatus } from "./worker.js";
 
 function deps(respond: (req: Request) => Response): { d: ContactDeps; seen: Request[] } {
   const seen: Request[] = [];
@@ -49,6 +49,13 @@ describe("vega worker contact", () => {
     const { d, seen } = deps(() => new Response(JSON.stringify({ state: "confirmed", address: "j***@example.org" })));
     expect(await contactShow(d)).toEqual({ state: "confirmed", address: "j***@example.org" });
     expect(seen[0]!.method).toBe("GET");
+  });
+
+  it("show says when the address predates builder alerts, and only then", () => {
+    expect(builderAlertsNote({ state: "confirmed", address: "j***@example.org", builderAlerts: false })).toMatch(/no builder alerts.*vega worker contact set/);
+    expect(builderAlertsNote({ state: "confirmed", builderAlerts: true })).toBeNull();
+    expect(builderAlertsNote({ state: "confirmed" })).toBeNull();
+    expect(builderAlertsNote({ state: "none", builderAlerts: false })).toBeNull();
   });
 
   it("remove sends DELETE and accepts 204", async () => {

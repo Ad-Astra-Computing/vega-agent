@@ -265,9 +265,13 @@ Mount that file read-only and point the builder at it:
 While its runner is up, the builder then reports to Vega once a minute with its
 version and that it runs in a container, nothing else. The credential can send
 these reports and nothing more: it cannot claim work, attest or upload. Turn on
-worker alerts with `vega worker contact set` to be emailed when it stops.
-`vega builder list` shows your builders, and `vega builder remove rack-1`
-revokes its credential at once.
+worker alerts with `vega worker contact set` to be emailed when it stops; an
+address set before builders could be enrolled must be set again, and
+`vega worker contact show` says when. `vega builder list` shows your builders,
+`vega fleet status` shows each one's version and last report, and
+`vega builder remove rack-1` revokes its credential at once. What to check
+when a builder stops is in
+[When your builder stops](https://docs.vega-cache.dev/heavy-builds#when-your-builder-stops).
 
 Jobs on a self-hosted runner run as root in the container, so a job can read
 the credential file; with it, a job could send heartbeats for this builder and
